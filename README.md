@@ -26,6 +26,35 @@ Built with SwiftUI, fully adapted to Liquid Glass design language, with complete
 - macOS Sequoia (15) or later
 - Support Architectures: Intel and Apple Silicon Macs
 
+## ⚠️ Important: Reset Pointer Color Before Using
+
+**For the app to work properly, you MUST reset the pointer outline color and fill color to default.**
+
+If custom pointer colors are set in macOS System Settings, Mousecape will not be able to apply cursors globally (animations may only work in the Dock area).
+
+### How to Reset Pointer Color
+
+1. Open **System Settings** → **Accessibility** → **Display**
+2. Find the **Pointer** section
+3. Click the **Reset Color** button
+4. Re-apply your cursor theme in Mousecape
+
+The pointer must use the default color scheme (white outline, black fill) for Mousecape to work correctly.
+
+## Latest Release (SwiftUI_v1.0.2)
+
+### Download
+
+**Release v1.0.2**: https://github.com/kianwoon/mousescape/releases/tag/v1.0.2
+
+This is the archived application restored from a local copy.
+
+### Installation
+
+1. Download `Mousecape.SwiftUI.zip` from the releases page
+2. Unzip and move `Mousecape.app` to `/Applications`
+3. Open the app and install the Helper Tool for persistence
+
 ## Latest Release (SwiftUI_v1.0.1)
 
 ### Major Update: Windows cursor conversion rewritten from Python to native Swift
