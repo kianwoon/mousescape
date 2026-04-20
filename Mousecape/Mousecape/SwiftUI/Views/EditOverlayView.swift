@@ -489,7 +489,7 @@ struct CursorDetailView: View {
                         HStack(spacing: 16) {
                             HStack {
                                 Text("X:")
-                                TextField("X", value: $hotspotX, format: .number.precision(.fractionLength(1)))
+                                TextField("X", value: $hotspotX, format: .number.precision(.fractionLength(2)))
                                     .textFieldStyle(.roundedBorder)
                                     .frame(width: 60)
                                     .accessibilityLabel("Hotspot X coordinate")
@@ -542,7 +542,7 @@ struct CursorDetailView: View {
                             }
                             HStack {
                                 Text("Y:")
-                                TextField("Y", value: $hotspotY, format: .number.precision(.fractionLength(1)))
+                                TextField("Y", value: $hotspotY, format: .number.precision(.fractionLength(2)))
                                     .textFieldStyle(.roundedBorder)
                                     .frame(width: 60)
                                     .accessibilityLabel("Hotspot Y coordinate")
@@ -713,14 +713,22 @@ struct CursorDetailView: View {
                             .font(.headline)
 
                         VStack(alignment: .leading, spacing: 8) {
-                            Text("Scale: \(cursorScale, specifier: "%.1f")x")
-                                .font(.subheadline)
-                                .monospacedDigit()
-                            Slider(value: $cursorScale, in: 0.5...64.0, step: 0.5) {
+                            HStack {
+                                Text("Scale:")
+                                    .font(.subheadline)
+                                TextField("1.0", value: $cursorScale, format: .number.precision(.fractionLength(1)))
+                                    .textFieldStyle(.roundedBorder)
+                                    .frame(width: 70)
+                                    .multilineTextAlignment(.trailing)
+                                    .font(.subheadline)
+                                Text("x")
+                                    .font(.subheadline)
+                            }
+                            Slider(value: $cursorScale, in: 0.5...96.0, step: 0.5) {
                             } minimumValueLabel: {
                                 Text("0.5x")
                             } maximumValueLabel: {
-                                Text("64x")
+                                Text("96x")
                             } onEditingChanged: { isEditing in
                                 guard !isEditing else { return }
                                 guard !isLoadingValues else { return }

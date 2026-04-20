@@ -15,7 +15,7 @@
 NS_ASSUME_NONNULL_BEGIN
 
 extern BOOL applyCursorForIdentifier(NSUInteger frameCount, CGFloat frameDuration, CGPoint hotSpot, CGSize size, NSArray *images, NSString *ident, NSUInteger repeatCount, BOOL skipSynonyms);
-extern BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL restore, BOOL customScaleMode, BOOL skipSynonyms, BOOL isSystemDefault);
+extern BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL restore, BOOL customScaleMode, BOOL skipSynonyms, BOOL isSystemDefault, float baseScale);
 extern BOOL applyCape(NSDictionary *dictionary);
 extern NSDictionary *applyCapeWithResult(NSDictionary *dictionary);
 extern BOOL applyCapeAtPath(NSString *path);

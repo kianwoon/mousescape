@@ -289,7 +289,7 @@ BOOL dumpCursorsToFile(NSString *path, BOOL (^progress)(NSUInteger current, NSUI
     float originalScale;
     CGSGetCursorScale(CGSMainConnectionID(), &originalScale);
     
-    CGSSetCursorScale(CGSMainConnectionID(), 16.0);
+    CGSSetCursorScale(CGSMainConnectionID(), 64.0);
     CGSHideCursor(CGSMainConnectionID());
 
     NSInteger total = 9 + 45;

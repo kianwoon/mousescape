@@ -158,12 +158,19 @@ struct GeneralSettingsView: View {
 
                 if scaleMode == .global {
                     VStack(alignment: .leading) {
-                        Text("\(String(localized:"Global Scale:")) \(cursorScale, specifier: "%.1f")x")
-                        Slider(value: $cursorScale, in: 0.5...16.0, step: 0.1) {
+                        HStack {
+                            Text("Global Scale:")
+                            TextField("1.0", value: $cursorScale, format: .number.precision(.fractionLength(1)))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 70)
+                                .multilineTextAlignment(.trailing)
+                            Text("x")
+                        }
+                        Slider(value: $cursorScale, in: 0.5...96.0, step: 0.1) {
                         } minimumValueLabel: {
                             Text("0.5x")
                         } maximumValueLabel: {
-                            Text("16.0x")
+                            Text("96.0x")
                         } onEditingChanged: { editing in
                             if !editing {
                                 // Scale saved via onChange below — no refreshSystemDefaultCursors()
@@ -489,7 +496,7 @@ struct AdvancedSettingsView: View {
                        let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
                         Text("Mousecape v\(version) (\(build))")
                     } else {
-                        Text("Mousecape v1.2.8")
+                        Text("Mousecape v1.3.1")
                     }
                 }
                 LabeledContent("System Requirements") {
@@ -657,19 +664,34 @@ struct CustomScaleView: View {
 
                     let currentScale = perCursorScales[selected.rawValue] ?? 1.0
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Scale: \(currentScale, specifier: "%.1f")x")
-                            .font(.headline)
+                        HStack {
+                            Text("Scale:")
+                                .font(.headline)
+                            TextField("1.0", value: Binding(
+                                get: { currentScale },
+                                set: { newValue in
+                                    perCursorScales[selected.rawValue] = newValue
+                                    savePerCursorScales()
+                                }
+                            ), format: .number.precision(.fractionLength(1)))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 70)
+                                .multilineTextAlignment(.trailing)
+                                .font(.headline)
+                            Text("x")
+                                .font(.headline)
+                        }
                         Slider(value: Binding(
                             get: { currentScale },
                             set: { newValue in
                                 perCursorScales[selected.rawValue] = newValue
                                 savePerCursorScales()
                             }
-                        ), in: 0.5...64.0, step: 0.5) {
+                        ), in: 0.5...96.0, step: 0.5) {
                         } minimumValueLabel: {
                             Text("0.5x")
                         } maximumValueLabel: {
-                            Text("64.0x")
+                            Text("96.0x")
                         } onEditingChanged: { isEditing in
                             if !isEditing {
                                 recalculateMaxScaleAndApply()

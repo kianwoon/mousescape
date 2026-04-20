@@ -35,7 +35,7 @@ void restoreCursorForIdentifier(NSString *ident) {
           cape ? "YES" : "NO");
 
     if (cape && registered) {
-        BOOL success = applyCapeForIdentifier(cape, restoreIdent, YES, NO, NO, NO);
+        BOOL success = applyCapeForIdentifier(cape, restoreIdent, YES, NO, NO, NO, 1.0f);
         MMLog("    Restore result: %s", success ? "SUCCESS" : "FAILED");
     } else {
         MMLog("    Skipped - no cape or not registered");

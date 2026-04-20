@@ -20,14 +20,14 @@ float cursorScale(void) {
 
 float defaultCursorScale(void) {
     float scale = [MCDefault(MCPreferencesCursorScaleKey) floatValue];
-    if (scale < .5 || scale > 16)
+    if (scale < .5 || scale > 96)
         scale = 1;
     return scale;
 }
 
 BOOL setCursorScale(float dbl) {
-    if (!isfinite(dbl) || dbl <= 0 || dbl > 16) {
-        MMLog(BOLD RED "Invalid cursor scale (must be 0 < scale <= 16)" RESET);
+    if (!isfinite(dbl) || dbl <= 0 || dbl > 96) {
+        MMLog(BOLD RED "Invalid cursor scale (must be 0 < scale <= 96)" RESET);
         return NO;
     } else if (CGSSetCursorScale(CGSMainConnectionID(), dbl) == noErr) {
         MMLog("Successfully set cursor scale!");

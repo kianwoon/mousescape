@@ -1,3 +1,26 @@
+### v1.3.1 - Improvement
+
+**This update improves the cursor scale and hotspot editing experience.**
+
+**Improvements:**
+
+- Added text input field next to scale sliders — you can now type an exact scale value or use the slider
+- Hotspot coordinates now support 2 decimal places for more precise positioning
+
+---
+
+### v1.3.0 - Bug Fix
+
+**This update fixes the cursor reset feature — "Reset System Cursor" now correctly restores macOS default cursors.**
+
+**Bug Fixes:**
+
+- Fixed "Reset System Cursor" not restoring macOS default cursors after applying a custom cursor theme
+- Fixed cursor backups not being created before applying a cape, causing reset to fail
+- Cleaned up redundant code in the Helper's session monitor
+
+---
+
 ### v1.2.9 - Bug Fix
 
 **This update fixes a bug where the cursor scale could auto-jump to 64x when MousecapeHelper is running.**

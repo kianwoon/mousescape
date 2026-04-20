@@ -94,9 +94,11 @@ static void UserSpaceChanged(SCDynamicStoreRef	store, CFArrayRef changedKeys, vo
             MMLog(BOLD RED "Application of cape failed" RESET);
         }
     } else {
-        MMLog("No cape configured for user");
-        // Refresh system defaults at the current scale to prevent pixelation
-        refreshSystemDefaultCursors();
+        // No cape configured — do nothing.
+        // Do NOT call refreshSystemDefaultCursors() here. Without an applied cape,
+        // there is no cursor scale to restore, and the 64x extraction boost can
+        // leave the WindowServer scale in a corrupted state on wake-from-sleep.
+        MMLog("No cape configured for user — skipping re-apply");
     }
 
     CFRelease(currentConsoleUser);
@@ -107,7 +109,7 @@ void reconfigurationCallback(CGDirectDisplayID display,
 	void *userInfo) {
     // Skip if refreshSystemDefaultCursors is mid-extraction at 64x.
     if (g_refreshingSystemDefaults) {
-        MMLog(YELLOW "Reconfig: refresh in progress, skipping" RESET);
+        MMLog(YELLOW "Reconfig: apply/refresh in progress, skipping" RESET);
         return;
     }
 
@@ -129,11 +131,29 @@ void reconfigurationCallback(CGDirectDisplayID display,
     MMLog("Cape path: %s", capePath ? capePath.UTF8String : "(none)");
 
     if (capePath) {
-        BOOL success = applyCapeAtPath(capePath);
-        MMLog("Apply result: %s", success ? "SUCCESS" : "FAILED");
+        // Give WindowServer time to settle after wake/reconfiguration.
+        // Without this delay, CGSSetCursorScale calls may be ignored or
+        // overridden by the WindowServer mid-initialization.
+        MMLog("Waiting 500ms for WindowServer to settle...");
+        usleep(500000); // 500 ms
+
+        // Retry up to 3 times on failure — the WindowServer may not be
+        // fully ready on the first attempt after wake-from-sleep.
+        int maxRetries = 3;
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            BOOL success = applyCapeAtPath(capePath);
+            MMLog("Apply attempt %d/%d: %s", attempt, maxRetries, success ? "SUCCESS" : "FAILED");
+            if (success) break;
+            if (attempt < maxRetries) {
+                MMLog("Retrying in 300ms...");
+                usleep(300000); // 300 ms
+            }
+        }
     } else {
-        // Refresh system defaults at the current scale to prevent pixelation
-        refreshSystemDefaultCursors();
+        // No cape applied — do nothing.  Avoid calling refreshSystemDefaultCursors()
+        // here because its 64x extraction boost can leave the scale stuck if the
+        // WindowServer is sluggish after wake.
+        MMLog("No cape configured — skipping re-apply after reconfiguration");
     }
 }
 
@@ -223,8 +243,11 @@ void listener(void) {
             BOOL applySuccess = applyCapeAtPath(initialCapePath);
             MMLog("Initial apply result: %s", applySuccess ? "SUCCESS" : "FAILED");
         } else {
-            MMLog("No cape configured - refreshing system defaults at current scale");
-            refreshSystemDefaultCursors();
+            // No cape configured — do nothing on startup.
+            // refreshSystemDefaultCursors() boosts scale to 64x for extraction, and on
+            // early boot the WindowServer may not be fully settled, causing the restore
+            // to fail and leaving the scale stuck at a wrong value.
+            MMLog("No cape configured — skipping initial refresh (system defaults are already active)");
         }
         CFRunLoopAddSource(CFRunLoopGetCurrent(), rls, kCFRunLoopDefaultMode);
         MMLog("Entering run loop...");
@@ -317,8 +340,13 @@ void startSessionMonitor(void) {
         BOOL applySuccess = applyCapeAtPath(initialCapePath);
         MMLog("Initial apply result: %s", applySuccess ? "SUCCESS" : "FAILED");
     } else {
-        MMLog("No cape configured - refreshing system defaults at current scale");
-        refreshSystemDefaultCursors();
+        // No cape configured — do nothing on startup.
+        // refreshSystemDefaultCursors() boosts scale to 64x for extraction, and on
+        // early boot the WindowServer may not be fully settled, causing the restore
+        // to fail and leaving the scale stuck at a wrong value.
+        // The session/display event callbacks (UserSpaceChanged, reconfigurationCallback)
+        // already skip when no cape is set for this same reason.
+        MMLog("No cape configured — skipping initial refresh (system defaults are already active)");
     }
     g_sessionMonitorRLS = rls;
     CFRunLoopAddSource(CFRunLoopGetMain(), rls, kCFRunLoopDefaultMode);
