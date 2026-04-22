@@ -13,6 +13,21 @@
 #import "MCDefs.h"
 #import "CGSCursor.h"
 #import <Cocoa/Cocoa.h>
+#import <os/log.h>
+
+// Unified log for Release visibility — all HLOG entries appear in Console.app
+// Filter: subsystem:com.sdmj76.Mousecape.helper
+static os_log_t hlog(void) {
+    static os_log_t log = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        log = os_log_create("com.sdmj76.Mousecape.helper", "session");
+    });
+    return log;
+}
+#define HLOG(fmt, ...) os_log_info(hlog(), fmt, ## __VA_ARGS__)
+#define HLOG_ERR(fmt, ...) os_log_error(hlog(), fmt, ## __VA_ARGS__)
+#define HLOG_SUCCESS(fmt, ...) os_log_info(hlog(), fmt, ## __VA_ARGS__)
 
 // Forward declaration for cleanup
 static void unregisterDisplayCallback(void);
@@ -67,6 +82,7 @@ static void UserSpaceChanged(SCDynamicStoreRef	store, CFArrayRef changedKeys, vo
         return;
     }
 
+    HLOG("UserSpaceChanged fired");
     MMLog("========================================");
     MMLog("=== USER SPACE CHANGED EVENT ===");
     MMLog("========================================");
@@ -90,6 +106,8 @@ static void UserSpaceChanged(SCDynamicStoreRef	store, CFArrayRef changedKeys, vo
     if (appliedPath) {
         BOOL success = applyCapeAtPath(appliedPath);
         MMLog("Apply result: %s", success ? "SUCCESS" : "FAILED");
+        if (success) { HLOG("UserSpaceChanged apply succeeded"); }
+        else { HLOG_ERR("UserSpaceChanged apply FAILED"); }
         if (!success) {
             MMLog(BOLD RED "Application of cape failed" RESET);
         }
@@ -134,8 +152,9 @@ void reconfigurationCallback(CGDirectDisplayID display,
         // Give WindowServer time to settle after wake/reconfiguration.
         // Without this delay, CGSSetCursorScale calls may be ignored or
         // overridden by the WindowServer mid-initialization.
-        MMLog("Waiting 500ms for WindowServer to settle...");
-        usleep(500000); // 500 ms
+        MMLog("Waiting 1000ms for WindowServer to settle...");
+        HLOG("Reconfiguration: waiting 1s for WindowServer to settle");
+        usleep(1000000); // 1000 ms
 
         // Retry up to 3 times on failure — the WindowServer may not be
         // fully ready on the first attempt after wake-from-sleep.
@@ -143,10 +162,12 @@ void reconfigurationCallback(CGDirectDisplayID display,
         for (int attempt = 1; attempt <= maxRetries; attempt++) {
             BOOL success = applyCapeAtPath(capePath);
             MMLog("Apply attempt %d/%d: %s", attempt, maxRetries, success ? "SUCCESS" : "FAILED");
+            if (success) { HLOG("Reconfiguration apply attempt %d/%d: success", attempt, maxRetries); }
+            else { HLOG_ERR("Reconfiguration apply attempt %d/%d: failed", attempt, maxRetries); }
             if (success) break;
             if (attempt < maxRetries) {
-                MMLog("Retrying in 300ms...");
-                usleep(300000); // 300 ms
+                MMLog("Retrying in 500ms...");
+                usleep(500000); // 500 ms
             }
         }
     } else {
@@ -335,10 +356,26 @@ void startSessionMonitor(void) {
     MMLog(BOLD CYAN "Listening for User changes" RESET);
 
     // Apply the cape for the user on load (if configured)
+    // Retry up to 5 times with increasing delay — at startup the WindowServer
+    // may not be ready, causing applyCapeAtPath to fail silently.
     NSString *initialCapePath = appliedCapePathForUser(NSUserName());
     if (initialCapePath) {
-        BOOL applySuccess = applyCapeAtPath(initialCapePath);
-        MMLog("Initial apply result: %s", applySuccess ? "SUCCESS" : "FAILED");
+        BOOL applySuccess = NO;
+        int maxStartupRetries = 5;
+        for (int attempt = 1; attempt <= maxStartupRetries; attempt++) {
+            applySuccess = applyCapeAtPath(initialCapePath);
+            MMLog("Initial apply attempt %d/%d: %s", attempt, maxStartupRetries, applySuccess ? "SUCCESS" : "FAILED");
+            if (applySuccess) { HLOG("Startup apply attempt %d/%d: success", attempt, maxStartupRetries); }
+            else { HLOG_ERR("Startup apply attempt %d/%d: failed", attempt, maxStartupRetries); }
+            if (applySuccess) break;
+            // Exponential backoff: 1s, 2s, 3s, 4s
+            double delaySec = (double)attempt;
+            MMLog("Retrying in %.0fs...", delaySec);
+            usleep((useconds_t)(delaySec * 1000000));
+        }
+        if (!applySuccess) {
+            HLOG_ERR("All %d startup apply attempts failed", maxStartupRetries);
+        }
     } else {
         // No cape configured — do nothing on startup.
         // refreshSystemDefaultCursors() boosts scale to 64x for extraction, and on
@@ -368,4 +405,17 @@ void stopSessionMonitor(void) {
         g_sessionMonitorRLS = NULL;
         MMLog("Session monitor run loop source removed");
     }
+}
+
+BOOL reapplyCapeForCurrentUser(void) {
+    HLOG("reapplyCapeForCurrentUser called");
+    NSString *capePath = appliedCapePathForUser(NSUserName());
+    if (!capePath) {
+        HLOG("No cape configured for current user");
+        return NO;
+    }
+    BOOL success = applyCapeAtPath(capePath);
+    if (success) { HLOG("Reapply succeeded"); }
+    else { HLOG_ERR("Reapply failed"); }
+    return success;
 }
