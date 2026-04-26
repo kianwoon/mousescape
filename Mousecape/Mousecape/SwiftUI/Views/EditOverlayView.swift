@@ -721,6 +721,26 @@ struct CursorDetailView: View {
                                     .frame(width: 70)
                                     .multilineTextAlignment(.trailing)
                                     .font(.subheadline)
+                                    .onSubmit {
+                                        guard !isLoadingValues else { return }
+                                        let clamped = min(max(0.5, cursorScale), 96.0)
+                                        cursorScale = clamped
+                                        let oldScale = appState.getPerCursorScale(for: cursor.identifier)
+                                        guard abs(oldScale - clamped) > 0.01 else { return }
+                                        appState.setPerCursorScale(clamped, for: cursor.identifier)
+                                        appState.registerUndo(
+                                            undo: { [weak cursor] in
+                                                guard let cursor = cursor else { return }
+                                                self.appState.setPerCursorScale(oldScale, for: cursor.identifier)
+                                                self.cursorScale = oldScale
+                                            },
+                                            redo: { [weak cursor] in
+                                                guard let cursor = cursor else { return }
+                                                self.appState.setPerCursorScale(clamped, for: cursor.identifier)
+                                                self.cursorScale = clamped
+                                            }
+                                        )
+                                    }
                                 Text("x")
                                     .font(.subheadline)
                             }

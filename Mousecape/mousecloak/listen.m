@@ -15,19 +15,12 @@
 #import <Cocoa/Cocoa.h>
 #import <os/log.h>
 
-// Unified log for Release visibility — all HLOG entries appear in Console.app
-// Filter: subsystem:com.sdmj76.Mousecape.helper
-static os_log_t hlog(void) {
-    static os_log_t log = NULL;
-    static dispatch_once_t once;
-    dispatch_once(&once, ^{
-        log = os_log_create("com.sdmj76.Mousecape.helper", "session");
-    });
-    return log;
-}
-#define HLOG(fmt, ...) os_log_info(hlog(), fmt, ## __VA_ARGS__)
-#define HLOG_ERR(fmt, ...) os_log_error(hlog(), fmt, ## __VA_ARGS__)
-#define HLOG_SUCCESS(fmt, ...) os_log_info(hlog(), fmt, ## __VA_ARGS__)
+// NSLog-based logging for reliable visibility in unified log and Console.app.
+// os_log with custom subsystems is not persisted for ad-hoc signed apps,
+// so we use NSLog which always appears under the default subsystem.
+#define HLOG(fmt, ...) NSLog(@"[MousecapeHelper] " fmt, ## __VA_ARGS__)
+#define HLOG_ERR(fmt, ...) NSLog(@"[MousecapeHelper][ERROR] " fmt, ## __VA_ARGS__)
+#define HLOG_SUCCESS(fmt, ...) NSLog(@"[MousecapeHelper] " fmt, ## __VA_ARGS__)
 
 // Forward declaration for cleanup
 static void unregisterDisplayCallback(void);
@@ -49,6 +42,7 @@ NSString *appliedCapePathForUser(NSString *user) {
     }
 
     NSString *ident = MCDefaultFor(@"MCAppliedCursor", user, (NSString *)kCFPreferencesCurrentHost);
+    HLOG("appliedCapePathForUser: user=%@, ident=%@", user, ident ?: @"(null)");
 
     // Validate identifier - remove any path traversal attempts
     if (ident && ([ident containsString:@"/"] || [ident containsString:@".."])) {
@@ -57,11 +51,13 @@ NSString *appliedCapePathForUser(NSString *user) {
     }
 
     if (!ident || ident.length == 0) {
+        HLOG("No MCAppliedCursor set for user %@", user);
         return nil;
     }
 
     NSString *appSupport = [home stringByAppendingPathComponent:@"Library/Application Support"];
     NSString *capePath = [[[appSupport stringByAppendingPathComponent:@"Mousecape/capes"] stringByAppendingPathComponent:ident] stringByAppendingPathExtension:@"cape"];
+    HLOG("Resolved cape path: %@", capePath);
 
     // Ensure the final path is within the expected directory
     NSString *standardPath = [capePath stringByStandardizingPath];
@@ -308,6 +304,7 @@ void startSessionMonitor(void) {
     MMLog("========================================");
     MMLog("=== SESSION MONITOR STARTED (in-app) ===");
     MMLog("========================================");
+    HLOG("startSessionMonitor called");
 
     SCDynamicStoreRef store = SCDynamicStoreCreate(NULL, CFSTR("com.apple.dts.ConsoleUser"), UserSpaceChanged, NULL);
     if (!store) {
