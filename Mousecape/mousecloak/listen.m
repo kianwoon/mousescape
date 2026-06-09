@@ -135,6 +135,20 @@ void reconfigurationCallback(CGDirectDisplayID display,
         return;
     }
 
+    // Cross-process storm breaker: if ANY apply (this process or the main app)
+    // happened in the last few seconds, this reconfiguration event is almost
+    // certainly a side effect of that apply's cursor-scale toggling — NOT a real
+    // monitor change. Re-applying here would re-toggle the scale and fire more
+    // events, sustaining the flashing/disappearing storm. Skip it.
+    // Genuine display changes and wake-from-sleep arrive well after this window
+    // (and wake also has its own NSWorkspace.didWakeNotification backup path).
+    double sinceApply = MCSecondsSinceLastApply();
+    if (sinceApply < 4.0) {
+        MMLog(YELLOW "Reconfig: skipping — cape applied %.1fs ago (self-induced event, not a real display change)" RESET, sinceApply);
+        HLOG("Reconfiguration: skipping, apply %.1fs ago (storm guard)", sinceApply);
+        return;
+    }
+
     MMLog("========================================");
     MMLog("=== DISPLAY RECONFIGURATION EVENT ===");
     MMLog("========================================");

@@ -25,6 +25,43 @@
 // Declared extern so listen.m callbacks can also check it.
 volatile BOOL g_refreshingSystemDefaults = NO;
 
+// Cross-process apply-recency stamp.
+// The per-process g_refreshingSystemDefaults guard cannot protect the Helper
+// from an apply happening in the MAIN APP's process (different process = own
+// global). On macOS 27 the cursor-scale toggling inside an apply emits display
+// reconfiguration events; without a cross-process signal the Helper reacts to
+// the main app's apply (and to its own apply's trailing events), re-applies,
+// which re-toggles the scale, which fires more events → a re-apply storm seen
+// as the cursor flashing/disappearing. We stamp a timestamp into the SHARED
+// preferences domain on every apply; reconfigurationCallback skips events that
+// arrive shortly after any apply (ours or the main app's).
+static NSString * const kMCLastApplyTimeKey = @"MCLastApplyTime";
+
+void MCStampApplyTime(void) {
+    double now = CFAbsoluteTimeGetCurrent();
+    CFPreferencesSetValue((__bridge CFStringRef)kMCLastApplyTimeKey,
+                          (__bridge CFNumberRef)@(now),
+                          (__bridge CFStringRef)kMCDomain,
+                          kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    // Synchronize so the OTHER process (Helper vs main app) sees it immediately.
+    CFPreferencesSynchronize((__bridge CFStringRef)kMCDomain,
+                             kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+}
+
+double MCSecondsSinceLastApply(void) {
+    // Pull the latest value written by either process before reading.
+    CFPreferencesSynchronize((__bridge CFStringRef)kMCDomain,
+                             kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    CFNumberRef ref = CFPreferencesCopyValue((__bridge CFStringRef)kMCLastApplyTimeKey,
+                                             (__bridge CFStringRef)kMCDomain,
+                                             kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    if (!ref) {
+        return 1.0e9; // never applied → effectively "long ago"
+    }
+    double last = [(__bridge_transfer NSNumber *)ref doubleValue];
+    return CFAbsoluteTimeGetCurrent() - last;
+}
+
 static BOOL MCRegisterImagesForCursorName(NSUInteger frameCount, CGFloat frameDuration, CGPoint hotSpot, CGSize size, NSArray *images, NSString *name) {
     char *cursorName = (char *)name.UTF8String;
     int seed = 0;
@@ -779,6 +816,9 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         return NO;
     }
     g_refreshingSystemDefaults = YES;
+    // Stamp at START so the Helper's reconfigurationCallback suppresses the
+    // reconfiguration events this apply emits while it is still running.
+    MCStampApplyTime();
 
     @try {
     @autoreleasepool {
@@ -937,6 +977,10 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         return YES;
     }
     } @finally {
+        // Stamp again at END so the trailing reconfiguration events (emitted
+        // after scale restore) are also inside the suppression window. This is
+        // what breaks the self-sustaining storm.
+        MCStampApplyTime();
         g_refreshingSystemDefaults = NO;
     }
 }
@@ -1186,6 +1230,7 @@ void refreshSystemDefaultCursors(void) {
         return;
     }
     g_refreshingSystemDefaults = YES;
+    MCStampApplyTime();
 
     @try {
         @autoreleasepool {
@@ -1246,6 +1291,7 @@ void refreshSystemDefaultCursors(void) {
         }
     }
     @finally {
+        MCStampApplyTime();
         g_refreshingSystemDefaults = NO;
     }
 }
