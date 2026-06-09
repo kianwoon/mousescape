@@ -41,19 +41,36 @@ If custom pointer colors are set in macOS System Settings, Mousecape will not be
 
 The pointer must use the default color scheme (white outline, black fill) for Mousecape to work correctly.
 
-## Latest Release (SwiftUI_v1.0.2)
+## Latest Release (SwiftUI_v1.0.3)
 
 ### Download
 
-**Release v1.0.2**: https://github.com/kianwoon/mousescape/releases/tag/v1.0.2
+**Release v1.0.3**: https://github.com/kianwoon/mousescape/releases/tag/v1.0.3
 
-This is the archived application restored from a local copy.
+Compatible with **macOS 27**.
+
+### What's New in v1.0.3
+
+- **macOS 27 compatibility**: fixed the cursor cape flashing / disappearing
+  intermittently when applying a cape from the main app. On macOS 27 the
+  cursor-scale changes inside an apply emit display-reconfiguration events;
+  the background Helper reacted to them and re-applied in a loop. A
+  cross-process recency guard now suppresses these self-induced events so a
+  single apply stays stable.
 
 ### Installation
 
 1. Download `Mousecape.SwiftUI.zip` from the releases page
 2. Unzip and move `Mousecape.app` to `/Applications`
 3. Open the app and install the Helper Tool for persistence
+
+## Previous Release (SwiftUI_v1.0.2)
+
+### Download
+
+**Release v1.0.2**: https://github.com/kianwoon/mousescape/releases/tag/v1.0.2
+
+This is the archived application restored from a local copy.
 
 ## Latest Release (SwiftUI_v1.0.1)
 
