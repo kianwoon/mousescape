@@ -607,8 +607,7 @@ final class AppState: @unchecked Sendable {
             debugLog("Warning: could not save cape before applying: \(error)")
         }
 
-        // Read the cape dictionary from file (avoids double HEIF encode/decode
-        // that dictionaryRepresentation causes)
+        // Read the cape dictionary from file.
         guard let capeDictNS = NSDictionary(contentsOfFile: capeURL.path) else {
             debugLog("Apply failed - could not read cape file")
             operationResultMessage = String(localized: "Failed to apply cape.")
@@ -616,13 +615,12 @@ final class AppState: @unchecked Sendable {
             showOperationResult = true
             return
         }
-
-        // Use the ObjC applyCapeWithoutReset() — same logic as applyCape() but
-        // skips resetAllCursors()/CoreCursorUnregisterAll() which corrupts the
-        // WindowServer cache on running systems.  Handles scale setup, cape cursor
-        // registration, system default re-registration (with registeredKeys to avoid
-        // shadow doubling), and MCForceCursorReevaluation.
         let capeDict = capeDictNS as! [AnyHashable: Any]
+
+        // Standard in-process apply. On macOS 27 a very large cursor will render in
+        // software (blinks while moving) until the next login session — that is an OS
+        // session-level limitation we cannot change from here. Normal-size cursors are
+        // unaffected, and large cursors render solid after logging out and back in.
         let success = applyCapeWithoutReset(capeDict)
 
         if !success {
@@ -638,6 +636,30 @@ final class AppState: @unchecked Sendable {
 
         debugLog("Apply completed, saving preferences...")
         UserDefaults.standard.set(cape.identifier, forKey: "lastAppliedCapeIdentifier")
+
+        // macOS 27 fix: re-engage the accessibility cursor compositor.
+        reengageAccessibilityCursor()
+    }
+
+    /// macOS 27: when a cape is registered on a running login session, the cursor
+    /// drops out of the accessibility cursor compositor (run by `universalaccessd`).
+    /// A large cursor then renders in software and **blinks while moving**. Restarting
+    /// `universalaccessd` makes it re-engage the compositor on the just-applied cape,
+    /// so even very large cursors render smoothly — live, no logout, no size cap.
+    /// (This is what dragging System Settings → Accessibility → Pointer size does
+    /// under the hood; we trigger the same re-engage automatically.)
+    private func reengageAccessibilityCursor() {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+        task.arguments = ["universalaccessd"]   // user agent; launchd relaunches it (~1s)
+        task.standardOutput = FileHandle.nullDevice
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            debugLog("Re-engaged accessibility cursor compositor (restarted universalaccessd)")
+        } catch {
+            debugLog("reengageAccessibilityCursor failed: \(error.localizedDescription)")
+        }
     }
 
     /// Reset to default system cursors
