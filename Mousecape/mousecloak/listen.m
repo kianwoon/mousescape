@@ -102,9 +102,13 @@ static void UserSpaceChanged(SCDynamicStoreRef	store, CFArrayRef changedKeys, vo
     if (appliedPath) {
         BOOL success = applyCapeAtPath(appliedPath);
         MMLog("Apply result: %s", success ? "SUCCESS" : "FAILED");
-        if (success) { HLOG("UserSpaceChanged apply succeeded"); }
-        else { HLOG_ERR("UserSpaceChanged apply FAILED"); }
-        if (!success) {
+        if (success) {
+            HLOG("UserSpaceChanged apply succeeded");
+            // macOS 27: re-engage the accessibility cursor compositor after a
+            // session-change re-apply (otherwise a large cursor blinks/vanishes).
+            reengageAccessibilityCursor();
+        } else {
+            HLOG_ERR("UserSpaceChanged apply FAILED");
             MMLog(BOLD RED "Application of cape failed" RESET);
         }
     } else {
@@ -174,7 +178,12 @@ void reconfigurationCallback(CGDirectDisplayID display,
             MMLog("Apply attempt %d/%d: %s", attempt, maxRetries, success ? "SUCCESS" : "FAILED");
             if (success) { HLOG("Reconfiguration apply attempt %d/%d: success", attempt, maxRetries); }
             else { HLOG_ERR("Reconfiguration apply attempt %d/%d: failed", attempt, maxRetries); }
-            if (success) break;
+            if (success) {
+                // macOS 27: re-engage the accessibility cursor compositor (wake/display
+                // change re-applies otherwise leave a large cursor blinking/gone).
+                reengageAccessibilityCursor();
+                break;
+            }
             if (attempt < maxRetries) {
                 MMLog("Retrying in 500ms...");
                 usleep(500000); // 500 ms
@@ -426,7 +435,11 @@ BOOL reapplyCapeForCurrentUser(void) {
         return NO;
     }
     BOOL success = applyCapeAtPath(capePath);
-    if (success) { HLOG("Reapply succeeded"); }
-    else { HLOG_ERR("Reapply failed"); }
+    if (success) {
+        HLOG("Reapply succeeded");
+        // macOS 27: re-engage the accessibility cursor compositor so a large cursor
+        // re-applied on wake renders smoothly instead of vanishing/blinking.
+        reengageAccessibilityCursor();
+    } else { HLOG_ERR("Reapply failed"); }
     return success;
 }

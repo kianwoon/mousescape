@@ -29,6 +29,10 @@ extern volatile BOOL g_refreshingSystemDefaults;
 extern void MCStampApplyTime(void);
 extern double MCSecondsSinceLastApply(void);
 
+// macOS 27: restart universalaccessd so the accessibility cursor compositor re-engages
+// on the just-applied cape (large cursors otherwise blink/vanish on a mid-session apply).
+extern void reengageAccessibilityCursor(void);
+
 NS_ASSUME_NONNULL_END
 
 #endif

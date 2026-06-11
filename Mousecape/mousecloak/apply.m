@@ -62,6 +62,30 @@ double MCSecondsSinceLastApply(void) {
     return CFAbsoluteTimeGetCurrent() - last;
 }
 
+// Re-engage the macOS accessibility cursor compositor by restarting universalaccessd.
+// On macOS 27, registering a cape on a running session detaches the cursor from the
+// accessibility cursor compositor (run by universalaccessd); a large cursor then
+// renders in software and blinks/vanishes while moving. Restarting universalaccessd
+// (a user agent — launchd relaunches it in ~1s) makes it re-engage the compositor on
+// the just-applied cape, so even very large cursors render smoothly — no logout.
+// Called by the Helper after wake/session/display re-applies (and by the main app
+// after an in-app apply). Same effect as nudging Accessibility → Pointer size.
+void reengageAccessibilityCursor(void) {
+    @try {
+        NSTask *task = [[NSTask alloc] init];
+        task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/killall"];
+        task.arguments = @[@"universalaccessd"];
+        task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+        task.standardError = [NSFileHandle fileHandleWithNullDevice];
+        NSError *err = nil;
+        [task launchAndReturnError:&err];
+        NSLog(@"[MousecapeHelper] reengageAccessibilityCursor: restarted universalaccessd%@",
+              err ? [NSString stringWithFormat:@" (error: %@)", err.localizedDescription] : @"");
+    } @catch (NSException *e) {
+        NSLog(@"[MousecapeHelper] reengageAccessibilityCursor exception: %@", e.reason);
+    }
+}
+
 static BOOL MCRegisterImagesForCursorName(NSUInteger frameCount, CGFloat frameDuration, CGPoint hotSpot, CGSize size, NSArray *images, NSString *name) {
     char *cursorName = (char *)name.UTF8String;
     int seed = 0;
