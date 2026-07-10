@@ -323,10 +323,12 @@ struct AppearanceSettingsView: View {
     @AppStorage("previewDisplayMode") private var previewDisplayMode = 0
     @State private var innerShadowEnabled: Bool = false
     @State private var outerGlowEnabled: Bool = false
+    @State private var outerShadowEnabled: Bool = false
     @Environment(AppState.self) private var appState
 
     private static let innerShadowKey = "MCInnerShadow"
     private static let outerGlowKey = "MCOuterGlow"
+    private static let outerShadowKey = "MCOuterShadow"
     private static let preferenceDomain = "com.sdmj76.Mousecape"
 
     var body: some View {
@@ -368,6 +370,15 @@ struct AppearanceSettingsView: View {
                 Text("Adds a soft glow around the cursor for better visibility on any background.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Toggle("Outer Shadow", isOn: $outerShadowEnabled)
+                    .onChange(of: outerShadowEnabled) { _, newValue in
+                        saveOuterShadow(newValue)
+                    }
+
+                Text("Adds a dark shadow around the cursor for contrast on light backgrounds.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
@@ -379,6 +390,9 @@ struct AppearanceSettingsView: View {
             }
             if let value = CFPreferencesCopyAppValue(Self.outerGlowKey as CFString, Self.preferenceDomain as CFString) {
                 outerGlowEnabled = (value as? NSNumber)?.boolValue ?? false
+            }
+            if let value = CFPreferencesCopyAppValue(Self.outerShadowKey as CFString, Self.preferenceDomain as CFString) {
+                outerShadowEnabled = (value as? NSNumber)?.boolValue ?? false
             }
         }
     }
@@ -392,6 +406,12 @@ struct AppearanceSettingsView: View {
     private func saveOuterGlow(_ enabled: Bool) {
         let intValue = enabled ? 1 : 0
         CFPreferencesSetAppValue(Self.outerGlowKey as CFString, intValue as CFNumber, Self.preferenceDomain as CFString)
+        CFPreferencesAppSynchronize(Self.preferenceDomain as CFString)
+    }
+
+    private func saveOuterShadow(_ enabled: Bool) {
+        let intValue = enabled ? 1 : 0
+        CFPreferencesSetAppValue(Self.outerShadowKey as CFString, intValue as CFNumber, Self.preferenceDomain as CFString)
         CFPreferencesAppSynchronize(Self.preferenceDomain as CFString)
     }
 }

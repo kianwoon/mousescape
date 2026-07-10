@@ -23,6 +23,13 @@ extern void refreshSystemDefaultCursors(void);
 extern BOOL applyCapeWithoutReset(NSDictionary *dictionary);
 extern volatile BOOL g_refreshingSystemDefaults;
 
+// Restarts com.apple.universalaccessd (the Accessibility pointer-enlargement
+// compositor) so it recomposites against the freshly-registered cursor.
+// applyCapeWithoutReset() already calls this on every successful apply — do
+// not call it separately elsewhere, or the daemon restarts twice per apply.
+// No-op when pointer enlargement is off.
+extern void reengageAccessibilityCursorCompositor(void);
+
 NS_ASSUME_NONNULL_END
 
 #endif

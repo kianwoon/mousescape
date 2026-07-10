@@ -14,6 +14,7 @@
 #import "MCDefs.h"
 #import "innerShadow.h"
 #import "outerGlow.h"
+#import "outerShadow.h"
 #import "scale.h"
 #import <unistd.h>
 #import <math.h>
@@ -353,6 +354,7 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
     BOOL lefty = MCFlag(MCPreferencesHandednessKey);
     BOOL innerShadow = MCFlag(MCPreferencesInnerShadowKey);
     BOOL outerGlow = MCFlag(MCPreferencesOuterGlowKey);
+    BOOL outerShadow = MCFlag(MCPreferencesOuterShadowKey);
     BOOL pointer = MCCursorIsPointer(identifier);
     NSNumber *frameCount    = cursor[MCCursorDictionaryFrameCountKey];
     NSNumber *frameDuration = cursor[MCCursorDictionaryFrameDuratiomKey];
@@ -543,6 +545,21 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
             CGImageRef glowing = MCApplyOuterGlow(original, radius, intensity);
             [processed addObject:(__bridge id)(glowing ?: original)];
             if (glowing) CGImageRelease(glowing);
+        }
+        images = processed;
+    }
+
+    // Apply outer shadow effect if enabled — the dark counterpart to outer glow
+    if (outerShadow && images.count > 0) {
+        float radius = 40.0f;
+        float intensity = 0.7f;
+        MMLog("Applying outer shadow effect (radius=%.1f, intensity=%.1f)", radius, intensity);
+        NSMutableArray *processed = [NSMutableArray arrayWithCapacity:images.count];
+        for (id imgObj in images) {
+            CGImageRef original = (__bridge CGImageRef)imgObj;
+            CGImageRef shadowed = MCApplyOuterShadow(original, radius, intensity);
+            [processed addObject:(__bridge id)(shadowed ?: original)];
+            if (shadowed) CGImageRelease(shadowed);
         }
         images = processed;
     }
@@ -764,6 +781,54 @@ BOOL applyCape(NSDictionary *dictionary) {
     }
 }
 
+// On macOS 27, registering a cape on a running session (ANY apply — manual,
+// wake, session-change, display-reconfig) detaches the cursor from the
+// Accessibility pointer-enlargement compositor (universalaccessd). When
+// pointer enlargement is on, the cursor then falls back to software
+// rendering and blinks/vanishes while moving — CGSRegisterCursorWithImages()
+// itself succeeds, so this is invisible to the apply's own success/failure
+// checks. Restarting universalaccessd (a user LaunchAgent; launchd relaunches
+// it in ~1s) makes it re-engage the compositor on the just-applied cape —
+// the same thing dragging System Settings > Accessibility > Pointer size does
+// by hand. This must run after EVERY apply, not just wake/reconfig — a prior,
+// unmerged fix (branch kianwoon/heuristic-banach-ddf1c0, commits 372c259 /
+// d93d427) validated exactly this and shipped it as v1.0.3-v1.0.5. An earlier
+// attempt here scoped this to wake-only recovery paths on the mistaken
+// assumption that the restart itself caused flicker; it didn't — the flicker
+// is inherent to any re-registration, and removing the reengage from manual
+// applies just removed the cure.
+//
+// Only done when pointer enlargement is actually active (mouseDriverCursorSize
+// > 1), since universalaccessd also serves Zoom/VoiceOver/Switch Control and
+// restarting it when there's nothing to recompose is needless.
+void reengageAccessibilityCursorCompositor(void) {
+    CFPropertyListRef sizeRef = CFPreferencesCopyValue(
+        CFSTR("mouseDriverCursorSize"),
+        CFSTR("com.apple.universalaccess"),
+        kCFPreferencesCurrentUser,
+        kCFPreferencesCurrentHost
+    );
+    float cursorSize = sizeRef ? [(__bridge_transfer NSNumber *)sizeRef floatValue] : 1.0f;
+    if (cursorSize <= 1.01f) {
+        MMLog("reengageAccessibilityCursorCompositor: pointer size normal (%.2f), skipping", cursorSize);
+        return;
+    }
+
+    @try {
+        NSTask *task = [[NSTask alloc] init];
+        task.launchPath = @"/usr/bin/killall";
+        task.arguments = @[@"universalaccessd"];
+        task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+        task.standardError = [NSFileHandle fileHandleWithNullDevice];
+        [task launch];
+        [task waitUntilExit];
+        NSLog(@"[MousecapeHelper] reengageAccessibilityCursor: restarted universalaccessd (status=%d)",
+              task.terminationStatus);
+    } @catch (NSException *exception) {
+        NSLog(@"[MousecapeHelper][ERROR] reengageAccessibilityCursor exception: %@", exception);
+    }
+}
+
 // Same as applyCape() but with a different strategy for running systems.
 // Instead of resetAllCursors() → CoreCursorUnregisterAll() → apply everything,
 // we: (1) unregister all to clear the WindowServer cache, (2) extract system
@@ -934,6 +999,14 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
 
         MMLog(BOLD GREEN "Applied %s (success: %lu, system defaults: %lu)" RESET,
               name.UTF8String, (unsigned long)successCount, (unsigned long)systemDefaultCount);
+
+        // This is the single choke point for EVERY apply — manual Apply clicks,
+        // session changes, wake, and display-reconfig recovery alike — which is
+        // exactly why the compositor re-engage belongs here: the flicker/vanish
+        // bug it fixes is caused by re-registration itself, not by any one
+        // trigger source. See reengageAccessibilityCursorCompositor() above.
+        reengageAccessibilityCursorCompositor();
+
         return YES;
     }
     } @finally {

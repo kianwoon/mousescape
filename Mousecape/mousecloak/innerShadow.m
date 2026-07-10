@@ -1,6 +1,7 @@
 #import "innerShadow.h"
 #import "MCDefs.h"
 #import <Accelerate/Accelerate.h>
+#import <math.h>
 
 CGImageRef MCApplyInnerShadow(CGImageRef image, float radius, float intensity) {
     @autoreleasepool {
@@ -98,10 +99,15 @@ CGImageRef MCApplyInnerShadow(CGImageRef image, float radius, float intensity) {
             return NULL;
         }
 
+        // True Gaussian kernel instead of a uniform box kernel — the box
+        // kernel's flat impulse response produces visible 8-bit-quantization
+        // "steps" (rough/speckled look). A separable Gaussian only needs ONE
+        // horizontal + ONE vertical pass (mathematically exact), not the old
+        // 3-pass box-blur approximation.
         int kSize = blurRadius * 2 + 1;
-        float invK = 1.0f / kSize;
+        float sigma = blurRadius / 2.5f;
+        if (sigma < 0.5f) sigma = 0.5f;
 
-        // Create a uniform 1D kernel (all invK) — pre-divided so convolution result is averaged
         float *kernel = (float *)malloc(kSize * sizeof(float));
         if (!kernel) {
             MMLog("%s: failed to allocate kernel", __func__);
@@ -111,8 +117,16 @@ CGImageRef MCApplyInnerShadow(CGImageRef image, float radius, float intensity) {
             CGContextRelease(context);
             return NULL;
         }
-        for (int i = 0; i < kSize; i++) {
-            kernel[i] = invK;
+        {
+            float sum = 0.0f;
+            for (int i = 0; i < kSize; i++) {
+                float x = (float)(i - blurRadius);
+                kernel[i] = expf(-(x * x) / (2.0f * sigma * sigma));
+                sum += kernel[i];
+            }
+            for (int i = 0; i < kSize; i++) {
+                kernel[i] /= sum; // normalize so weights sum to 1
+            }
         }
 
         // Set up vImage buffers
@@ -125,20 +139,16 @@ CGImageRef MCApplyInnerShadow(CGImageRef image, float radius, float intensity) {
                                kernel, 1, kSize, 0.0f,
                                kvImageEdgeExtend);
 
-        // Pass 2: Vertical — temp → blurred
+        // Pass 2: Vertical — temp → blurred (final result)
         vImageConvolve_PlanarF(&tempBuf, &blurBuf, NULL, 0, 0,
                                kernel, kSize, 1, 0.0f,
                                kvImageEdgeExtend);
 
-        // Pass 3: Horizontal — blurred → temp
-        vImageConvolve_PlanarF(&blurBuf, &tempBuf, NULL, 0, 0,
-                               kernel, 1, kSize, 0.0f,
-                               kvImageEdgeExtend);
-
         free(kernel);
+        free(temp);
 
-        // temp now holds the final 3-pass blurred alpha
-        float *blurredAlpha = temp;
+        // blurred now holds the final Gaussian-blurred alpha
+        float *blurredAlpha = blurred;
 
         // --- Step 5: Compute shadow and darken pixels ---
         for (size_t i = 0; i < totalPixels; i++) {
@@ -173,8 +183,7 @@ CGImageRef MCApplyInnerShadow(CGImageRef image, float radius, float intensity) {
 
         // --- Step 7: Clean up ---
         free(alpha);
-        free(temp);
-        free(blurred);
+        free(blurredAlpha);
         CGContextRelease(context);
 
         if (!outputImage) {

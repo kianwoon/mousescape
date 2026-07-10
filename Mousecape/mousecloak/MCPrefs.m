@@ -14,6 +14,7 @@ NSString *MCPreferencesCursorScaleKey            = @"MCCursorScale";
 NSString *MCPreferencesHandednessKey             = @"MCHandedness";
 NSString *MCPreferencesInnerShadowKey            = @"MCInnerShadow";
 NSString *MCPreferencesOuterGlowKey             = @"MCOuterGlow";
+NSString *MCPreferencesOuterShadowKey           = @"MCOuterShadow";
 NSString *MCPreferencesScaleModeKey             = @"MCScaleMode";
 NSString *MCPreferencesPerCursorScalesKey       = @"MCPerCursorScales";
 

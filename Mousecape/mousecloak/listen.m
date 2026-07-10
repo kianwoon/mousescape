@@ -135,6 +135,18 @@ void reconfigurationCallback(CGDirectDisplayID display,
         return;
     }
 
+    // Debounce: wake-from-sleep fires reconfigurationCallback per-display
+    // (typically 2-4 events within 1-2s). Each event triggers
+    // applyCapeWithoutReset() which temporarily sets scale to 8.0 for
+    // extraction. Rapid re-entry causes scale thrashing. A 3-second cooldown
+    // after a successful apply prevents this.
+    static CFAbsoluteTime lastSuccessfulReconfigApply = 0.0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - lastSuccessfulReconfigApply < 3.0) {
+        MMLog("Reconfig: debounced (last successful apply was %.1fs ago)", now - lastSuccessfulReconfigApply);
+        return;
+    }
+
     MMLog("========================================");
     MMLog("=== DISPLAY RECONFIGURATION EVENT ===");
     MMLog("========================================");
@@ -146,25 +158,23 @@ void reconfigurationCallback(CGDirectDisplayID display,
 
     if (capePath) {
         // Give WindowServer time to settle after wake/reconfiguration.
-        // Without this delay, CGSSetCursorScale calls may be ignored or
-        // overridden by the WindowServer mid-initialization.
-        MMLog("Waiting 1000ms for WindowServer to settle...");
-        HLOG("Reconfiguration: waiting 1s for WindowServer to settle");
-        usleep(1000000); // 1000 ms
+        // A longer single delay is safer than the old retry loop:
+        // each retry re-entered applyCapeWithoutReset() which temporarily
+        // sets scale to 8.0 for extraction — retries caused scale thrashing.
+        MMLog("Waiting 2000ms for WindowServer to settle...");
+        HLOG("Reconfiguration: waiting 2s for WindowServer to settle");
+        usleep(2000000); // 2000 ms
 
-        // Retry up to 3 times on failure — the WindowServer may not be
-        // fully ready on the first attempt after wake-from-sleep.
-        int maxRetries = 3;
-        for (int attempt = 1; attempt <= maxRetries; attempt++) {
-            BOOL success = applyCapeAtPath(capePath);
-            MMLog("Apply attempt %d/%d: %s", attempt, maxRetries, success ? "SUCCESS" : "FAILED");
-            if (success) { HLOG("Reconfiguration apply attempt %d/%d: success", attempt, maxRetries); }
-            else { HLOG_ERR("Reconfiguration apply attempt %d/%d: failed", attempt, maxRetries); }
-            if (success) break;
-            if (attempt < maxRetries) {
-                MMLog("Retrying in 500ms...");
-                usleep(500000); // 500 ms
-            }
+        BOOL success = applyCapeAtPath(capePath);
+        MMLog("Apply attempt: %s", success ? "SUCCESS" : "FAILED");
+        if (success) {
+            HLOG("Reconfiguration apply: success");
+            lastSuccessfulReconfigApply = CFAbsoluteTimeGetCurrent();
+            // No separate reengageAccessibilityCursorCompositor() call here —
+            // applyCapeAtPath() -> applyCapeWithoutReset() already does it
+            // unconditionally on every successful apply (see apply.m).
+        } else {
+            HLOG_ERR("Reconfiguration apply: failed");
         }
     } else {
         // No cape applied — do nothing.  Avoid calling refreshSystemDefaultCursors()
@@ -412,6 +422,9 @@ BOOL reapplyCapeForCurrentUser(void) {
         return NO;
     }
     BOOL success = applyCapeAtPath(capePath);
+    // No separate reengageAccessibilityCursorCompositor() call here —
+    // applyCapeAtPath() -> applyCapeWithoutReset() already does it
+    // unconditionally on every successful apply (see apply.m).
     if (success) { HLOG("Reapply succeeded"); }
     else { HLOG_ERR("Reapply failed"); }
     return success;
