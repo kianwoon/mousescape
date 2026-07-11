@@ -577,8 +577,64 @@ final class AppState: @unchecked Sendable {
         loadCapes()
     }
 
-    /// Apply a cape
+    // Debounce state for applyCape(). Rapid repeated Apply clicks (e.g. while
+    // tuning cursor scale: adjust slider, click Apply, adjust more, click
+    // Apply again) each used to run a full CoreCursorUnregisterAll + scale
+    // ramp + re-registration + accessibility-compositor killall cycle
+    // synchronously — every click was independently visible as a cursor
+    // flicker, and clicks landing seconds apart aren't stopped by the
+    // g_refreshingSystemDefaults re-entrancy guard (that only blocks truly
+    // concurrent calls). Leading+trailing debounce: the first call in a burst
+    // still applies instantly (no added latency for the common single-click
+    // case), but subsequent calls within applyDebounceInterval are coalesced
+    // into one trailing apply — using the latest cape/scale state — once the
+    // burst settles, instead of one full cycle per click.
+    private var applyDebounceWorkItem: DispatchWorkItem?
+    private var pendingDebouncedCape: CursorLibrary?
+    private var lastApplyCapeTime: Date = .distantPast
+    private let applyDebounceInterval: TimeInterval = 0.6
+
+    /// Apply a cape. Debounced — see applyDebounceWorkItem above.
     func applyCape(_ cape: CursorLibrary) {
+        applyDebounceWorkItem?.cancel()
+        applyDebounceWorkItem = nil
+        pendingDebouncedCape = nil
+
+        let now = Date()
+        guard now.timeIntervalSince(lastApplyCapeTime) >= applyDebounceInterval else {
+            // Within the debounce window of a recent apply — coalesce this
+            // and any further rapid calls into a single trailing apply.
+            pendingDebouncedCape = cape
+            let workItem = DispatchWorkItem { [weak self] in
+                guard let self, let pending = self.pendingDebouncedCape else { return }
+                self.applyDebounceWorkItem = nil
+                self.pendingDebouncedCape = nil
+                self.lastApplyCapeTime = Date()
+                self.performApplyCape(pending)
+            }
+            applyDebounceWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + applyDebounceInterval, execute: workItem)
+            return
+        }
+
+        lastApplyCapeTime = now
+        performApplyCape(cape)
+    }
+
+    /// Runs a pending debounced apply immediately instead of losing it. Call
+    /// from applicationWillTerminate so quitting mid-burst doesn't silently
+    /// drop the user's last Apply click.
+    func flushPendingApply() {
+        guard let workItem = applyDebounceWorkItem else { return }
+        workItem.cancel()
+        applyDebounceWorkItem = nil
+        if let pending = pendingDebouncedCape {
+            pendingDebouncedCape = nil
+            performApplyCape(pending)
+        }
+    }
+
+    private func performApplyCape(_ cape: CursorLibrary) {
         debugLog("=== Applying Cape ===")
         debugLog("Cape: \(cape.name) (\(cape.identifier))")
         debugLog("Cursors count: \(cape.cursors.count)")

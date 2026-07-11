@@ -157,6 +157,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Close ObjC logging system on exit
     func applicationWillTerminate(_ notification: Notification) {
+        // Flush any debounced Apply click so quitting mid-burst doesn't
+        // silently drop the user's last scale/cape change.
+        AppState.shared.flushPendingApply()
         #if DEBUG
         MCLoggerClose()
         #endif
