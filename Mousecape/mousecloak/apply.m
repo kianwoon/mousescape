@@ -798,9 +798,27 @@ BOOL applyCape(NSDictionary *dictionary) {
 // is inherent to any re-registration, and removing the reengage from manual
 // applies just removed the cure.
 //
-// Only done when pointer enlargement is actually active (mouseDriverCursorSize
-// > 1), since universalaccessd also serves Zoom/VoiceOver/Switch Control and
-// restarting it when there's nothing to recompose is needless.
+// Only skipped when NEITHER trigger is active — universalaccessd also serves
+// Zoom/VoiceOver/Switch Control and restarting it when there's nothing to
+// recompose is needless. Two independent triggers, checked separately:
+//
+// 1. Accessibility pointer enlargement (mouseDriverCursorSize > 1) — the
+//    documented case: macOS routes ALL cursor compositing through
+//    universalaccessd once this preference is on, at any size.
+//
+// 2. A large Mousecape per-cursor/global scale is in effect, REGARDLESS of
+//    the accessibility preference. CGSAccessibility.h's own comment on
+//    CGSSetCursorScale notes "the largest the Universal Access prefpane
+//    allows you to go is 4.0" — i.e. any cursor rendered beyond ~4x is
+//    already outside what the standard hardware cursor plane supports and
+//    is composited the same enlarged-cursor way universalaccessd handles,
+//    even if the user never touched the Accessibility "Pointer size" UI
+//    toggle. Confirmed 2026-07-11: a 70x custom per-cursor Arrow scale
+//    (mouseDriverCursorSize left at the 1.0 default, so trigger 1 didn't
+//    fire) still blinked/vanished mid-session apply, solid again only
+//    after a full restart — same signature as trigger 1, different gate.
+// See project_macos27_large_cursor_blink memory for the confirmed-vs-guessed history here.
+#define kMCLargeScaleThreshold 4.0f
 void reengageAccessibilityCursorCompositor(void) {
     CFPropertyListRef sizeRef = CFPreferencesCopyValue(
         CFSTR("mouseDriverCursorSize"),
@@ -809,10 +827,27 @@ void reengageAccessibilityCursorCompositor(void) {
         kCFPreferencesCurrentHost
     );
     float cursorSize = sizeRef ? [(__bridge_transfer NSNumber *)sizeRef floatValue] : 1.0f;
-    if (cursorSize <= 1.01f) {
-        MMLog("reengageAccessibilityCursorCompositor: pointer size normal (%.2f), skipping", cursorSize);
+    BOOL enlargementActive = cursorSize > 1.01f;
+
+    float maxAppliedScale = 1.0f;
+    if (customScaleMode()) {
+        NSDictionary *perCursorScales = MCDefault(MCPreferencesPerCursorScalesKey);
+        for (NSNumber *scale in perCursorScales.allValues) {
+            maxAppliedScale = MAX(maxAppliedScale, scale.floatValue);
+        }
+    } else {
+        maxAppliedScale = [MCDefault(@"MCGlobalCursorScale") floatValue];
+        if (maxAppliedScale <= 0.0f) maxAppliedScale = 1.0f;
+    }
+    BOOL largeScaleActive = maxAppliedScale > kMCLargeScaleThreshold;
+
+    if (!enlargementActive && !largeScaleActive) {
+        MMLog("reengageAccessibilityCursorCompositor: pointer size normal (%.2f) and max applied scale (%.2f) <= %.1f, skipping",
+              cursorSize, maxAppliedScale, kMCLargeScaleThreshold);
         return;
     }
+    MMLog("reengageAccessibilityCursorCompositor: engaging (pointer size=%.2f, enlargementActive=%d, maxAppliedScale=%.2f, largeScaleActive=%d)",
+          cursorSize, enlargementActive, maxAppliedScale, largeScaleActive);
 
     @try {
         NSTask *task = [[NSTask alloc] init];
