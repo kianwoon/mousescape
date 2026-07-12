@@ -408,6 +408,100 @@ static CGImageRef _Nullable MCUpscaleAndSharpen(CGImageRef original, NSUInteger 
     }
 }
 
+// ---- Animated-cursor strip helpers ----
+// An animated cursor's image is a single vertical strip of frames (frame 0 at
+// the top). Two historic defects lived here:
+//  1. The upscaler scaled the WHOLE strip by sqrt(area ratio), producing
+//     non-integral per-frame heights (240x7200 / 30 frames → 374x11217 =
+//     373.9px/frame) — frame boundaries drift and downstream frame-count
+//     derivation breaks.
+//  2. Cursors with more than 24 frames (macOS 27's system Wait reports 30)
+//     were rejected outright by the [1...24] range check and NEVER
+//     re-registered, leaving a stale Wait registration alive forever.
+
+// Slice frame i out of a strip. Proportional bounds so strips whose height is
+// not an exact multiple of frameCount (mangled by the old upscaler and saved
+// back into capes) still split without cumulative drift. Caller releases.
+static CGImageRef _Nullable MCCreateStripFrame(CGImageRef strip, NSUInteger frameCount, NSUInteger i) {
+    size_t w = CGImageGetWidth(strip);
+    size_t h = CGImageGetHeight(strip);
+    if (w == 0 || h == 0 || frameCount == 0 || i >= frameCount) return NULL;
+    size_t y0 = (size_t)llround((double)h * (double)i / (double)frameCount);
+    size_t y1 = (size_t)llround((double)h * (double)(i + 1) / (double)frameCount);
+    if (y1 <= y0) return NULL;
+    return CGImageCreateWithImageInRect(strip, CGRectMake(0, (CGFloat)y0, (CGFloat)w, (CGFloat)(y1 - y0)));
+}
+
+// Stack frames vertically into one strip of uniform frame slots (frame 0 on
+// top). Frames whose size differs slightly from the slot are stretched to fit
+// (±1px from proportional slicing). Caller releases.
+static CGImageRef _Nullable MCCreateStripFromFrames(NSArray *frames, size_t frameW, size_t frameH) {
+    if (frames.count == 0 || frameW == 0 || frameH == 0) return NULL;
+    size_t totalH = frameH * frames.count;
+    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(NULL, frameW, totalH, 8, frameW * 4, cs,
+                                             kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big);
+    CGColorSpaceRelease(cs);
+    if (!ctx) return NULL;
+    CGContextSetInterpolationQuality(ctx, kCGInterpolationHigh);
+    for (NSUInteger i = 0; i < frames.count; i++) {
+        CGImageRef f = (__bridge CGImageRef)frames[i];
+        // CG contexts are bottom-left origin; strip frame 0 is the TOP row.
+        CGFloat y = (CGFloat)totalH - (CGFloat)frameH * (CGFloat)(i + 1);
+        CGContextDrawImage(ctx, CGRectMake(0, y, (CGFloat)frameW, (CGFloat)frameH), f);
+    }
+    CGImageRef out = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    return out;
+}
+
+// Frame-aware upscale: slice → Lanczos each frame to an INTEGRAL per-frame
+// size → restack. Keeps strip height an exact multiple of frameCount and stops
+// the Lanczos kernel from bleeding pixels across frame boundaries.
+static CGImageRef _Nullable MCCreateUpscaledStrip(CGImageRef strip, NSUInteger frameCount, CGFloat scaleFactor, CGFloat sharpness) {
+    size_t w = CGImageGetWidth(strip);
+    size_t h = CGImageGetHeight(strip);
+    size_t tw = (size_t)llround((double)w * scaleFactor);
+    size_t perFrameTh = (size_t)llround(((double)h / (double)frameCount) * scaleFactor);
+    if (tw == 0 || perFrameTh == 0) return NULL;
+    NSMutableArray *frames = [NSMutableArray arrayWithCapacity:frameCount];
+    for (NSUInteger i = 0; i < frameCount; i++) {
+        CGImageRef frame = MCCreateStripFrame(strip, frameCount, i);
+        if (!frame) return NULL;
+        CGImageRef up = MCUpscaleAndSharpen(frame, tw, perFrameTh, sharpness);
+        if (up) {
+            [frames addObject:(__bridge_transfer id)up];
+            CGImageRelease(frame);
+        } else {
+            // Fallback: let MCCreateStripFromFrames stretch the raw frame.
+            [frames addObject:(__bridge_transfer id)frame];
+        }
+    }
+    return MCCreateStripFromFrames(frames, tw, perFrameTh);
+}
+
+// Subsample a >24-frame strip down to ≤24 frames with an even stride,
+// preserving the total animation cycle time (caller stretches frameDuration
+// by the same factor). CGSRegisterCursorWithImages' practical frame limit is
+// 24 (legacy Mousecape's validated range); rather than gamble on registering
+// 30 frames, keep every stride-th frame. Caller releases; outFrameCount set
+// on success.
+static CGImageRef _Nullable MCCreateSubsampledStrip(CGImageRef strip, NSUInteger frameCount, NSUInteger maxFrames, NSUInteger *outFrameCount) {
+    if (frameCount <= maxFrames || maxFrames == 0) return NULL;
+    NSUInteger stride = (frameCount + maxFrames - 1) / maxFrames; // ceil
+    NSMutableArray *frames = [NSMutableArray array];
+    for (NSUInteger i = 0; i < frameCount; i += stride) {
+        CGImageRef f = MCCreateStripFrame(strip, frameCount, i);
+        if (!f) return NULL;
+        [frames addObject:(__bridge_transfer id)f];
+    }
+    if (frames.count == 0) return NULL;
+    CGImageRef first = (__bridge CGImageRef)frames[0];
+    CGImageRef out = MCCreateStripFromFrames(frames, CGImageGetWidth(first), CGImageGetHeight(first));
+    if (out && outFrameCount) *outFrameCount = frames.count;
+    return out;
+}
+
 BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL restore, BOOL customScaleMode, BOOL skipSynonyms, BOOL isSystemDefault, float baseScale) {
     MMLog("=== applyCapeForIdentifier ===");
     MMLog("  Identifier: %s", identifier.UTF8String);
@@ -505,6 +599,38 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
         }
     }
 
+    // Effective frame count/duration for registration. May be rewritten below:
+    // cursors with more than 24 frames (macOS 27 system Wait = 30) previously
+    // hit the [1...24] rejection in applyCursorForIdentifier and NEVER
+    // registered — subsample them to ≤24 frames, stretching the per-frame
+    // duration so the animation cycle time is unchanged.
+    NSUInteger effFrameCount = frameCount.unsignedIntegerValue;
+    CGFloat effFrameDuration = frameDuration.doubleValue;
+    if (effFrameCount > 24 && images.count > 0) {
+        NSMutableArray *processed = [NSMutableArray arrayWithCapacity:images.count];
+        NSUInteger newFc = 0;
+        BOOL allOk = YES;
+        for (id imgObj in images) {
+            CGImageRef original = (__bridge CGImageRef)imgObj;
+            NSUInteger fcOut = 0;
+            CGImageRef result = MCCreateSubsampledStrip(original, effFrameCount, 24, &fcOut);
+            if (!result) { allOk = NO; break; }
+            if (newFc == 0) newFc = fcOut;
+            [processed addObject:(__bridge_transfer id)result];
+        }
+        if (allOk && newFc > 0) {
+            MMLog("  Subsampled animation: %lu frames → %lu (duration %.4f → %.4f/frame, cycle preserved)",
+                  (unsigned long)effFrameCount, (unsigned long)newFc,
+                  effFrameDuration, effFrameDuration * (CGFloat)effFrameCount / (CGFloat)newFc);
+            effFrameDuration = effFrameDuration * (CGFloat)effFrameCount / (CGFloat)newFc;
+            effFrameCount = newFc;
+            images = processed;
+        } else {
+            MMLog(YELLOW "  Subsampling %lu-frame strip failed — registration will be rejected by the frame-count check" RESET,
+                  (unsigned long)effFrameCount);
+        }
+    }
+
     // Per-cursor custom scaling — compute the ratio and effective registration
     // size FIRST so the upscale logic below knows the true pixel requirements.
     // Previously this ran after upscale, so the upscale target was based on the
@@ -538,7 +664,10 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
     // helps system default cursors whose native images may be small (e.g. 64×64)
     // and cape cursors at very high custom scales (e.g. 35x → 1120pt).
     if (images.count > 0 && bestRep) {
-        NSUInteger srcPixels = (NSUInteger)bestRep.pixelsWide * (NSUInteger)bestRep.pixelsHigh;
+        // Measure the working image, not bestRep — subsampling above may have
+        // reduced the strip since bestRep was selected.
+        CGImageRef srcImg = (__bridge CGImageRef)images[0];
+        NSUInteger srcPixels = (NSUInteger)(CGImageGetWidth(srcImg) * CGImageGetHeight(srcImg));
 
         // Calculate minimum pixels needed for crisp rendering at the FINAL
         // registration size (after custom scaling).  On Retina (2x), a cursor
@@ -559,23 +688,32 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
 
             if (targetPixelCount > srcPixels) {
                 CGFloat scaleFactor = sqrt((CGFloat)targetPixelCount / (CGFloat)srcPixels);
-                NSUInteger newWidth = (NSUInteger)(bestRep.pixelsWide * scaleFactor + 0.5);
-                NSUInteger newHeight = (NSUInteger)(bestRep.pixelsHigh * scaleFactor + 0.5);
+                NSUInteger newWidth = (NSUInteger)(CGImageGetWidth(srcImg) * scaleFactor + 0.5);
+                NSUInteger newHeight = (NSUInteger)(CGImageGetHeight(srcImg) * scaleFactor + 0.5);
                 CGFloat sharpness = 0.3 + (scaleFactor - 1.0) * 0.2;
                 if (sharpness < 0.0) sharpness = 0.0;
                 if (sharpness > 1.5) sharpness = 1.5;
-                MMLog("  Upscale+sharpen: %lux%lu → %lux%lu (%.1fx), sharpness=%.2f",
-                      (unsigned long)bestRep.pixelsWide, (unsigned long)bestRep.pixelsHigh,
-                      (unsigned long)newWidth, (unsigned long)newHeight, scaleFactor, sharpness);
+                MMLog("  Upscale+sharpen: %zux%zu → %lux%lu (%.1fx), sharpness=%.2f%s",
+                      CGImageGetWidth(srcImg), CGImageGetHeight(srcImg),
+                      (unsigned long)newWidth, (unsigned long)newHeight, scaleFactor, sharpness,
+                      effFrameCount > 1 ? " [frame-aware]" : "");
 
                 NSMutableArray *processed = [NSMutableArray arrayWithCapacity:images.count];
                 for (id imgObj in images) {
                     CGImageRef original = (__bridge CGImageRef)imgObj;
-                    NSUInteger w = CGImageGetWidth(original);
-                    NSUInteger h = CGImageGetHeight(original);
-                    NSUInteger tw = (NSUInteger)(w * scaleFactor + 0.5);
-                    NSUInteger th = (NSUInteger)(h * scaleFactor + 0.5);
-                    CGImageRef result = MCUpscaleAndSharpen(original, tw, th, sharpness);
+                    CGImageRef result;
+                    if (effFrameCount > 1) {
+                        // Animated strip: upscale per-frame so the strip height
+                        // stays an exact multiple of the frame count and the
+                        // Lanczos kernel never bleeds across frame boundaries.
+                        result = MCCreateUpscaledStrip(original, effFrameCount, scaleFactor, sharpness);
+                    } else {
+                        NSUInteger w = CGImageGetWidth(original);
+                        NSUInteger h = CGImageGetHeight(original);
+                        NSUInteger tw = (NSUInteger)(w * scaleFactor + 0.5);
+                        NSUInteger th = (NSUInteger)(h * scaleFactor + 0.5);
+                        result = MCUpscaleAndSharpen(original, tw, th, sharpness);
+                    }
                     [processed addObject:(__bridge id)(result ?: original)];
                     if (result && result != original) CGImageRelease(result);
                 }
@@ -659,7 +797,7 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
         }
     }
 
-    return applyCursorForIdentifier(frameCount.unsignedIntegerValue, frameDuration.doubleValue, hotSpot, size, images, identifier, 0, skipSynonyms);
+    return applyCursorForIdentifier(effFrameCount, effFrameDuration, hotSpot, size, images, identifier, 0, skipSynonyms);
 }
 
 BOOL applyCape(NSDictionary *dictionary) {
