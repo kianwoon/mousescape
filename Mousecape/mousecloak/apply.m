@@ -26,10 +26,40 @@
 // Declared extern so listen.m callbacks can also check it.
 volatile BOOL g_refreshingSystemDefaults = NO;
 
+// WindowServer builds each registered cursor's GPU surface at
+// declaredPointSize × 8 (2x Retina backing × the compositor's 4.0 max
+// pointer-magnification headroom). The GPU's max texture is 16384px
+// (Apple Silicon), so any registration declared above 16384/8 = 2048pt
+// makes WindowServer log "NNNN by NNNN image is too large for GPU" and —
+// whenever that cursor variant is displayed mid-session — fail
+// set_cursor_surface and DISABLE the cursor (flash/vanish while moving).
+// Verified against WindowServer's own log across four sessions:
+// 2080pt→16640, 2240pt→17920, 2336pt→18688, 2400pt→19200, all exact ×8.
+// Worse, a stale oversized registration (e.g. ArrowCtx from a synonym set
+// registered during a 65x experiment) survives later smaller re-applies, so
+// the session stays broken until logout. Clamping here — the single choke
+// point every registration path flows through (cape cursors, synonyms,
+// system re-registrations, backups) — guarantees no registration can ever
+// exceed the GPU-safe size. The cursor still renders at up to 2048pt
+// (= 64x on a 32pt cursor); beyond that it previously vanished entirely.
+static const CGFloat kMCMaxRegistrationPt = 2048.0; // 16384 GPU max ÷ 8
+
 static BOOL MCRegisterImagesForCursorName(NSUInteger frameCount, CGFloat frameDuration, CGPoint hotSpot, CGSize size, NSArray *images, NSString *name) {
     char *cursorName = (char *)name.UTF8String;
     int seed = 0;
     CGSConnectionID cid = CGSMainConnectionID();
+
+    CGFloat maxDim = fmax(size.width, size.height);
+    if (maxDim > kMCMaxRegistrationPt) {
+        CGFloat shrink = kMCMaxRegistrationPt / maxDim;
+        MMLog(YELLOW "  Declared size %.0fx%.0fpt exceeds GPU-safe max %.0fpt — clamping to %.0fx%.0fpt (surface = pt × 8 must fit the 16384px GPU texture limit or WindowServer disables the cursor)" RESET,
+              size.width, size.height, kMCMaxRegistrationPt,
+              size.width * shrink, size.height * shrink);
+        size.width *= shrink;
+        size.height *= shrink;
+        hotSpot.x *= shrink;
+        hotSpot.y *= shrink;
+    }
 
     MMLog("--- Registering cursor ---");
     MMLog("  Name: %s", cursorName);
