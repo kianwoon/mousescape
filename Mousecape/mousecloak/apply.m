@@ -44,6 +44,43 @@ volatile BOOL g_refreshingSystemDefaults = NO;
 // (= 64x on a 32pt cursor); beyond that it previously vanished entirely.
 static const CGFloat kMCMaxRegistrationPt = 2048.0; // 16384 GPU max ÷ 8
 
+// Custom-mode base scale that keeps every declared registration within
+// kMCMaxRegistrationPt while preserving the EXACT on-screen size. Instead of
+// registering the largest cursor at its full desired point size (e.g. 75× on
+// a 32pt Arrow = 2400pt declared → 19200px surface → GPU reject → cursor
+// disabled mid-session), register everything at declared/k and set
+// CGSSetCursorScale = k. Today's session logs prove CGSSetCursorScale never
+// enters the WindowServer surface watermark (the 8×/64× extraction boosts ran
+// every apply and N only ever tracked declaredPt × 8), so on-screen 75× stays
+// 75× with no oversized surface. k is 1.0 whenever nothing exceeds 2048pt, so
+// the common case is exactly the previous direct-registration behavior.
+static float MCCustomModeBaseScale(NSDictionary *cursors) {
+    NSDictionary *perCursorScales = MCDefault(MCPreferencesPerCursorScalesKey);
+    CGFloat maxDesiredPt = 0;
+    for (NSString *key in cursors) {
+        NSDictionary *c = cursors[key];
+        CGFloat pt = fmax([c[MCCursorDictionaryPointsWideKey] doubleValue],
+                          [c[MCCursorDictionaryPointsHighKey] doubleValue]);
+        float desired = [perCursorScales[key] floatValue];
+        if (desired <= 0.0f) desired = 1.0f;
+        maxDesiredPt = fmax(maxDesiredPt, pt * desired);
+    }
+    // Per-cursor scales also apply to re-registered system defaults that are
+    // not in this cape; their base point sizes aren't known yet (extraction
+    // happens later), so assume ≤48pt for them. The clamp in
+    // MCRegisterImagesForCursorName stays as the hard safety net either way.
+    for (NSString *ident in perCursorScales) {
+        if (cursors[ident]) continue;
+        float desired = [perCursorScales[ident] floatValue];
+        if (desired > 0.0f) maxDesiredPt = fmax(maxDesiredPt, 48.0 * desired);
+    }
+    if (maxDesiredPt <= kMCMaxRegistrationPt) return 1.0f;
+    float k = (float)(maxDesiredPt / kMCMaxRegistrationPt);
+    MMLog("SCALE DEBUG: custom mode overflow normalization — maxDesiredPt=%.0f > %.0f, baseScale=k=%.3f (registrations shrink by 1/k, CGSSetCursorScale=k keeps on-screen size exact)",
+          maxDesiredPt, kMCMaxRegistrationPt, k);
+    return k;
+}
+
 static BOOL MCRegisterImagesForCursorName(NSUInteger frameCount, CGFloat frameDuration, CGPoint hotSpot, CGSize size, NSArray *images, NSString *name) {
     char *cursorName = (char *)name.UTF8String;
     int seed = 0;
@@ -682,16 +719,18 @@ BOOL applyCape(NSDictionary *dictionary) {
                     if (s > maxScale) maxScale = s;
                 }
             }
-            // Custom mode: CGSSetCursorScale = 1.0, each cursor registers at its
-            // desired point size directly (nativeSize × desiredScale).
-            // Cape cursors use high-res images from the cape file (effectiveScale-based
-            // representation selection picks the right resolution).
-            // System defaults use native images with modest upscaling (acceptable ≤2x).
-            float baseScale = 1.0f;
-            MMLog("SCALE DEBUG: custom mode, maxScale=%.2f, baseScale=%.2f (direct registration)", maxScale, baseScale);
+            // Custom mode: each cursor registers at its desired point size
+            // divided by baseScale, with CGSSetCursorScale = baseScale.
+            // baseScale is 1.0 (direct registration) unless a cursor's desired
+            // size would exceed the GPU-safe registration limit — then it is
+            // the overflow factor k. See MCCustomModeBaseScale.
+            float baseScale = MCCustomModeBaseScale(cursors);
+            MMLog("SCALE DEBUG: custom mode, maxScale=%.2f, baseScale=%.2f", maxScale, baseScale);
             setCursorScale(baseScale);
             // Save for listen.m to restore on session change
             MCSetDefault(@(baseScale), @"MCCustomMaxScale");
+            baseScaleForRegistration = baseScale;
+            savedScale = baseScale;
         } else {
             // Global mode: restore the exact scale that was active before reset
             MMLog("SCALE DEBUG: global mode, restoring to %.2f", savedScale);
@@ -997,10 +1036,14 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         float baseScaleForRegistration = isCustomMode ? 1.0f : savedScale;
 
         if (isCustomMode) {
-            float baseScale = 1.0f;
+            // baseScale is 1.0 unless a cursor's desired size would exceed the
+            // GPU-safe registration limit — see MCCustomModeBaseScale.
+            float baseScale = MCCustomModeBaseScale(cursors);
             MMLog("SCALE DEBUG: custom mode, baseScale=%.2f", baseScale);
             setCursorScale(baseScale);
             MCSetDefault(@(baseScale), @"MCCustomMaxScale");
+            baseScaleForRegistration = baseScale;
+            savedScale = baseScale;
         } else {
             MMLog("SCALE DEBUG: global mode, scale=%.2f", savedScale);
             if (savedScale >= 0.5f && savedScale <= 96.0f) {
@@ -1131,10 +1174,14 @@ NSDictionary *applyCapeWithResult(NSDictionary *dictionary) {
                     if (s > maxScale) maxScale = s;
                 }
             }
-            float baseScale = 1.0f;
-            MMLog("SCALE DEBUG: custom mode, maxScale=%.2f, baseScale=%.2f (direct registration)", maxScale, baseScale);
+            // baseScale is 1.0 unless a cursor's desired size would exceed the
+            // GPU-safe registration limit — see MCCustomModeBaseScale.
+            float baseScale = MCCustomModeBaseScale(cursors);
+            MMLog("SCALE DEBUG: custom mode, maxScale=%.2f, baseScale=%.2f", maxScale, baseScale);
             setCursorScale(baseScale);
             MCSetDefault(@(baseScale), @"MCCustomMaxScale");
+            baseScaleForRegistration = baseScale;
+            savedScale = baseScale;
         } else {
             MMLog("SCALE DEBUG: global mode, restoring to %.2f", savedScale);
             if (savedScale >= 0.5f && savedScale <= 96.0f) {
