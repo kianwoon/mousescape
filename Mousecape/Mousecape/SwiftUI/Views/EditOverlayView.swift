@@ -174,6 +174,31 @@ struct CursorListView: View {
             List(WindowsCursorGroup.allCases, id: \.id, selection: $selectedGroup) { group in
                 SimpleGroupRow(group: group, cape: cape)
                     .tag(group)
+                    .contextMenu {
+                        Button {
+                            duplicateGroup(group)
+                        } label: {
+                            Label("Duplicate", systemImage: "plus.square.on.square")
+                        }
+                        .disabled(group.cursorTypes.allSatisfy {
+                            cape.cursor(withIdentifier: $0.rawValue) == nil
+                        })
+
+                        Divider()
+
+                        Button(role: .destructive) {
+                            selectedGroup = group
+                            if let primary = findPrimaryCursor(for: group) {
+                                selection = primary
+                            }
+                            appState.showDeleteCursorConfirmation = true
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                        .disabled(group.cursorTypes.allSatisfy {
+                            cape.cursor(withIdentifier: $0.rawValue) == nil
+                        })
+                    }
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
@@ -205,6 +230,22 @@ struct CursorListView: View {
             List(cape.cursors, id: \.id, selection: $selection) { cursor in
                 CursorListRow(cursor: cursor, currentIdentifier: cursor.identifier)
                     .tag(cursor)
+                    .contextMenu {
+                        Button {
+                            duplicateCursor(cursor)
+                        } label: {
+                            Label("Duplicate", systemImage: "plus.square.on.square")
+                        }
+
+                        Divider()
+
+                        Button(role: .destructive) {
+                            selection = cursor
+                            appState.showDeleteCursorConfirmation = true
+                        } label: {
+                            Label("Delete", systemImage: "trash")
+                        }
+                    }
             }
             .listStyle(.sidebar)
             .scrollContentBackground(.hidden)
@@ -227,18 +268,24 @@ struct CursorListView: View {
         }
     }
 
-    /// Find the primary cursor for a group, or create one if none exists
-    private func findOrCreatePrimaryCursor(for group: WindowsCursorGroup) -> Cursor? {
-        // Prioritize the primaryType cursor
+    /// Find an existing cursor in the group (without creating one)
+    private func findPrimaryCursor(for group: WindowsCursorGroup) -> Cursor? {
         if let primaryType = group.primaryType,
            let primaryCursor = cape.cursor(withIdentifier: primaryType.rawValue) {
             return primaryCursor
         }
-        // Fallback: return the first existing cursor in this group
         for cursorType in group.cursorTypes {
             if let existing = cape.cursor(withIdentifier: cursorType.rawValue) {
                 return existing
             }
+        }
+        return nil
+    }
+
+    /// Find the primary cursor for a group, or create one if none exists
+    private func findOrCreatePrimaryCursor(for group: WindowsCursorGroup) -> Cursor? {
+        if let existing = findPrimaryCursor(for: group) {
+            return existing
         }
         // No cursor exists for this group yet - create the primary cursor
         if let primaryType = group.primaryType {
@@ -250,12 +297,29 @@ struct CursorListView: View {
         return nil
     }
 
-    private func duplicateCursor() {
-        guard let cursor = selection else { return }
+    /// Duplicate the given cursor
+    private func duplicateCursor(_ cursor: Cursor) {
         let newCursor = cursor.copy(withIdentifier: cursor.identifier + ".copy")
         cape.addCursor(newCursor)
         selection = newCursor
         appState.markAsChanged()
+        appState.cursorListRefreshTrigger += 1
+    }
+
+    /// Duplicate all cursors in a group
+    private func duplicateGroup(_ group: WindowsCursorGroup) {
+        var duplicated: Cursor?
+        for cursorType in group.cursorTypes {
+            guard let existing = cape.cursor(withIdentifier: cursorType.rawValue) else { continue }
+            let newCursor = existing.copy(withIdentifier: existing.identifier + ".copy")
+            cape.addCursor(newCursor)
+            if duplicated == nil {
+                duplicated = newCursor
+            }
+        }
+        selection = duplicated
+        appState.markAsChanged()
+        appState.cursorListRefreshTrigger += 1
     }
 }
 
