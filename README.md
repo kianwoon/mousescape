@@ -41,7 +41,36 @@ If custom pointer colors are set in macOS System Settings, Mousecape will not be
 
 The pointer must use the default color scheme (white outline, black fill) for Mousecape to work correctly.
 
-## Latest Release (SwiftUI_v1.0.5)
+## Latest Release (v1.3.2)
+
+### Download
+
+**Release v1.3.2**: https://github.com/kianwoon/mousescape/releases/tag/v1.3.2
+
+Compatible with **macOS 27**.
+
+### What's New in v1.3.2
+
+- **Fixed the cursor disappearing after sleep/wake.** Wake-from-sleep fired two
+  independent apply triggers (per-display reconfiguration callbacks + the
+  NSWorkspace wake handler) that did not share state, so one wake could run up to
+  four full applies plus four compositor restarts inside 35 seconds — the
+  compositor never stabilized and the cursor vanished until a manual Apply or
+  logout. A shared 15-second cooldown now spans all three apply trigger points
+  (display reconfiguration, wake handler, and user-space change), so one wake
+  produces exactly one apply.
+- Right-click context menu (Duplicate / Delete) on edit-sidebar rows.
+- Debounce for rapid repeated Apply clicks.
+- Outer Shadow cursor effect and improved blur quality.
+- Per-cursor scale inputs with undo/redo.
+
+### Installation
+
+1. Download `Mousecape.SwiftUI.zip` below
+2. Unzip and move `Mousecape.app` to `/Applications`
+3. Open the app and install the Helper Tool for persistence
+
+## Previous Release (SwiftUI_v1.0.5)
 
 ### Download
 
@@ -107,7 +136,7 @@ Compatible with **macOS 27**.
 
 This is the archived application restored from a local copy.
 
-## Latest Release (SwiftUI_v1.0.1)
+## Previous Release (SwiftUI_v1.0.1)
 
 ### Major Update: Windows cursor conversion rewritten from Python to native Swift
 
