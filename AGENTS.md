@@ -76,8 +76,15 @@ session-change callbacks         ─┘        (backup → CoreCursorUnregisterA
 - Per-cursor scaling: custom mode registers each cursor at `nativeSize × MCPerCursorScales[idf]`;
   baseScale (CGSSetCursorScale) = 1.0 in custom mode.
 - Arrow synonyms: registering `Arrow` also writes `ArrowCtx` etc. (`MCArrowSynonyms()`); the
-  system-defaults re-registration loop must skip those synonyms or it stomps the custom arrow
-  to an 8×8 system bitmap (fixed in all three apply loops — keep the `registeredKeys` synonym adds).
+  system-defaults re-registration loop must skip every name a cape registration WROTE or it
+  stomps the custom cursor to an 8×8 system bitmap.  Implemented generically (2026-08-26):
+  `g_capeRegisteredNames` in apply.m — `MCRegisterImagesForCursorName()` records every name it
+  successfully registers during a cape apply pass; Step 5 unions that set into `registeredKeys`
+  before re-registering system defaults.  No hand-maintained per-family prefix lists — any
+  future synonym mechanism is covered automatically.  (Bug signature it fixed: cape without an
+  `Arrow` entry, only `ArrowS` → `applyCursorForIdentifier`'s exact-match isArrow check skipped
+  synonym registration → ArrowCtx stayed an 8×8 system bitmap while ArrowS was 2080×2080 →
+  blinking/vanishing pointer that degraded over 2-3 re-applies.)
 
 ---
 

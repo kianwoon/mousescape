@@ -26,6 +26,18 @@
 // Declared extern so listen.m callbacks can also check it.
 volatile BOOL g_refreshingSystemDefaults = NO;
 
+// ---------------------------------------------------------------------------
+// Names actually written by cape registrations in this apply pass.
+// SINGLE SOURCE OF TRUTH for synonym protection: MCRegisterImagesForCursorName
+// records every name it successfully registers (a cape entry like ArrowS
+// writes itself AND its synonyms ArrowCtx/Arrow/…; resize cursors write their
+// whole synonym set, etc.).  The system-defaults re-registration loop (Step 5)
+// consults this set instead of hand-maintained prefix lists — any name a cape
+// touched is protected from being overwritten by an 8x8 system bitmap.
+// Reset at the start of each applyCapeWithoutReset pass.
+// ---------------------------------------------------------------------------
+static NSMutableSet<NSString *> *g_capeRegisteredNames = nil;
+
 static BOOL MCRegisterImagesForCursorName(NSUInteger frameCount, CGFloat frameDuration, CGPoint hotSpot, CGSize size, NSArray *images, NSString *name) {
     char *cursorName = (char *)name.UTF8String;
     int seed = 0;
@@ -96,6 +108,10 @@ static BOOL MCRegisterImagesForCursorName(NSUInteger frameCount, CGFloat frameDu
     MMLog("  Result: %s (CGError=%d, seed=%d)",
           (err == kCGErrorSuccess) ? "SUCCESS" : "FAILED", err, seed);
 
+    if (err == kCGErrorSuccess && g_capeRegisteredNames) {
+        // Record for Step 5 synonym protection (see g_capeRegisteredNames).
+        [g_capeRegisteredNames addObject:name];
+    }
     return (err == kCGErrorSuccess);
 }
 
@@ -119,8 +135,13 @@ BOOL applyCursorForIdentifier(NSUInteger frameCount, CGFloat frameDuration, CGPo
     }
 
     // Special handling for Arrow on newer macOS where the underlying name may have changed.
-    BOOL isArrow = ([ident isEqualToString:@"com.apple.coregraphics.Arrow"] || [ident isEqualToString:@"com.apple.coregraphics.ArrowCtx"]);
-    BOOL isIBeam = ([ident isEqualToString:@"com.apple.coregraphics.IBeam"] || [ident isEqualToString:@"com.apple.coregraphics.IBeamXOR"]);
+    // NOTE: ArrowS must be here too — this cape (and real-world capes) may
+    // contain ArrowS WITHOUT a separate Arrow entry.  If ArrowS skips synonym
+    // registration, ArrowCtx (the name macOS actually renders the pointer
+    // through) never receives the custom image and stays an 8x8 system
+    // bitmap → blinking/vanishing pointer after re-applies (2026-08-26).
+    BOOL isArrow = ([ident hasPrefix:@"com.apple.coregraphics.Arrow"]);
+    BOOL isIBeam = ([ident hasPrefix:@"com.apple.coregraphics.IBeam"]);
 
     MMLog("  Is Arrow: %s, Is IBeam: %s", isArrow ? "YES" : "NO", isIBeam ? "YES" : "NO");
 
@@ -986,6 +1007,13 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         NSUInteger failedCount = 0;
         NSMutableSet *registeredKeys = [NSMutableSet set];
 
+        // Reset the synonym-protection set for this pass.  From here until
+        // Step 5 completes, MCRegisterImagesForCursorName records EVERY name
+        // cape registrations write (cursor itself + all synonym families:
+        // Arrow→ArrowCtx/…, IBeam→IBeamXOR/…, resize sets, …).  Step 5 then
+        // protects all of them — no hand-maintained per-family lists.
+        g_capeRegisteredNames = [NSMutableSet set];
+
         for (NSString *key in cursors) {
             NSDictionary *cape = cursors[key];
             NSArray *reps = cape[MCCursorDictionaryRepresentationsKey];
@@ -1001,10 +1029,17 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
                 failedCount++;
             }
         }
-        MMLog("Cape cursors: %lu applied, %lu skipped, %lu failed",
-              (unsigned long)successCount, (unsigned long)skippedCount, (unsigned long)failedCount);
+        MMLog("Cape cursors: %lu applied, %lu skipped, %lu failed (wrote %lu names incl. synonyms)",
+              (unsigned long)successCount, (unsigned long)skippedCount, (unsigned long)failedCount,
+              (unsigned long)g_capeRegisteredNames.count);
 
-        // Step 5: Register system defaults NOT covered by the cape
+        // Step 5: Register system defaults NOT covered by the cape.
+        // Protection = anything the cape registrations actually WROTE this
+        // pass (g_capeRegisteredNames) plus the cape's own keys.  A name in
+        // either set is NOT re-registered as a system default — otherwise the
+        // system loop overwrites custom cursors (incl. synonyms like ArrowCtx
+        // that macOS renders the pointer through) with tiny system bitmaps.
+        [registeredKeys unionSet:g_capeRegisteredNames];
         __block NSUInteger systemDefaultCount = 0;
         [systemDefaults enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSDictionary *sysData, BOOL *stop) {
             if ([registeredKeys containsObject:name]) {
@@ -1046,6 +1081,8 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
     }
     } @finally {
         g_refreshingSystemDefaults = NO;
+        // Release this pass's synonym-protection set (see g_capeRegisteredNames).
+        g_capeRegisteredNames = nil;
     }
 }
 
