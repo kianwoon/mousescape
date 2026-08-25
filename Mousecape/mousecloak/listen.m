@@ -28,6 +28,30 @@ static void unregisterDisplayCallback(void);
 // Static references for session monitor cleanup
 static CFRunLoopSourceRef g_sessionMonitorRLS = NULL;
 
+// Shared wake re-apply debounce.  Wake fires TWO independent triggers —
+// the CGDisplay reconfiguration callback AND NSWorkspace.didWakeNotification
+// — within a few seconds of each other, plus 2-4 per-display reconfig events.
+// Each applyCapeWithoutReset() does CoreCursorUnregisterAll + re-register 50+
+// cursors + restart universalaccessd.  Measured 2026-08-24 (pre-fix): one wake
+// = 4 full applies + 4 uad restarts inside 35s → cursor disappeared.
+// File-scope so both triggers share one cooldown: ONE apply per wake.
+static CFAbsoluteTime g_lastSuccessfulApplyTime = 0.0;
+#define kWakeApplyCooldown 15.0
+
+BOOL wakeApplyCooldownActive(void) {
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - g_lastSuccessfulApplyTime < kWakeApplyCooldown) {
+        NSLog(@"[MousecapeHelper] wake-apply debounced (last apply %.1fs ago < %.0fs)",
+              now - g_lastSuccessfulApplyTime, kWakeApplyCooldown);
+        return YES;
+    }
+    return NO;
+}
+
+static void markWakeApplySucceeded(void) {
+    g_lastSuccessfulApplyTime = CFAbsoluteTimeGetCurrent();
+}
+
 NSString *appliedCapePathForUser(NSString *user) {
     // Validate user - must not be empty or contain path separators
     if (!user || user.length == 0 || [user containsString:@"/"] || [user containsString:@".."]) {
@@ -102,7 +126,10 @@ static void UserSpaceChanged(SCDynamicStoreRef	store, CFArrayRef changedKeys, vo
     if (appliedPath) {
         BOOL success = applyCapeAtPath(appliedPath);
         MMLog("Apply result: %s", success ? "SUCCESS" : "FAILED");
-        if (success) { HLOG("UserSpaceChanged apply succeeded"); }
+        if (success) {
+            markWakeApplySucceeded();
+            HLOG("UserSpaceChanged apply succeeded");
+        }
         else { HLOG_ERR("UserSpaceChanged apply FAILED"); }
         if (!success) {
             MMLog(BOLD RED "Application of cape failed" RESET);
@@ -135,15 +162,11 @@ void reconfigurationCallback(CGDirectDisplayID display,
         return;
     }
 
-    // Debounce: wake-from-sleep fires reconfigurationCallback per-display
-    // (typically 2-4 events within 1-2s). Each event triggers
-    // applyCapeWithoutReset() which temporarily sets scale to 8.0 for
-    // extraction. Rapid re-entry causes scale thrashing. A 3-second cooldown
-    // after a successful apply prevents this.
-    static CFAbsoluteTime lastSuccessfulReconfigApply = 0.0;
-    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
-    if (now - lastSuccessfulReconfigApply < 3.0) {
-        MMLog("Reconfig: debounced (last successful apply was %.1fs ago)", now - lastSuccessfulReconfigApply);
+    // Shared wake debounce (see g_lastSuccessfulApplyTime above): the
+    // NSWorkspace wake handler uses the SAME cooldown, so one wake produces
+    // exactly one apply between both triggers.
+    if (wakeApplyCooldownActive()) {
+        MMLog("Reconfig: debounced by shared wake cooldown");
         return;
     }
 
@@ -169,7 +192,7 @@ void reconfigurationCallback(CGDirectDisplayID display,
         MMLog("Apply attempt: %s", success ? "SUCCESS" : "FAILED");
         if (success) {
             HLOG("Reconfiguration apply: success");
-            lastSuccessfulReconfigApply = CFAbsoluteTimeGetCurrent();
+            markWakeApplySucceeded();
             // No separate reengageAccessibilityCursorCompositor() call here —
             // applyCapeAtPath() -> applyCapeWithoutReset() already does it
             // unconditionally on every successful apply (see apply.m).
@@ -416,6 +439,16 @@ void stopSessionMonitor(void) {
 
 BOOL reapplyCapeForCurrentUser(void) {
     HLOG("reapplyCapeForCurrentUser called");
+    // Shared wake debounce (see g_lastSuccessfulApplyTime above): the display
+    // reconfig trigger usually fires first and succeeds; this wake handler
+    // then calls this a moment later.  Without the shared cooldown it would
+    // run a redundant full apply (unregister-all + re-register + uad restart)
+    // right on top of the reconfig apply — the measured "4 applies per wake"
+    // that made the cursor disappear.
+    if (wakeApplyCooldownActive()) {
+        HLOG("Reapply debounced by shared wake cooldown");
+        return YES;
+    }
     NSString *capePath = appliedCapePathForUser(NSUserName());
     if (!capePath) {
         HLOG("No cape configured for current user");
@@ -425,7 +458,10 @@ BOOL reapplyCapeForCurrentUser(void) {
     // No separate reengageAccessibilityCursorCompositor() call here —
     // applyCapeAtPath() -> applyCapeWithoutReset() already does it
     // unconditionally on every successful apply (see apply.m).
-    if (success) { HLOG("Reapply succeeded"); }
+    if (success) {
+        markWakeApplySucceeded();
+        HLOG("Reapply succeeded");
+    }
     else { HLOG_ERR("Reapply failed"); }
     return success;
 }
