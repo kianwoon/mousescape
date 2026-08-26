@@ -985,23 +985,42 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
             float desired = [scales[name] floatValue];
             if (desired <= 0.0f) desired = 1.0f;
 
-            // Fetch HIGH-RESOLUTION system data.  Plain reads return the
-            // CURRENT registration (possibly a poisoned 8x8 bitmap from an
-            // earlier damaged session) — the clean built-in art only comes
-            // back at high resolution when the cursor scale is boosted during
-            // the read, exactly like the full pipeline's extraction step.
-            // Boost → read → restore takes milliseconds; the transient scale
-            // blip is the same one the full apply has always produced.
-            float scaleBefore = cursorScale();
-            CGSSetCursorScale(CGSMainConnectionID(), 8.0f);
-            NSDictionary *sysData = systemCapeWithIdentifier(name);
-            CGSSetCursorScale(CGSMainConnectionID(), scaleBefore);
-            if (!sysData) continue;
+            // NATIVE BASE lookup — persistent, pollution-immune.
+            // The full pipeline records each cursor's clean native point size
+            // at extraction time (right after unregister-all).  Using that
+            // record avoids the circular contamination where reads return our
+            // own previous registration (which once collapsed the whole
+            // resize family toward 8x).
+            NSDictionary *nativeBases = CFBridgingRelease(CFPreferencesCopyValue(
+                CFSTR("MCNativeCursorBases"), (CFStringRef)kMCDomain,
+                kCFPreferencesCurrentUser, kCFPreferencesAnyHost));
+            NSArray *base = nativeBases[name];
+            NSDictionary *fallbackSysData = nil;
+            if (![base isKindOfClass:[NSArray class]] || base.count < 2) {
+                // No recorded base yet — full apply hasn't run since this
+                // feature shipped.  Fall back to a boost-read.
+                float scaleBefore = cursorScale();
+                CGSSetCursorScale(CGSMainConnectionID(), 8.0f);
+                NSDictionary *sysData = systemCapeWithIdentifier(name);
+                CGSSetCursorScale(CGSMainConnectionID(), scaleBefore);
+                if (!sysData) continue;
+                float bw = [sysData[MCCursorDictionaryPointsWideKey] floatValue];
+                float bh = [sysData[MCCursorDictionaryPointsHighKey] floatValue];
+                base = @[@(bw), @(bh)];
+                fallbackSysData = sysData;
+            }
+            float baseW = [base[0] floatValue];
+            float baseH = [base[1] floatValue];
 
             CGSize curSize = CGSizeZero; CGPoint curHot = CGPointZero;
             NSUInteger frames = 0; CGFloat dur = 0; CFArrayRef arr = NULL;
             CGError e = CGSCopyRegisteredCursorImages(cid, (char *)name.UTF8String,
                                                       &curSize, &curHot, &frames, &dur, &arr);
+            // Keep the registered art for reuse below (bridged, no CFRelease).
+            NSArray *registeredImages = nil;
+            NSUInteger registeredFrameCount = 0;
+            CGFloat registeredFrameDuration = 0;
+            CFArrayRef arrRegistered = NULL;   // retained; released at loop end
             // Damaged-registration detection: a registered cursor whose payload
             // is tiny (e.g. 8x8 bitmaps left over from a poisoned session)
             // renders as visible pixelation at any scale.  Any real cursor art
@@ -1013,12 +1032,15 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
                     size_t w = CGImageGetWidth(curImg), h = CGImageGetHeight(curImg);
                     if (w < 64 && h < 64) payloadDamaged = YES;
                 }
+                registeredImages = (__bridge_transfer NSArray *)arr;   // takes ownership
+                arrRegistered = (__bridge_retained CFArrayRef)registeredImages;
+                registeredFrameCount = frames;
+                registeredFrameDuration = dur;
+            } else if (arr) {
+                CFRelease(arr);
             }
-            if (arr) CFRelease(arr);
 
-            float nativeW = [sysData[MCCursorDictionaryPointsWideKey] floatValue];
-            float nativeH = [sysData[MCCursorDictionaryPointsHighKey] floatValue];
-            CGSize wantSize = CGSizeMake(nativeW * desired, nativeH * desired);
+            CGSize wantSize = CGSizeMake(baseW * desired, baseH * desired);
 
             // NOT registered (err=1007) means it needs registration — never skip!
             BOOL notRegistered = (e == 1007 || e != kCGErrorSuccess);
@@ -1035,8 +1057,27 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
                   payloadDamaged ? "DAMAGED-PAYLOAD" : (notRegistered ? "UNREGISTERED" : "resize"),
                   curSize.width, curSize.height,
                   wantSize.width, wantSize.height);
-            BOOL ok = applyCapeForIdentifier(sysData, name, NO, YES, YES, YES, baseScale);
+            // Build the re-registration payload:
+            //  - images: the CURRENT registered art (already high-res from a
+            //    prior good registration) when available; otherwise the
+            //    boost-read system art from the fallback above.
+            //  - geometry: clean native base x user scale.
+            NSDictionary *regData = nil;
+            if (e == kCGErrorSuccess && arrRegistered) {
+                regData = @{MCCursorDictionaryPointsWideKey: @(baseW),
+                            MCCursorDictionaryPointsHighKey: @(baseH),
+                            MCCursorDictionaryHotSpotXKey: @(baseW * 0.5f),
+                            MCCursorDictionaryHotSpotYKey: @(baseH * 0.5f),
+                            MCCursorDictionaryRepresentationsKey: registeredImages,
+                            MCCursorDictionaryFrameCountKey: @(registeredFrameCount),
+                            MCCursorDictionaryFrameDuratiomKey: @(registeredFrameDuration)};
+            } else if (fallbackSysData) {
+                regData = fallbackSysData;
+            }
+            if (!regData) { if (arrRegistered) CFRelease(arrRegistered); continue; }
+            BOOL ok = applyCapeForIdentifier(regData, name, NO, YES, YES, YES, baseScale);
             if (ok) { changed++; } else { failed++; }
+            if (arrRegistered) CFRelease(arrRegistered);
         }
     }
 
@@ -1130,12 +1171,26 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         CGSHideCursor(CGSMainConnectionID());
 
         NSMutableDictionary *systemDefaults = [NSMutableDictionary dictionary];
+        NSMutableDictionary *nativeBases = [NSMutableDictionary dictionary];
         MCEnumerateAllCursorIdentifiers(^(NSString *name) {
             NSDictionary *sysData = systemCapeWithIdentifier(name);
             if (sysData) {
                 systemDefaults[name] = sysData;
+                // Record the native base point size for surgical applies.
+                // This runs right after unregister-all, so the read is CLEAN —
+                // the authoritative native geometry forever after.
+                float nw = [sysData[MCCursorDictionaryPointsWideKey] floatValue];
+                float nh = [sysData[MCCursorDictionaryPointsHighKey] floatValue];
+                nativeBases[name] = @[@(nw), @(nh)];
             }
         });
+        // Persist for surgical phase2 (immune to session-state pollution).
+        if (nativeBases.count > 0) {
+            CFPreferencesSetValue(CFSTR("MCNativeCursorBases"), (__bridge CFPropertyListRef)nativeBases,
+                                  (CFStringRef)kMCDomain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+            CFPreferencesSynchronize((CFStringRef)kMCDomain, kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+            MMLog("Recorded %lu native base sizes for surgical use", (unsigned long)nativeBases.count);
+        }
 
         // Restore scale immediately after extraction
         CGSSetCursorScale(CGSMainConnectionID(), savedScale);

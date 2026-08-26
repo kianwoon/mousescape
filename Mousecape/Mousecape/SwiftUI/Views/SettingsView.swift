@@ -787,12 +787,30 @@ struct CustomScaleView: View {
     }
 
     private func savePerCursorScales() {
-        CFPreferencesSetAppValue(
+        // MERGE instead of overwrite (2026-08-27): the in-memory dict is an
+        // onAppear snapshot and can be stale if anything else (Helper, CLI,
+        // or a previous editor session) updated keys meanwhile.  Writing the
+        // whole snapshot silently reverted those changes — the "my size got
+        // overridden" report.  Merge: disk wins for keys we haven't touched
+        // in this editor session, memory wins for the ones we changed.
+        if let disk = CFPreferencesCopyValue(
+            Self.perCursorScalesKey as CFString,
+            Self.preferenceDomain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        ) as? [String: Double] {
+            for (k, v) in disk where perCursorScales[k] == nil {
+                perCursorScales[k] = v
+            }
+        }
+        CFPreferencesSetValue(
             Self.perCursorScalesKey as CFString,
             perCursorScales as CFPropertyList,
-            Self.preferenceDomain as CFString
+            Self.preferenceDomain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
         )
-        CFPreferencesAppSynchronize(Self.preferenceDomain as CFString)
+        CFPreferencesSynchronize(Self.preferenceDomain as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
     }
 
     private func updateScale(for cursorType: CursorType, to value: Double) {

@@ -319,27 +319,14 @@ final class AppState: @unchecked Sendable {
             perCursorScales[identifier] = scale
         }
 
-        // ALIAS FAMILY SYNC (2026-08-26): Arrow/ArrowCtx are aliases of the
-        // registered arrow image — they render whatever ArrowS (or whichever
-        // family member exists in the cape) registered.  Independent sizes are
-        // impossible: each apply would flip the family between conflicting
-        // values = blinking.  Keep alias scales in lockstep.
-        func aliasOf(_ id: String) -> String? {
-            switch id {
-            case "com.apple.coregraphics.Arrow": return "com.apple.coregraphics.ArrowS"
-            case "com.apple.coregraphics.ArrowS": return "com.apple.coregraphics.Arrow"
-            case "com.apple.coregraphics.IBeam": fallthrough
-            case "com.apple.coregraphics.IBeamXOR": return "com.apple.coregraphics.IBeam"
-            default: return nil
-            }
-        }
-        if let twin = aliasOf(identifier) {
-            if abs(scale - 1.0) < 0.01 {
-                perCursorScales.removeValue(forKey: twin)
-            } else {
-                perCursorScales[twin] = scale
-            }
-        }
+        // NOTE on alias families (2026-08-27): Arrow and ArrowS are aliases of
+        // one registered image (whichever family member the cape carries), so
+        // independent sizes cannot BOTH render.  We deliberately do NOT sync
+        // the twin here anymore — silently rewriting the user's other slider
+        // felt like an override.  The apply pipeline resolves the conflict
+        // instead: the cape-owned entry is authoritative (surgical phase2's
+        // synonymOwned skip), so the rendered size follows the cape entry and
+        // never oscillates.
 
         // Save
         CFPreferencesSetValue(
