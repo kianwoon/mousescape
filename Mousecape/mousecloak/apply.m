@@ -887,61 +887,13 @@ void reengageAccessibilityCursorCompositor(void) {
 }
 
 // ---------------------------------------------------------------------------
-// CursorUIViewService mitigation (2026-08-26)
-//
-// macOS delegates SOFTWARE cursor compositing (used when the cursor bitmap is
-// too large for the hardware plane, i.e. our large per-cursor scales) to an
-// on-demand XPC service: CursorUIViewService.  On this macOS beta the
-// handoff between WindowServer and that service is unstable — every surface
-// upload races with the service's XPC connection churn, producing
-// "Cursor disabled: failed set_cursor_surface" on mouse move = the visible
-// BLINKING of large custom cursors.
-//
-// Verified experimentally (2026-08-26, 65x/50x cursors):
-//   - Service alive  → 4-7 surface errors per 30s of mouse movement (blink)
-//   - kill -9 service → it does NOT relaunch on apply, on uad restart, or on
-//     mouse movement; WindowServer falls back to rendering the cursor
-//     itself → 0 errors, rock solid, same visual size.
-//
-// So after every successful apply we terminate it if present.  This is the
-// programmatic equivalent of the "fresh boot state" where the service was
-// never started and large cursors render fine.
-// ---------------------------------------------------------------------------
-static void terminateCursorUIViewServiceOnce(void) {
-    @try {
-        NSTask *task = [[NSTask alloc] init];
-        task.launchPath = @"/usr/bin/pkill";
-        task.arguments = @[@"-9", @"-x", @"CursorUIViewService"];
-        task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
-        task.standardError = [NSFileHandle fileHandleWithNullDevice];
-        [task launch];
-        [task waitUntilExit];
-        // Exit status 0 = we killed something (service was running).
-        // Non-zero = no process matched — nothing to do, that's fine.
-        if (task.terminationStatus == 0) {
-            MMLog("CursorUIViewService: terminated (unstable software-cursor renderer; WindowServer now renders directly — fixes large-cursor blink)");
-        }
-    } @catch (NSException *exception) {
-        NSLog(@"[MousecapeHelper][ERROR] terminateCursorUIViewService: %@", exception);
-    }
-}
-
-// ---------------------------------------------------------------------------
 // SURGICAL APPLY (2026-08-26)
 //
-// The full pipeline (unregister-all -> scale ramp 1->8->1 -> re-register 50+
-// cursors -> restart uad) is a REBUILD designed for cape switches.  Using it
-// for a mere scale tweak destroyed the stable render state: the storm leaves
-// the cursor surface oscillating (measured: current-cursor buffer flapping
-// 4096sq<->2048sq for seconds after apply = the visible blink).  Boot works
-// because it registers ONCE and nothing touches the cursor again.
-//
-// Surgical path: when the SAME cape is already applied and only per-cursor
-// scales/images changed, re-register ONLY the changed entries in place
-// (CGSRegisterCursorWithImages overwrites a name).  No unregister-all, no
-// scale ramp, no backup storm, no uad/service kills — the stable state is
-// never disturbed.  Diff = compare desired vs CURRENT registered geometry
-// (point size + hotspot) per cursor name.
+// The full pipeline (unregister-all -> scale ramp -> re-register 50+ cursors
+// -> restart uad) is a REBUILD designed for cape switches.  For a mere scale
+// tweak it destroys the stable render state.  Surgical path: when the SAME
+// cape is already applied in custom mode, re-register ONLY entries whose
+// geometry changed, in place.  No unregister-all, no ramp, no uad restart.
 // ---------------------------------------------------------------------------
 BOOL applyCapeSurgical(NSDictionary *dictionary) {
     NSDictionary *cursors = dictionary[MCCursorDictionaryCursorsKey];
@@ -950,13 +902,10 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
     MMLog("=== SURGICAL APPLY: %s ===", name.UTF8String);
     MMLog("========================================");
 
-    // Only for custom mode (per-cursor scales) — global mode relies on
-    // CGSSetCursorScale, a different mechanism.
     if (!customScaleMode()) {
         MMLog("Surgical: global scale mode — falling back to full apply");
         return NO;
     }
-    // Only when this very cape is the one currently applied.
     NSString *applied = [MCDefault(MCPreferencesAppliedCursorKey) copy];
     NSString *ident = dictionary[MCCursorDictionaryIdentifierKey];
     if (!applied || !ident || ![applied isEqualToString:ident]) {
@@ -965,24 +914,20 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
     }
 
     CGSConnectionID cid = CGSMainConnectionID();
-    float baseScale = 1.0f;   // custom mode registers at native x scale
+    float baseScale = 1.0f;
     NSUInteger changed = 0, unchanged = 0, failed = 0;
-    NSMutableSet *protected = [NSMutableSet set];   // names we re-register
 
     for (NSString *key in cursors) {
         NSDictionary *cape = cursors[key];
         NSArray *reps = cape[MCCursorDictionaryRepresentationsKey];
         if (!reps || reps.count == 0) continue;
 
-        // Desired geometry: native size x per-cursor scale (same math as
-        // applyCapeForIdentifier custom mode).
         NSDictionary *scales = MCDefault(MCPreferencesPerCursorScalesKey);
         float desired = [scales[key] floatValue];
         if (desired <= 0.0f) desired = 1.0f;
         CGSize desiredSize = CGSizeMake([cape[MCCursorDictionaryPointsWideKey] floatValue] * desired,
                                         [cape[MCCursorDictionaryPointsHighKey] floatValue] * desired);
 
-        // Current registered geometry for this name.
         CGSize curSize = CGSizeZero; CGPoint curHot = CGPointZero;
         NSUInteger frames = 0; CGFloat dur = 0; CFArrayRef arr = NULL;
         CGError e = CGSCopyRegisteredCursorImages(cid, (char *)key.UTF8String,
@@ -993,25 +938,14 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
             fabsf(curSize.width - desiredSize.width) < 0.5f &&
             fabsf(curSize.height - desiredSize.height) < 0.5f) {
             unchanged++;
-            continue;   // identical registration — leave the stable state alone
+            continue;
         }
 
-        // Changed (or not yet registered): re-register in place.
         MMLog("Surgical: %s %.0fx%.0f -> %.0fx%.0f — re-registering",
               key.UTF8String, curSize.width, curSize.height,
               desiredSize.width, desiredSize.height);
         BOOL ok = applyCapeForIdentifier(cape, key, NO, YES, NO, NO, baseScale);
-        if (ok) {
-            changed++;
-            [protected addObject:key];
-            if ([key hasPrefix:@"com.apple.coregraphics.Arrow"]) {
-                [protected addObjectsFromArray:MCArrowSynonyms()];
-            } else if ([key hasPrefix:@"com.apple.coregraphics.IBeam"]) {
-                [protected addObjectsFromArray:MCIBeamSynonyms()];
-            }
-        } else {
-            failed++;
-        }
+        if (ok) { changed++; } else { failed++; }
     }
 
     MMLog("Surgical result: %lu changed, %lu unchanged, %lu failed",
@@ -1024,61 +958,11 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
         MMLog("Surgical: all re-registrations failed — falling back to full apply");
         return NO;
     }
-
-    // Keep the applied-cursor pref fresh (identifier unchanged, but be explicit).
     MCSetDefault(dictionary[MCCursorDictionaryIdentifierKey], MCPreferencesAppliedCursorKey);
     MMLog(BOLD GREEN "Surgical apply complete — no unregister/ramp/uad-kill performed" RESET);
     return YES;
 }
 
-// Terminates CursorUIViewService with re-kill coverage.  TIMING MATTERS:
-// reengageAccessibilityCursorCompositor() restarts universalaccessd moments
-// before this runs, and uad (or other system paths) can RELAUNCH
-// CursorUIViewService at unpredictable times — measured relaunches at +12s,
-// +16s and +52s after apply.  No fixed schedule of re-kills covers an
-// unbounded window (verified: +20s/+45s re-kills missed a +52s relaunch).
-//
-// Strategy:
-//   1. Synchronously kill now AND once more after 3s (covers the immediate
-//      relaunch path even for short-lived CLI processes).
-//   2. In long-lived processes (Helper), start a PERSISTENT watchdog thread
-//      that kills the service every time it appears, forever.  This is not
-//      the failed "surface guardian" (which fought the apply pipeline) —
-//      it only watches one process name and performs one kill, nothing else.
-static void *cursorUIViewServiceWatchdog(void *unused) {
-    (void)unused;
-    // pthread detached loop; runs for process lifetime.
-    while (true) {
-        usleep(30000000);  // 30s cadence
-        @autoreleasepool {
-            NSTask *task = [[NSTask alloc] init];
-            task.launchPath = @"/usr/bin/pkill";
-            task.arguments = @[@"-9", @"-x", @"CursorUIViewService"];
-            task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
-            task.standardError = [NSFileHandle fileHandleWithNullDevice];
-            [task launch];
-            [task waitUntilExit];
-            if (task.terminationStatus == 0) {
-                MMLog("CursorUIViewService-watchdog: relaunched by system — killed again");
-            }
-        }
-    }
-    return NULL;
-}
-
-static void terminateCursorUIViewServiceIfRunning(void) {
-    terminateCursorUIViewServiceOnce();
-    usleep(3000000);  // 3s — covers immediate relaunch
-    terminateCursorUIViewServiceOnce();
-    // Persistent watchdog (only useful in long-lived processes; in the CLI
-    // it dies with the process, which is fine — the Helper runs it).
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        pthread_t thread;
-        pthread_create(&thread, NULL, cursorUIViewServiceWatchdog, NULL);
-        pthread_detach(thread);
-    });
-}
 BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
     // Re-entry guard: prevent concurrent apply calls (e.g. multiple display
     // reconfiguration events in quick succession on wake).
@@ -1268,11 +1152,6 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         // bug it fixes is caused by re-registration itself, not by any one
         // trigger source. See reengageAccessibilityCursorCompositor() above.
         reengageAccessibilityCursorCompositor();
-
-        // Large-cursor blink fix (2026-08-26): terminate the unstable
-        // software-cursor renderer service so WindowServer renders large
-        // cursors directly.  See terminateCursorUIViewServiceIfRunning().
-        terminateCursorUIViewServiceIfRunning();
 
         return YES;
     }

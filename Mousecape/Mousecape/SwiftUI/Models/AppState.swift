@@ -679,14 +679,19 @@ final class AppState: @unchecked Sendable {
         // registration, system default re-registration (with registeredKeys to avoid
         // shadow doubling), and MCForceCursorReevaluation.
         let capeDict = capeDictNS as! [AnyHashable: Any]
-        let success = applyCapeWithoutReset(capeDict)
+        // Surgical first (in-place update of changed cursors only — preserves
+        // the stable render state); falls back to the full rebuild inside
+        // applyCapeSurgical when preconditions aren't met (returns NO).
+        if !applyCapeSurgical(capeDict) {
+            let success = applyCapeWithoutReset(capeDict)
 
-        if !success {
-            debugLog("Apply failed - applyCapeWithoutReset returned false")
-            operationResultMessage = String(localized: "Failed to apply cape.")
-            operationResultIsSuccess = false
-            showOperationResult = true
-            return
+            if !success {
+                debugLog("Apply failed - applyCapeWithoutReset returned false")
+                operationResultMessage = String(localized: "Failed to apply cape.")
+                operationResultIsSuccess = false
+                showOperationResult = true
+                return
+            }
         }
 
         appliedCape = cape

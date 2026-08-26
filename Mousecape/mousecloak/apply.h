@@ -21,6 +21,11 @@ extern NSDictionary *applyCapeWithResult(NSDictionary *dictionary);
 extern BOOL applyCapeAtPath(NSString *path);
 extern void refreshSystemDefaultCursors(void);
 extern BOOL applyCapeWithoutReset(NSDictionary *dictionary);
+// Surgical apply: when the same cape is already applied and only per-cursor
+// scales/images changed, re-registers ONLY changed cursors in place — no
+// unregister-all, no scale ramp, no compositor restart.  Returns NO (caller
+// falls back to the full rebuild) when preconditions aren't met.
+extern BOOL applyCapeSurgical(NSDictionary *dictionary);
 extern volatile BOOL g_refreshingSystemDefaults;
 
 // Restarts com.apple.universalaccessd (the Accessibility pointer-enlargement
