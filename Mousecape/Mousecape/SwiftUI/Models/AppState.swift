@@ -297,7 +297,7 @@ final class AppState: @unchecked Sendable {
 
     /// Get the per-cursor scale for a cursor identifier (default 1.0)
     func getPerCursorScale(for identifier: String) -> Double {
-        if let dict = CFPreferencesCopyAppValue(Self.perCursorScalesKey as CFString, Self.preferenceDomain as CFString) as? [String: Double],
+        if let dict = CFPreferencesCopyValue(Self.perCursorScalesKey as CFString, Self.preferenceDomain as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? [String: Double],
            let scale = dict[identifier], scale > 0 {
             return scale
         }
@@ -308,7 +308,7 @@ final class AppState: @unchecked Sendable {
     func setPerCursorScale(_ scale: Double, for identifier: String) {
         // Read existing dict
         var perCursorScales: [String: Double] = [:]
-        if let dict = CFPreferencesCopyAppValue(Self.perCursorScalesKey as CFString, Self.preferenceDomain as CFString) as? [String: Double] {
+        if let dict = CFPreferencesCopyValue(Self.perCursorScalesKey as CFString, Self.preferenceDomain as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? [String: Double] {
             perCursorScales = dict
         }
 
@@ -319,23 +319,49 @@ final class AppState: @unchecked Sendable {
             perCursorScales[identifier] = scale
         }
 
+        // ALIAS FAMILY SYNC (2026-08-26): Arrow/ArrowCtx are aliases of the
+        // registered arrow image — they render whatever ArrowS (or whichever
+        // family member exists in the cape) registered.  Independent sizes are
+        // impossible: each apply would flip the family between conflicting
+        // values = blinking.  Keep alias scales in lockstep.
+        func aliasOf(_ id: String) -> String? {
+            switch id {
+            case "com.apple.coregraphics.Arrow": return "com.apple.coregraphics.ArrowS"
+            case "com.apple.coregraphics.ArrowS": return "com.apple.coregraphics.Arrow"
+            case "com.apple.coregraphics.IBeam": fallthrough
+            case "com.apple.coregraphics.IBeamXOR": return "com.apple.coregraphics.IBeam"
+            default: return nil
+            }
+        }
+        if let twin = aliasOf(identifier) {
+            if abs(scale - 1.0) < 0.01 {
+                perCursorScales.removeValue(forKey: twin)
+            } else {
+                perCursorScales[twin] = scale
+            }
+        }
+
         // Save
-        CFPreferencesSetAppValue(
+        CFPreferencesSetValue(
             Self.perCursorScalesKey as CFString,
             perCursorScales as CFPropertyList,
-            Self.preferenceDomain as CFString
+            Self.preferenceDomain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
         )
-        CFPreferencesAppSynchronize(Self.preferenceDomain as CFString)
+        CFPreferencesSynchronize(Self.preferenceDomain as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
 
         // Auto-switch to custom scale mode if currently in global mode
-        if let mode = CFPreferencesCopyAppValue(Self.scaleModeKey as CFString, Self.preferenceDomain as CFString) as? String,
+        if let mode = CFPreferencesCopyValue(Self.scaleModeKey as CFString, Self.preferenceDomain as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? String,
            mode == "global" {
-            CFPreferencesSetAppValue(
+            CFPreferencesSetValue(
                 Self.scaleModeKey as CFString,
                 "custom" as CFString,
-                Self.preferenceDomain as CFString
+                Self.preferenceDomain as CFString,
+                kCFPreferencesCurrentUser,
+                kCFPreferencesCurrentHost
             )
-            CFPreferencesAppSynchronize(Self.preferenceDomain as CFString)
+            CFPreferencesSynchronize(Self.preferenceDomain as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
             setCustomScaleMode(true)
             // Set base scale to 1.0 for custom mode
             _ = setCursorScale(1.0)
