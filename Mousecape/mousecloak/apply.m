@@ -985,30 +985,34 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
             float desired = [scales[name] floatValue];
             if (desired <= 0.0f) desired = 1.0f;
 
+            // Fetch clean system data FIRST (its fallback path reads built-in
+            // cursors via CoreCursorSet even when nothing is registered).
+            NSDictionary *sysData = systemCapeWithIdentifier(name);
+            if (!sysData) continue;
+
             CGSize curSize = CGSizeZero; CGPoint curHot = CGPointZero;
             NSUInteger frames = 0; CGFloat dur = 0; CFArrayRef arr = NULL;
             CGError e = CGSCopyRegisteredCursorImages(cid, (char *)name.UTF8String,
                                                       &curSize, &curHot, &frames, &dur, &arr);
             if (arr) CFRelease(arr);
-            if (e != kCGErrorSuccess) continue;   // not registered — full pipeline owns it
 
-            // Current registered native base = curSize / currentEffectiveScale.
-            // We cannot know the scale it was registered with from the API
-            // alone; instead compare against the system native size: fetch it
-            // once via systemCapeWithIdentifier (returns native points).
-            NSDictionary *sysData = systemCapeWithIdentifier(name);
-            if (!sysData) continue;
             float nativeW = [sysData[MCCursorDictionaryPointsWideKey] floatValue];
             float nativeH = [sysData[MCCursorDictionaryPointsHighKey] floatValue];
             CGSize wantSize = CGSizeMake(nativeW * desired, nativeH * desired);
 
-            if (fabsf(curSize.width - wantSize.width) < 0.5f &&
-                fabsf(curSize.height - wantSize.height) < 0.5f) {
-                continue;   // already at desired size
+            // NOT registered (err=1007) means it needs registration — never skip!
+            BOOL notRegistered = (e == 1007 || e != kCGErrorSuccess);
+            BOOL sizeMismatch = (e == kCGErrorSuccess) &&
+                (fabsf(curSize.width - wantSize.width) >= 0.5f ||
+                 fabsf(curSize.height - wantSize.height) >= 0.5f);
+
+            if (!notRegistered && !sizeMismatch) {
+                continue;   // already correct
             }
 
-            MMLog("Surgical(sys): %s %.0fx%.0f -> %.0fx%.0f — re-registering",
-                  name.UTF8String, curSize.width, curSize.height,
+            MMLog("Surgical(sys): %s %s (%.0fx%.0f) -> %.0fx%.0f — re-registering",
+                  name.UTF8String, notRegistered ? "UNREGISTERED" : "resize",
+                  curSize.width, curSize.height,
                   wantSize.width, wantSize.height);
             BOOL ok = applyCapeForIdentifier(sysData, name, NO, YES, YES, YES, baseScale);
             if (ok) { changed++; } else { failed++; }
