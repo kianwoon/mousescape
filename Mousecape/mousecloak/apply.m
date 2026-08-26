@@ -885,13 +885,45 @@ void reengageAccessibilityCursorCompositor(void) {
     }
 }
 
-// Same as applyCape() but with a different strategy for running systems.
-// Instead of resetAllCursors() → CoreCursorUnregisterAll() → apply everything,
-// we: (1) unregister all to clear the WindowServer cache, (2) extract system
-// defaults at 8x while the cache is clean, (3) store them, (4) register cape
-// cursors + stored system defaults.  This avoids the corruption that happens
-// when CoreCursorUnregisterAll() is followed by registering many cursors on a
-// running system.
+// ---------------------------------------------------------------------------
+// CursorUIViewService mitigation (2026-08-26)
+//
+// macOS delegates SOFTWARE cursor compositing (used when the cursor bitmap is
+// too large for the hardware plane, i.e. our large per-cursor scales) to an
+// on-demand XPC service: CursorUIViewService.  On this macOS beta the
+// handoff between WindowServer and that service is unstable — every surface
+// upload races with the service's XPC connection churn, producing
+// "Cursor disabled: failed set_cursor_surface" on mouse move = the visible
+// BLINKING of large custom cursors.
+//
+// Verified experimentally (2026-08-26, 65x/50x cursors):
+//   - Service alive  → 4-7 surface errors per 30s of mouse movement (blink)
+//   - kill -9 service → it does NOT relaunch on apply, on uad restart, or on
+//     mouse movement; WindowServer falls back to rendering the cursor
+//     itself → 0 errors, rock solid, same visual size.
+//
+// So after every successful apply we terminate it if present.  This is the
+// programmatic equivalent of the "fresh boot state" where the service was
+// never started and large cursors render fine.
+// ---------------------------------------------------------------------------
+static void terminateCursorUIViewServiceIfRunning(void) {
+    @try {
+        NSTask *task = [[NSTask alloc] init];
+        task.launchPath = @"/usr/bin/pkill";
+        task.arguments = @[@"-9", @"-x", @"CursorUIViewService"];
+        task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+        task.standardError = [NSFileHandle fileHandleWithNullDevice];
+        [task launch];
+        [task waitUntilExit];
+        // Exit status 0 = we killed something (service was running).
+        // Non-zero = no process matched — nothing to do, that's fine.
+        if (task.terminationStatus == 0) {
+            MMLog("CursorUIViewService: terminated (unstable software-cursor renderer; WindowServer now renders directly — fixes large-cursor blink)");
+        }
+    } @catch (NSException *exception) {
+        NSLog(@"[MousecapeHelper][ERROR] terminateCursorUIViewService: %@", exception);
+    }
+}
 BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
     // Re-entry guard: prevent concurrent apply calls (e.g. multiple display
     // reconfiguration events in quick succession on wake).
@@ -1076,6 +1108,11 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         // bug it fixes is caused by re-registration itself, not by any one
         // trigger source. See reengageAccessibilityCursorCompositor() above.
         reengageAccessibilityCursorCompositor();
+
+        // Large-cursor blink fix (2026-08-26): terminate the unstable
+        // software-cursor renderer service so WindowServer renders large
+        // cursors directly.  See terminateCursorUIViewServiceIfRunning().
+        terminateCursorUIViewServiceIfRunning();
 
         return YES;
     }
