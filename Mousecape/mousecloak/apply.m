@@ -985,15 +985,35 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
             float desired = [scales[name] floatValue];
             if (desired <= 0.0f) desired = 1.0f;
 
-            // Fetch clean system data FIRST (its fallback path reads built-in
-            // cursors via CoreCursorSet even when nothing is registered).
+            // Fetch HIGH-RESOLUTION system data.  Plain reads return the
+            // CURRENT registration (possibly a poisoned 8x8 bitmap from an
+            // earlier damaged session) — the clean built-in art only comes
+            // back at high resolution when the cursor scale is boosted during
+            // the read, exactly like the full pipeline's extraction step.
+            // Boost → read → restore takes milliseconds; the transient scale
+            // blip is the same one the full apply has always produced.
+            float scaleBefore = cursorScale();
+            CGSSetCursorScale(CGSMainConnectionID(), 8.0f);
             NSDictionary *sysData = systemCapeWithIdentifier(name);
+            CGSSetCursorScale(CGSMainConnectionID(), scaleBefore);
             if (!sysData) continue;
 
             CGSize curSize = CGSizeZero; CGPoint curHot = CGPointZero;
             NSUInteger frames = 0; CGFloat dur = 0; CFArrayRef arr = NULL;
             CGError e = CGSCopyRegisteredCursorImages(cid, (char *)name.UTF8String,
                                                       &curSize, &curHot, &frames, &dur, &arr);
+            // Damaged-registration detection: a registered cursor whose payload
+            // is tiny (e.g. 8x8 bitmaps left over from a poisoned session)
+            // renders as visible pixelation at any scale.  Any real cursor art
+            // is far larger; < 64px on the longest side = garbage → replace.
+            BOOL payloadDamaged = NO;
+            if (e == kCGErrorSuccess && arr && CFArrayGetCount(arr) > 0) {
+                CGImageRef curImg = (CGImageRef)CFArrayGetValueAtIndex(arr, 0);
+                if (curImg) {
+                    size_t w = CGImageGetWidth(curImg), h = CGImageGetHeight(curImg);
+                    if (w < 64 && h < 64) payloadDamaged = YES;
+                }
+            }
             if (arr) CFRelease(arr);
 
             float nativeW = [sysData[MCCursorDictionaryPointsWideKey] floatValue];
@@ -1006,12 +1026,13 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
                 (fabsf(curSize.width - wantSize.width) >= 0.5f ||
                  fabsf(curSize.height - wantSize.height) >= 0.5f);
 
-            if (!notRegistered && !sizeMismatch) {
+            if (!notRegistered && !sizeMismatch && !payloadDamaged) {
                 continue;   // already correct
             }
 
             MMLog("Surgical(sys): %s %s (%.0fx%.0f) -> %.0fx%.0f — re-registering",
-                  name.UTF8String, notRegistered ? "UNREGISTERED" : "resize",
+                  name.UTF8String,
+                  payloadDamaged ? "DAMAGED-PAYLOAD" : (notRegistered ? "UNREGISTERED" : "resize"),
                   curSize.width, curSize.height,
                   wantSize.width, wantSize.height);
             BOOL ok = applyCapeForIdentifier(sysData, name, NO, YES, YES, YES, baseScale);
