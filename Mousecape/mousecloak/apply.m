@@ -926,6 +926,111 @@ static void terminateCursorUIViewServiceOnce(void) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// SURGICAL APPLY (2026-08-26)
+//
+// The full pipeline (unregister-all -> scale ramp 1->8->1 -> re-register 50+
+// cursors -> restart uad) is a REBUILD designed for cape switches.  Using it
+// for a mere scale tweak destroyed the stable render state: the storm leaves
+// the cursor surface oscillating (measured: current-cursor buffer flapping
+// 4096sq<->2048sq for seconds after apply = the visible blink).  Boot works
+// because it registers ONCE and nothing touches the cursor again.
+//
+// Surgical path: when the SAME cape is already applied and only per-cursor
+// scales/images changed, re-register ONLY the changed entries in place
+// (CGSRegisterCursorWithImages overwrites a name).  No unregister-all, no
+// scale ramp, no backup storm, no uad/service kills — the stable state is
+// never disturbed.  Diff = compare desired vs CURRENT registered geometry
+// (point size + hotspot) per cursor name.
+// ---------------------------------------------------------------------------
+BOOL applyCapeSurgical(NSDictionary *dictionary) {
+    NSDictionary *cursors = dictionary[MCCursorDictionaryCursorsKey];
+    NSString *name = dictionary[MCCursorDictionaryCapeNameKey];
+    MMLog("========================================");
+    MMLog("=== SURGICAL APPLY: %s ===", name.UTF8String);
+    MMLog("========================================");
+
+    // Only for custom mode (per-cursor scales) — global mode relies on
+    // CGSSetCursorScale, a different mechanism.
+    if (!customScaleMode()) {
+        MMLog("Surgical: global scale mode — falling back to full apply");
+        return NO;
+    }
+    // Only when this very cape is the one currently applied.
+    NSString *applied = [MCDefault(MCPreferencesAppliedCursorKey) copy];
+    NSString *ident = dictionary[MCCursorDictionaryIdentifierKey];
+    if (!applied || !ident || ![applied isEqualToString:ident]) {
+        MMLog("Surgical: different/none cape applied — falling back to full apply");
+        return NO;
+    }
+
+    CGSConnectionID cid = CGSMainConnectionID();
+    float baseScale = 1.0f;   // custom mode registers at native x scale
+    NSUInteger changed = 0, unchanged = 0, failed = 0;
+    NSMutableSet *protected = [NSMutableSet set];   // names we re-register
+
+    for (NSString *key in cursors) {
+        NSDictionary *cape = cursors[key];
+        NSArray *reps = cape[MCCursorDictionaryRepresentationsKey];
+        if (!reps || reps.count == 0) continue;
+
+        // Desired geometry: native size x per-cursor scale (same math as
+        // applyCapeForIdentifier custom mode).
+        NSDictionary *scales = MCDefault(MCPreferencesPerCursorScalesKey);
+        float desired = [scales[key] floatValue];
+        if (desired <= 0.0f) desired = 1.0f;
+        CGSize desiredSize = CGSizeMake([cape[MCCursorDictionaryPointsWideKey] floatValue] * desired,
+                                        [cape[MCCursorDictionaryPointsHighKey] floatValue] * desired);
+
+        // Current registered geometry for this name.
+        CGSize curSize = CGSizeZero; CGPoint curHot = CGPointZero;
+        NSUInteger frames = 0; CGFloat dur = 0; CFArrayRef arr = NULL;
+        CGError e = CGSCopyRegisteredCursorImages(cid, (char *)key.UTF8String,
+                                                  &curSize, &curHot, &frames, &dur, &arr);
+        if (arr) CFRelease(arr);
+
+        if (e == kCGErrorSuccess &&
+            fabsf(curSize.width - desiredSize.width) < 0.5f &&
+            fabsf(curSize.height - desiredSize.height) < 0.5f) {
+            unchanged++;
+            continue;   // identical registration — leave the stable state alone
+        }
+
+        // Changed (or not yet registered): re-register in place.
+        MMLog("Surgical: %s %.0fx%.0f -> %.0fx%.0f — re-registering",
+              key.UTF8String, curSize.width, curSize.height,
+              desiredSize.width, desiredSize.height);
+        BOOL ok = applyCapeForIdentifier(cape, key, NO, YES, NO, NO, baseScale);
+        if (ok) {
+            changed++;
+            [protected addObject:key];
+            if ([key hasPrefix:@"com.apple.coregraphics.Arrow"]) {
+                [protected addObjectsFromArray:MCArrowSynonyms()];
+            } else if ([key hasPrefix:@"com.apple.coregraphics.IBeam"]) {
+                [protected addObjectsFromArray:MCIBeamSynonyms()];
+            }
+        } else {
+            failed++;
+        }
+    }
+
+    MMLog("Surgical result: %lu changed, %lu unchanged, %lu failed",
+          (unsigned long)changed, (unsigned long)unchanged, (unsigned long)failed);
+    if (changed == 0 && failed == 0) {
+        MMLog("Surgical: nothing to do — stable state untouched");
+        return YES;
+    }
+    if (failed > 0 && changed == 0) {
+        MMLog("Surgical: all re-registrations failed — falling back to full apply");
+        return NO;
+    }
+
+    // Keep the applied-cursor pref fresh (identifier unchanged, but be explicit).
+    MCSetDefault(dictionary[MCCursorDictionaryIdentifierKey], MCPreferencesAppliedCursorKey);
+    MMLog(BOLD GREEN "Surgical apply complete — no unregister/ramp/uad-kill performed" RESET);
+    return YES;
+}
+
 // Terminates CursorUIViewService with re-kill coverage.  TIMING MATTERS:
 // reengageAccessibilityCursorCompositor() restarts universalaccessd moments
 // before this runs, and uad (or other system paths) can RELAUNCH
@@ -1122,8 +1227,13 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         // system loop overwrites custom cursors (incl. synonyms like ArrowCtx
         // that macOS renders the pointer through) with tiny system bitmaps.
         [registeredKeys unionSet:g_capeRegisteredNames];
+        // EXPERIMENT (2026-08-26): MC_SKIP_SYSDEFAULTS=1 skips re-registering
+        // system defaults — isolates whether this re-registration pass is what
+        // destabilizes the cursor surface (buffer flapping 16MB<->67MB).
+        BOOL skipSysDefaults = getenv("MC_SKIP_SYSDEFAULTS") != NULL;
         __block NSUInteger systemDefaultCount = 0;
         [systemDefaults enumerateKeysAndObjectsUsingBlock:^(NSString *name, NSDictionary *sysData, BOOL *stop) {
+            if (skipSysDefaults) return;
             if ([registeredKeys containsObject:name]) {
                 return; // Already registered as cape cursor
             }
@@ -1397,6 +1507,12 @@ BOOL applyCapeAtPath(NSString *path) {
 
     NSDictionary *cape = [NSDictionary dictionaryWithContentsOfFile:standardPath];
     if (cape) {
+        // Try the surgical path first (in-place update of changed cursors
+        // only — no unregister-all/ramp/compositor-kill).  Falls through to
+        // the full rebuild when preconditions aren't met.
+        if (applyCapeSurgical(cape)) {
+            return YES;
+        }
         MMLog("Cape file loaded successfully, applying...");
         // Use applyCapeWithoutReset() instead of applyCape() for both the
         // Helper and CLI.  applyCapeWithoutReset() uses a gentler 8x extraction
