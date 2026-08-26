@@ -958,8 +958,26 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
     {
         NSDictionary *scales = MCDefault(MCPreferencesPerCursorScalesKey);
         NSSet *capeKeys = [NSSet setWithArray:cursors.allKeys];
+        // Synonym-aware skip (2026-08-26): if a scale key belongs to a family
+        // whose PRIMARY entry is already handled by the cape loop above
+        // (e.g. prefs has "Arrow"=65 while the cape only carries ArrowS=40),
+        // honouring both would register conflicting sizes for names that are
+        // aliases of each other — they must share one image and one size.
+        // The cape's own entry wins; synonyms of that key are protected by it.
+        NSMutableSet *synonymOwned = [NSMutableSet set];
+        for (NSString *ck in capeKeys) {
+            if ([ck hasPrefix:@"com.apple.coregraphics.Arrow"]) {
+                [synonymOwned addObjectsFromArray:MCArrowSynonyms()];
+            } else if ([ck hasPrefix:@"com.apple.coregraphics.IBeam"]) {
+                [synonymOwned addObjectsFromArray:MCIBeamSynonyms()];
+            }
+        }
         for (NSString *name in scales) {
             if ([capeKeys containsObject:name]) continue;   // handled above
+            if ([synonymOwned containsObject:name]) {
+                MMLog("Surgical(sys): skip %@ — synonym of a cape-owned cursor", name.UTF8String);
+                continue;
+            }
 
             // Desired: system native size x scale (same as Step 5 semantics:
             // applyCapeForIdentifier with isSystemDefault=YES in custom mode
