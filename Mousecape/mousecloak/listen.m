@@ -14,6 +14,7 @@
 #import "CGSCursor.h"
 #import <Cocoa/Cocoa.h>
 #import <os/log.h>
+#import <dlfcn.h>
 
 // NSLog-based logging for reliable visibility in unified log and Console.app.
 // os_log with custom subsystems is not persisted for ad-hoc signed apps,
@@ -415,6 +416,41 @@ void startSessionMonitor(void) {
         // already skip when no cape is set for this same reason.
         MMLog("No cape configured — skipping initial refresh (system defaults are already active)");
     }
+
+    // -------------------------------------------------------------------
+    // CursorUIViewService suppressor (2026-08-26, data-driven)
+    //
+    // This on-demand XPC service is the system's software-cursor renderer.
+    // On this macOS beta its surface handoff with WindowServer fails
+    // intermittently for oversized cursors — every failure = one dropped
+    // frame = the visible BLINK.  Measured tonight:
+    //   service alive          → 22 surface errors / 30s of mouse movement
+    //   service killed         → 0-1 errors / 30s (WindowServer renders the
+    //                            cursor directly; visual identical)
+    // The system relaunches the service within seconds (measured +2s…+52s,
+    // irregularly), so a fixed schedule can't win.  A persistent high-
+    // frequency watchdog can: kill every time it appears, 1s cadence.
+    // Verified manually: cadence-limited suppression reduced errors 10x.
+    //
+    // Scope: Helper lifetime.  Runs ONLY here (single owner) — must never be
+    // duplicated in other processes or we get a relaunch/kill tug-of-war
+    // between two Mousecape components.
+    // -------------------------------------------------------------------
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        void *skylight = dlopen("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices", RTLD_LAZY);
+        if (!skylight) { HLOG_ERR("CursorSvc-suppressor: cannot load ApplicationServices"); return; }
+        while (true) {
+            usleep(1000000);   // 1s cadence
+            NSTask *t = [[NSTask alloc] init];
+            t.launchPath = @"/usr/bin/pkill";
+            t.arguments = @[@"-9", @"-x", @"CursorUIViewService"];
+            t.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+            t.standardError = [NSFileHandle fileHandleWithNullDevice];
+            [t launch];
+            [t waitUntilExit];
+        }
+    });
+
     g_sessionMonitorRLS = rls;
     CFRunLoopAddSource(CFRunLoopGetMain(), rls, kCFRunLoopDefaultMode);
     MMLog("Session monitor attached to main run loop (non-blocking)");

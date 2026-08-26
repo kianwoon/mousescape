@@ -948,6 +948,55 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
         if (ok) { changed++; } else { failed++; }
     }
 
+    // ---- Phase 2: per-cursor scales for cursors WITHOUT cape images ----
+    // The cape file only carries entries with custom images (typically 5).
+    // The other cursors (com.apple.cursor.N etc.) get their size from
+    // MCPerCursorScales applied to the SYSTEM default image — the full
+    // pipeline handles them in its Step 5 loop.  Surgical must handle them
+    // too, or their scale changes silently stop taking effect (bug found
+    // 2026-08-26: only Arrow/IBeam-family sizes worked after surgical).
+    {
+        NSDictionary *scales = MCDefault(MCPreferencesPerCursorScalesKey);
+        NSSet *capeKeys = [NSSet setWithArray:cursors.allKeys];
+        for (NSString *name in scales) {
+            if ([capeKeys containsObject:name]) continue;   // handled above
+
+            // Desired: system native size x scale (same as Step 5 semantics:
+            // applyCapeForIdentifier with isSystemDefault=YES in custom mode
+            // registers at nativeSize x desiredScale).
+            float desired = [scales[name] floatValue];
+            if (desired <= 0.0f) desired = 1.0f;
+
+            CGSize curSize = CGSizeZero; CGPoint curHot = CGPointZero;
+            NSUInteger frames = 0; CGFloat dur = 0; CFArrayRef arr = NULL;
+            CGError e = CGSCopyRegisteredCursorImages(cid, (char *)name.UTF8String,
+                                                      &curSize, &curHot, &frames, &dur, &arr);
+            if (arr) CFRelease(arr);
+            if (e != kCGErrorSuccess) continue;   // not registered — full pipeline owns it
+
+            // Current registered native base = curSize / currentEffectiveScale.
+            // We cannot know the scale it was registered with from the API
+            // alone; instead compare against the system native size: fetch it
+            // once via systemCapeWithIdentifier (returns native points).
+            NSDictionary *sysData = systemCapeWithIdentifier(name);
+            if (!sysData) continue;
+            float nativeW = [sysData[MCCursorDictionaryPointsWideKey] floatValue];
+            float nativeH = [sysData[MCCursorDictionaryPointsHighKey] floatValue];
+            CGSize wantSize = CGSizeMake(nativeW * desired, nativeH * desired);
+
+            if (fabsf(curSize.width - wantSize.width) < 0.5f &&
+                fabsf(curSize.height - wantSize.height) < 0.5f) {
+                continue;   // already at desired size
+            }
+
+            MMLog("Surgical(sys): %s %.0fx%.0f -> %.0fx%.0f — re-registering",
+                  name.UTF8String, curSize.width, curSize.height,
+                  wantSize.width, wantSize.height);
+            BOOL ok = applyCapeForIdentifier(sysData, name, NO, YES, YES, YES, baseScale);
+            if (ok) { changed++; } else { failed++; }
+        }
+    }
+
     MMLog("Surgical result: %lu changed, %lu unchanged, %lu failed",
           (unsigned long)changed, (unsigned long)unchanged, (unsigned long)failed);
     if (changed == 0 && failed == 0) {
