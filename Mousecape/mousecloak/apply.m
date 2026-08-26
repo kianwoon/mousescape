@@ -17,6 +17,7 @@
 #import "outerShadow.h"
 #import "scale.h"
 #import <unistd.h>
+#import <pthread.h>
 #import <math.h>
 #import <CoreImage/CoreImage.h>
 
@@ -906,7 +907,7 @@ void reengageAccessibilityCursorCompositor(void) {
 // programmatic equivalent of the "fresh boot state" where the service was
 // never started and large cursors render fine.
 // ---------------------------------------------------------------------------
-static void terminateCursorUIViewServiceIfRunning(void) {
+static void terminateCursorUIViewServiceOnce(void) {
     @try {
         NSTask *task = [[NSTask alloc] init];
         task.launchPath = @"/usr/bin/pkill";
@@ -923,6 +924,55 @@ static void terminateCursorUIViewServiceIfRunning(void) {
     } @catch (NSException *exception) {
         NSLog(@"[MousecapeHelper][ERROR] terminateCursorUIViewService: %@", exception);
     }
+}
+
+// Terminates CursorUIViewService with re-kill coverage.  TIMING MATTERS:
+// reengageAccessibilityCursorCompositor() restarts universalaccessd moments
+// before this runs, and uad (or other system paths) can RELAUNCH
+// CursorUIViewService at unpredictable times — measured relaunches at +12s,
+// +16s and +52s after apply.  No fixed schedule of re-kills covers an
+// unbounded window (verified: +20s/+45s re-kills missed a +52s relaunch).
+//
+// Strategy:
+//   1. Synchronously kill now AND once more after 3s (covers the immediate
+//      relaunch path even for short-lived CLI processes).
+//   2. In long-lived processes (Helper), start a PERSISTENT watchdog thread
+//      that kills the service every time it appears, forever.  This is not
+//      the failed "surface guardian" (which fought the apply pipeline) —
+//      it only watches one process name and performs one kill, nothing else.
+static void *cursorUIViewServiceWatchdog(void *unused) {
+    (void)unused;
+    // pthread detached loop; runs for process lifetime.
+    while (true) {
+        usleep(30000000);  // 30s cadence
+        @autoreleasepool {
+            NSTask *task = [[NSTask alloc] init];
+            task.launchPath = @"/usr/bin/pkill";
+            task.arguments = @[@"-9", @"-x", @"CursorUIViewService"];
+            task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
+            task.standardError = [NSFileHandle fileHandleWithNullDevice];
+            [task launch];
+            [task waitUntilExit];
+            if (task.terminationStatus == 0) {
+                MMLog("CursorUIViewService-watchdog: relaunched by system — killed again");
+            }
+        }
+    }
+    return NULL;
+}
+
+static void terminateCursorUIViewServiceIfRunning(void) {
+    terminateCursorUIViewServiceOnce();
+    usleep(3000000);  // 3s — covers immediate relaunch
+    terminateCursorUIViewServiceOnce();
+    // Persistent watchdog (only useful in long-lived processes; in the CLI
+    // it dies with the process, which is fine — the Helper runs it).
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        pthread_t thread;
+        pthread_create(&thread, NULL, cursorUIViewServiceWatchdog, NULL);
+        pthread_detach(thread);
+    });
 }
 BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
     // Re-entry guard: prevent concurrent apply calls (e.g. multiple display
