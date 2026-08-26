@@ -162,6 +162,14 @@ working baseline ("it was working before your changes" was the user's correct di
 
 - WindowServer logs `Cursor disabled: failed set_cursor_surface` bursts during early boot (~first
   60-90 s) before any login item runs — expected churn; the original code's retry loop handles it.
+- **Large-cursor BLINK root cause (solved 2026-08-26, commit 848b464)**: macOS renders oversized
+  cursors through an on-demand XPC service, `CursorUIViewService`. On this beta the
+  WindowServer↔service surface handoff is unstable → `failed set_cursor_surface` on every mouse
+  move = blinking. Fix: `terminateCursorUIViewServiceIfRunning()` (pkill -9 -x) after every
+  successful apply — the service does NOT relaunch on apply/uad-restart/mouse-move, and
+  WindowServer renders large cursors directly and stably (fresh-boot equivalent). NOTE:
+  `killall` returns 0 WITHOUT terminating it (XPC relaunch race) — always use `pkill -9 -x`.
+  Blink (vs steady-invisible) = two renderers fighting; steady-invisible = single broken path.
 - Very large cursor bitmaps (>= ~2000 pt registered) can hit persistent surface-upload failures in
   a **damaged** session; a fresh session (reboot/logout) renders the same size fine. A session gets
   "damaged" by apply storms — which is exactly what the shared debounce prevents.
