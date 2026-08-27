@@ -779,11 +779,27 @@ struct CustomScaleView: View {
     }
 
     private func loadPerCursorScales() {
-        if let dict = CFPreferencesCopyAppValue(Self.perCursorScalesKey as CFString, Self.preferenceDomain as CFString) as? [String: Double] {
-            perCursorScales = dict
-        } else {
+        // TYPE-TOLERANT load (2026-08-27): the dict may hold values as
+        // NSString (e.g. written by `defaults write -dict` scripts) instead
+        // of NSNumber.  A strict `as? [String: Double]` then fails → the
+        // page showed every cursor at 1.0x ("settings gone") and a save
+        // from that state wiped the real values.  Accept both.
+        guard let raw = CFPreferencesCopyValue(
+            Self.perCursorScalesKey as CFString,
+            Self.preferenceDomain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        ) as? [String: Any] else {
             perCursorScales = [:]
+            return
         }
+        var dict: [String: Double] = [:]
+        for (k, v) in raw {
+            if let d = v as? Double { dict[k] = d }
+            else if let s = v as? String, let d = Double(s) { dict[k] = d }
+            else if let n = v as? NSNumber { dict[k] = n.doubleValue }
+        }
+        perCursorScales = dict
     }
 
     private func savePerCursorScales() {

@@ -297,9 +297,13 @@ final class AppState: @unchecked Sendable {
 
     /// Get the per-cursor scale for a cursor identifier (default 1.0)
     func getPerCursorScale(for identifier: String) -> Double {
-        if let dict = CFPreferencesCopyValue(Self.perCursorScalesKey as CFString, Self.preferenceDomain as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? [String: Double],
-           let scale = dict[identifier], scale > 0 {
-            return scale
+        // Type-tolerant (see SettingsView.loadPerCursorScales): values may be
+        // NSString after `defaults write` script edits; accept both forms.
+        if let dict = CFPreferencesCopyValue(Self.perCursorScalesKey as CFString, Self.preferenceDomain as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost) as? [String: Any],
+           let v = dict[identifier] {
+            if let d = v as? Double, d > 0 { return d }
+            if let s = v as? String, let d = Double(s), d > 0 { return d }
+            if let n = v as? NSNumber, n.doubleValue > 0 { return n.doubleValue }
         }
         return 1.0
     }
