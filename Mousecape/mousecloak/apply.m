@@ -1008,6 +1008,23 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
                 float bh = [sysData[MCCursorDictionaryPointsHighKey] floatValue];
                 base = @[@(bw), @(bh)];
                 fallbackSysData = sysData;
+            } else {
+                // Base known, but the cursor may be UNREGISTERED (no art to
+                // reuse below) — fetch clean system art as the source so
+                // registration actually happens instead of silently skipping.
+                // (Bug 2026-08-27: notRegistered + recorded base + nil art
+                // hit `if (!regData) continue` forever.)
+                CGSize probe = CGSizeZero; CGPoint ph = CGPointZero;
+                NSUInteger pf = 0; CGFloat pd = 0; CFArrayRef pa = NULL;
+                CGError pe = CGSCopyRegisteredCursorImages(cid, (char *)name.UTF8String,
+                                                           &probe, &ph, &pf, &pd, &pa);
+                if (pa) CFRelease(pa);
+                if (pe != kCGErrorSuccess) {
+                    float scaleBefore = cursorScale();
+                    CGSSetCursorScale(CGSMainConnectionID(), 8.0f);
+                    fallbackSysData = systemCapeWithIdentifier(name);
+                    CGSSetCursorScale(CGSMainConnectionID(), scaleBefore);
+                }
             }
             float baseW = [base[0] floatValue];
             float baseH = [base[1] floatValue];
