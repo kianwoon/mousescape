@@ -77,3 +77,6 @@ _Users*
 *.zip
 settings.local.json
 .gitignore
+
+# graphify
+graphify-out/
