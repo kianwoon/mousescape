@@ -586,19 +586,14 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
         images = processed;
     }
 
-    // Per-cursor custom scaling
+    // Per-cursor custom scaling.
+    // NOTE: the ratio was already computed above (customRatio, lines ~469-482)
+    // so the upscale target and the registration size/hotspot can never
+    // diverge. Do NOT recompute it here — a single source of truth is
+    // mandatory: hotspot and size MUST scale by the same ratio or the
+    // hotspot's normalized (tip-pinning) position drifts with scale.
     if (customScaleMode) {
-        NSDictionary *perCursorScales = MCDefault(MCPreferencesPerCursorScalesKey);
-        MMLog("SCALE DEBUG per-cursor %s: perCursorScales=%@, customMode=YES, skipSynonyms=%s",
-              identifier.UTF8String, perCursorScales, skipSynonyms ? "YES" : "NO");
-        float desiredScale = [perCursorScales[identifier] floatValue];
-        if (desiredScale <= 0.0f) desiredScale = 1.0f;
-
-        float maxScale = baseScale;
-        if (maxScale <= 0.0f) maxScale = 1.0f;
-        float ratio = (maxScale > 0) ? desiredScale / maxScale : 1.0f;
-        MMLog("SCALE DEBUG per-cursor %s: desired=%.2f, baseScale=%.2f, ratio=%.3f",
-              identifier.UTF8String, desiredScale, maxScale, ratio);
+        float ratio = customRatio;
 
         if (ratio < 0.99f || ratio > 1.01f) {
             // Scale registration size and hotspot by ratio.
@@ -606,8 +601,8 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
             // already picks the appropriate resolution. The system handles
             // image-to-registration-size mapping internally.
             size = CGSizeMake(size.width * ratio, size.height * ratio);
-            MMLog("Custom scaling %s: desired=%.2f, ratio=%.3f, newSize=%.1fx%.1fpt",
-                  identifier.UTF8String, desiredScale, ratio, size.width, size.height);
+            MMLog("Custom scaling %s: ratio=%.3f, newSize=%.1fx%.1fpt",
+                  identifier.UTF8String, ratio, size.width, size.height);
 
             hotSpot = CGPointMake(hotSpot.x * ratio, hotSpot.y * ratio);
             MMLog("Hotspot scaled by ratio %.3f: (%.1f, %.1f)", ratio, hotSpot.x, hotSpot.y);
@@ -887,6 +882,67 @@ void reengageAccessibilityCursorCompositor(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Cursor image CONTENT digests (2026-09-06)
+//
+// The surgical skip-check compared registered SIZE/HOTSPOT only, so editing a
+// cape's cursor PNG at constant size/hotspot and re-applying was silently
+// declared "unchanged".  We now record a cheap FNV-1a 64-bit digest of each
+// cape entry's representation bytes, per cursor key, in anyHost preferences.
+// A missing or differing digest forces re-registration.  anyHost only — never
+// kCFPreferencesCurrentHost (see AGENTS.md CFPreferences scope rules).
+// ---------------------------------------------------------------------------
+static unsigned long long MCFNV1a64(const void *bytes, size_t len, unsigned long long hash) {
+    const unsigned char *p = (const unsigned char *)bytes;
+    for (size_t i = 0; i < len; i++) {
+        hash ^= (unsigned long long)p[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static NSString *MCCursorRepsDigest(NSArray *reps) {
+    unsigned long long hash = 1469598103934665603ULL;   // FNV-1a offset basis
+    for (id object in reps) {
+        CFTypeID type = CFGetTypeID((__bridge CFTypeRef)object);
+        if (type == CGImageGetTypeID()) {
+            CGImageRef img = (__bridge CGImageRef)object;
+            CGDataProviderRef prov = CGImageGetDataProvider(img);
+            if (prov) {
+                CFDataRef d = CGDataProviderCopyData(prov);
+                if (d) {
+                    hash = MCFNV1a64(CFDataGetBytePtr(d), (size_t)CFDataGetLength(d), hash);
+                    CFRelease(d);
+                }
+            }
+        } else if ([object isKindOfClass:[NSBitmapImageRep class]]) {
+            NSBitmapImageRep *rep = (NSBitmapImageRep *)object;
+            hash = MCFNV1a64(rep.bitmapData, (size_t)(rep.bytesPerRow * rep.pixelsHigh), hash);
+        } else if ([object isKindOfClass:[NSData class]]) {
+            NSData *data = (NSData *)object;
+            hash = MCFNV1a64(data.bytes, (size_t)data.length, hash);
+        }
+    }
+    return [NSString stringWithFormat:@"%016llx", hash];
+}
+
+static NSDictionary *MCCursorImageDigests(void) {
+    id v = CFBridgingRelease(CFPreferencesCopyValue(
+        CFSTR("MCCursorImageDigests"), (CFStringRef)kMCDomain,
+        kCFPreferencesCurrentUser, kCFPreferencesAnyHost));
+    return [v isKindOfClass:[NSDictionary class]] ? v : @{};
+}
+
+static void MCSetCursorImageDigest(NSString *key, NSString *digest) {
+    if (!key || !digest) return;
+    NSMutableDictionary *digests = [MCCursorImageDigests() mutableCopy];
+    digests[key] = digest;
+    CFPreferencesSetValue(CFSTR("MCCursorImageDigests"),
+                          (__bridge CFPropertyListRef)digests,
+                          (CFStringRef)kMCDomain,
+                          kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+}
+
+// ---------------------------------------------------------------------------
 // SURGICAL APPLY (2026-08-26)
 //
 // The full pipeline (unregister-all -> scale ramp -> re-register 50+ cursors
@@ -928,24 +984,52 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
         CGSize desiredSize = CGSizeMake([cape[MCCursorDictionaryPointsWideKey] floatValue] * desired,
                                         [cape[MCCursorDictionaryPointsHighKey] floatValue] * desired);
 
+        // Expected hotspot AFTER apply, matching applyCapeForIdentifier exactly:
+        // lefty flip on the base grid first (size.width - x - 1), then scaled
+        // by the same ratio.  (Bug 2026-09-04: the skip check below compared
+        // SIZE only, so a hotspot-only edit at constant scale was declared
+        // "unchanged" and silently dropped — changing the scale was the only
+        // way to force the edit to take effect.)
+        CGPoint desiredHot = CGPointMake([cape[MCCursorDictionaryHotSpotXKey] floatValue],
+                                         [cape[MCCursorDictionaryHotSpotYKey] floatValue]);
+        if (MCFlag(MCPreferencesHandednessKey)) {
+            desiredHot.x = [cape[MCCursorDictionaryPointsWideKey] floatValue] - desiredHot.x - 1;
+        }
+        desiredHot.x *= desired;
+        desiredHot.y *= desired;
+
         CGSize curSize = CGSizeZero; CGPoint curHot = CGPointZero;
         NSUInteger frames = 0; CGFloat dur = 0; CFArrayRef arr = NULL;
         CGError e = CGSCopyRegisteredCursorImages(cid, (char *)key.UTF8String,
                                                   &curSize, &curHot, &frames, &dur, &arr);
         if (arr) CFRelease(arr);
 
+        // Content check: geometry may match while the PNG bytes changed (cape
+        // edited at constant size/hotspot).  Compare against the digest stored
+        // at last successful registration; missing/differing → re-register.
+        NSString *currentDigest = MCCursorRepsDigest(reps);
+        NSString *storedDigest = MCCursorImageDigests()[key];
+        BOOL contentChanged = (storedDigest == nil || ![storedDigest isEqualToString:currentDigest]);
+
         if (e == kCGErrorSuccess &&
             fabsf(curSize.width - desiredSize.width) < 0.5f &&
-            fabsf(curSize.height - desiredSize.height) < 0.5f) {
+            fabsf(curSize.height - desiredSize.height) < 0.5f &&
+            fabsf(curHot.x - desiredHot.x) < 0.5f &&
+            fabsf(curHot.y - desiredHot.y) < 0.5f &&
+            !contentChanged) {
             unchanged++;
             continue;
         }
 
-        MMLog("Surgical: %s %.0fx%.0f -> %.0fx%.0f — re-registering",
-              key.UTF8String, curSize.width, curSize.height,
-              desiredSize.width, desiredSize.height);
+        if (contentChanged && e == kCGErrorSuccess) {
+            MMLog("Surgical: %s content changed - re-registering", key.UTF8String);
+        } else {
+            MMLog("Surgical: %s %.0fx%.0f hs(%.1f,%.1f) -> %.0fx%.0f hs(%.1f,%.1f) - re-registering",
+                  key.UTF8String, curSize.width, curSize.height, curHot.x, curHot.y,
+                  desiredSize.width, desiredSize.height, desiredHot.x, desiredHot.y);
+        }
         BOOL ok = applyCapeForIdentifier(cape, key, NO, YES, NO, NO, baseScale);
-        if (ok) { changed++; } else { failed++; }
+        if (ok) { changed++; MCSetCursorImageDigest(key, currentDigest); } else { failed++; }
     }
 
     // ---- Phase 2: per-cursor scales for cursors WITHOUT cape images ----
@@ -1260,6 +1344,7 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
             if (success) {
                 successCount++;
                 [registeredKeys addObject:key];
+                MCSetCursorImageDigest(key, MCCursorRepsDigest(reps));
             } else {
                 failedCount++;
             }
@@ -1422,6 +1507,7 @@ NSDictionary *applyCapeWithResult(NSDictionary *dictionary) {
                 [failedIdentifiers addObject:key];
             } else {
                 successCount++;
+                MCSetCursorImageDigest(key, MCCursorRepsDigest(reps));
             }
         }
 
