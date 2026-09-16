@@ -39,6 +39,7 @@
 		DE3662042EFAAAB600D94521 /* MousecapeCommands.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE3661F62EFAAAB600D94521 /* MousecapeCommands.swift */; };
 		DE3662052EFAAAB600D94521 /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE3661F72EFAAAB600D94521 /* SettingsView.swift */; };
 		DE3662062EFAAAB600D94521 /* AnimatingCursorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE3661E82EFAAAB600D94521 /* AnimatingCursorView.swift */; };
+		DE7A51012FBB640000A9B100 /* HotspotZoomInspectorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE7A51002FBB640000A9B100 /* HotspotZoomInspectorView.swift */; };
 		FCD9CBC13121398042822DDE /* ToastNotificationView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 57713764A4D5CF5750F095D3 /* ToastNotificationView.swift */; };
 		DE3662072EFAAAB600D94521 /* HomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE3661F42EFAAAB600D94521 /* HomeView.swift */; };
 		DE3662082EFAAAB600D94521 /* CapePreviewPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE3661F22EFAAAB600D94521 /* CapePreviewPanel.swift */; };
@@ -156,6 +157,7 @@
 		DE2C56172F6F075C00DCFED7 /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; path = AppIcon.icon; sourceTree = "<group>"; };
 		DE2E172A2F5B290000055E78 /* MousecapeHelper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MousecapeHelper.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		DE3661E82EFAAAB600D94521 /* AnimatingCursorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AnimatingCursorView.swift; sourceTree = "<group>"; };
+		DE7A51002FBB640000A9B100 /* HotspotZoomInspectorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HotspotZoomInspectorView.swift; sourceTree = "<group>"; };
 		57713764A4D5CF5750F095D3 /* ToastNotificationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToastNotificationView.swift; sourceTree = "<group>"; };
 		DE3661E92EFAAAB600D94521 /* GlassEffectContainer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GlassEffectContainer.swift; sourceTree = "<group>"; };
 		DE3661EB2EFAAAB600D94521 /* AppEnums.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnums.swift; sourceTree = "<group>"; };
@@ -311,6 +313,7 @@
 			isa = PBXGroup;
 			children = (
 				DE3661E82EFAAAB600D94521 /* AnimatingCursorView.swift */,
+				DE7A51002FBB640000A9B100 /* HotspotZoomInspectorView.swift */,
 				DE3661E92EFAAAB600D94521 /* GlassEffectContainer.swift */,
 			);
 			path = Helpers;
@@ -711,6 +714,7 @@
 				DE27927D2F61D93200CCEBD3 /* UserPreferences.swift in Sources */,
 				DE3662052EFAAAB600D94521 /* SettingsView.swift in Sources */,
 				DE3662062EFAAAB600D94521 /* AnimatingCursorView.swift in Sources */,
+				DE7A51012FBB640000A9B100 /* HotspotZoomInspectorView.swift in Sources */,
 				FCD9CBC13121398042822DDE /* ToastNotificationView.swift in Sources */,
 				DE3662072EFAAAB600D94521 /* HomeView.swift in Sources */,
 				DE3662082EFAAAB600D94521 /* CapePreviewPanel.swift in Sources */,

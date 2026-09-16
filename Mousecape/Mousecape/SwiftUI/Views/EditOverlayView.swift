@@ -443,9 +443,15 @@ struct CursorDetailView: View {
 
     // MARK: - Validation
 
-    /// Maximum allowed hotspot value (32x32 cursor, hot spot must be < size)
-    /// Use the constant from MCDefs.h for consistency with apply.m
-    private var maxHotspot: CGFloat { CGFloat(MCMaxHotspotValue) }
+    /// Maximum allowed hotspot value, derived from the cursor's actual point
+    /// size (hot spot must be < size, matching apply.m's registration clamp).
+    /// Falls back to MCMaxHotspotValue (31.99) for degenerate sizes.
+    private var maxHotspot: CGFloat {
+        let w = cursor.size.width, h = cursor.size.height
+        let minDimension = min(w > 0 ? w : CGFloat(MCMaxHotspotValue),
+                               h > 0 ? h : CGFloat(MCMaxHotspotValue))
+        return max(0, minDimension - 0.01)
+    }
 
     /// Check if hotspot X is valid (0 <= x <= MCMaxHotspotValue)
     private var isHotspotXValid: Bool { hotspotX >= 0 && hotspotX <= maxHotspot }
@@ -1099,6 +1105,7 @@ struct CursorPreviewDropZone: View {
     @State private var showFilePicker = false
     @State private var localRefreshTrigger = 0
     @State private var isLoadingImage = false
+    @State private var showHotspotInspector = false
 
     private let targetScale: CursorScale = .scale200  // Always use 2x HiDPI
 
@@ -1110,6 +1117,53 @@ struct CursorPreviewDropZone: View {
     /// Check if cursor has any valid image representation
     private var hasImage: Bool {
         cursor.hasAnyRepresentation
+    }
+
+    /// Commit a hotspot change made in the zoom inspector. Mirrors the X/Y
+    /// text-field handlers: set the model, refresh the preview, register
+    /// undo, and sync alias metadata in simple mode.
+    private func commitHotspot(_ newHS: NSPoint) {
+        let oldHS = cursor.hotSpot
+        guard abs(oldHS.x - newHS.x) > 0.005 || abs(oldHS.y - newHS.y) > 0.005 else { return }
+        cursor.hotSpot = newHS
+        localRefreshTrigger += 1
+        let capturedEditMode = editMode
+        appState.registerUndo(
+            undo: { [weak cursor] in
+                guard let cursor = cursor else { return }
+                cursor.hotSpot = oldHS
+                self.localRefreshTrigger += 1
+                if capturedEditMode == 0 {
+                    cape?.syncMetadataToAliases(cursor)
+                }
+            },
+            redo: { [weak cursor] in
+                guard let cursor = cursor else { return }
+                cursor.hotSpot = newHS
+                self.localRefreshTrigger += 1
+                if capturedEditMode == 0 {
+                    cape?.syncMetadataToAliases(cursor)
+                }
+            }
+        )
+        if editMode == 0 {
+            cape?.syncMetadataToAliases(cursor)
+        }
+
+        // Auto-save immediately (bug 2026-09-04: the canvas commit only set
+        // the in-memory model + dirty flag; persistence depended on the user
+        // going through Done -> "Unsaved Changes" -> Save, so a drag-adjusted
+        // hotspot was lost if that flow was skipped. The user expectation is
+        // that adjusting the hotspot SAVES it.)
+        if let cape = cape {
+            let ok = appState.saveCape(cape)
+            debugLog("Hotspot zoom-inspector commit auto-save: \(ok ? "OK" : "FAILED")")
+        }
+
+        // Bump the refresh trigger so CursorDetailView reloads its X/Y text
+        // fields from the committed model (same reload path image import
+        // uses) — the user must see the saved values after dismissing zoom.
+        appState.cursorListRefreshTrigger += 1
     }
 
     var body: some View {
@@ -1136,6 +1190,38 @@ struct CursorPreviewDropZone: View {
                     Text("Recommended: 64×64 px (HiDPI 2x)")
                         .font(.caption)
                         .foregroundStyle(.tertiary)
+                }
+            }
+
+            // Zoom inspector trigger — lets the user magnify the frame to
+            // verify the hotspot dot lands exactly on the intended pixel
+            // (the in-preview dot is too small to judge on large cursors).
+            if hasImage {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button {
+                            showHotspotInspector.toggle()
+                        } label: {
+                            Image(systemName: showHotspotInspector ? "plus.magnifyingglass" : "minus.magnifyingglass")
+                                .font(.system(size: 12, weight: .medium))
+                                .frame(width: 24, height: 24)
+                        }
+                        .buttonStyle(.borderless)
+                        .padding(6)
+                        .help(String(localized:"Zoom in to inspect hotspot position"))
+                        .popover(isPresented: $showHotspotInspector, arrowEdge: .bottom) {
+                            HotspotZoomInspectorView(
+                                cursor: cursor,
+                                refreshTrigger: refreshTrigger + localRefreshTrigger,
+                                onHotspotChange: { newHS in
+                                    commitHotspot(newHS)
+                                }
+                            )
+                            .frame(width: 440)
+                        }
+                    }
+                    Spacer()
                 }
             }
 
