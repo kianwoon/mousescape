@@ -24,6 +24,13 @@ void stopSessionMonitor(void);
 void ResetCursorsToDefault(void);
 void refreshSystemDefaultCursors(void);
 BOOL reapplyCapeForCurrentUser(void);
+// User-initiated apply path (ArrowS scale hotkeys): not gated by the shared
+// wake cooldown. Defined in listen.m alongside reapplyCapeForCurrentUser().
+BOOL applyCurrentCapeUserInitiated(void);
+// Live base cursor scale (scale.m) — used when switching global -> custom mode.
+BOOL setCursorScale(float scale);
+// Persists MCScaleMode to currentHost (what apply.m/scale.m actually read).
+void setCustomScaleMode(BOOL isCustom);
 
 // Simple logging wrapper for Swift
 void HelperLog(const char* message);

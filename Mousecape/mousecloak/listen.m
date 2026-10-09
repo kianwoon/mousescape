@@ -501,3 +501,15 @@ BOOL reapplyCapeForCurrentUser(void) {
     else { HLOG_ERR("Reapply failed"); }
     return success;
 }
+
+BOOL applyCurrentCapeUserInitiated(void) {
+    // User-initiated apply (ArrowS scale hotkeys): deliberately NOT gated by
+    // wakeApplyCooldownActive() — two hotkey presses 5s apart must both apply.
+    // Still marks success so the wake debounce stays coherent afterwards.
+    NSString *capePath = appliedCapePathForUser(NSUserName());
+    if (!capePath) { HLOG_ERR("User apply: no cape configured for current user"); return NO; }
+    BOOL success = applyCapeAtPath(capePath);
+    if (success) { markWakeApplySucceeded(); HLOG("User-initiated apply succeeded"); }
+    else { HLOG_ERR("User-initiated apply failed"); }
+    return success;
+}

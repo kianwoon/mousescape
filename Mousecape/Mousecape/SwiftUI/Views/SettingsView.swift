@@ -7,7 +7,9 @@
 //
 
 import SwiftUI
+import AppKit
 import ServiceManagement
+import Carbon.HIToolbox
 
 struct SettingsView: View {
     @State private var selectedCategory: SettingsCategory = .general
@@ -190,6 +192,13 @@ struct GeneralSettingsView: View {
                         CustomScaleView()
                     }
                 }
+            }
+
+            Section("\(CursorType.arrowS.displayName) Hotkeys") {
+                ArrowSHotkeySettingsContent()
+                Text("Pressing a hotkey resizes only the \(CursorType.arrowS.displayName) cursor system-wide.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Cursor") {
@@ -865,5 +874,285 @@ struct CustomScaleView: View {
         // Do NOT call refreshSystemDefaultCursors() here — it re-registers all
         // cursors including cape ones, causing inner shadow to double.
         // Scale changes take effect on next explicit Apply (per v1.2.0 design).
+    }
+}
+
+// MARK: - Arrow S Hotkeys
+
+/// Two configurable global hotkeys that set the *per-cursor* scale of only the
+/// "Arrow S" cursor (com.apple.coregraphics.ArrowS).  The combo + scale are the
+/// whole mechanism — no combo/scale is hardcoded.  Changes are persisted to
+/// CFPreferences (currentHost) and announced to the Helper via a Darwin
+/// notification, which re-registers the Carbon hotkeys at runtime.
+struct ArrowSHotkeySettingsContent: View {
+
+    private struct HotkeyState {
+        var keyCode: UInt16?
+        var modifiers: UInt32
+        var scale: Double
+    }
+
+    private static let domain = "com.sdmj76.Mousecape"
+    private static let hotkeysKey = "MCArrowSHotkeys"
+    private static let changedNotification = "com.sdmj76.Mousecape.arrowSHotkeysChanged"
+    private static let defaultScale = 2.0
+
+    @State private var entries: [Int: HotkeyState] = [:]
+    @State private var recordingIndex: Int? = nil
+    @State private var monitor: Any? = nil
+
+    var body: some View {
+        Group {
+            row(index: 1)
+            row(index: 2)
+        }
+        .onAppear { load() }
+        .onDisappear { cancelRecording() }
+    }
+
+    // MARK: Row
+
+    @ViewBuilder
+    private func row(index: Int) -> some View {
+        HStack(spacing: 12) {
+            Text("Hotkey \(index)")
+            Spacer()
+
+            Button {
+                startRecording(index)
+            } label: {
+                Text(recordingIndex == index ? "Press keys…" : comboLabel(entries[index]))
+                    .frame(minWidth: 90)
+            }
+            .buttonStyle(.bordered)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.accentColor, lineWidth: recordingIndex == index ? 2 : 0)
+            )
+
+            TextField("\(Self.defaultScale, specifier: "%.1f")", value: Binding(
+                get: { entries[index]?.scale ?? Self.defaultScale },
+                set: { newValue in
+                    entries[index, default: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale)].scale =
+                        min(max(0.5, newValue), 96.0)
+                    persist()
+                }
+            ), format: .number.precision(.fractionLength(1)))
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 70)
+                .multilineTextAlignment(.trailing)
+
+            Text("x")
+        }
+    }
+
+    // MARK: Recording
+
+    private func startRecording(_ index: Int) {
+        cancelRecording()
+        recordingIndex = index
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { event in
+            handleRecordEvent(event, index: index)
+            return nil   // swallow while recording
+        }
+    }
+
+    private func cancelRecording() {
+        if let monitor = monitor {
+            NSEvent.removeMonitor(monitor)
+        }
+        monitor = nil
+        recordingIndex = nil
+    }
+
+    private func handleRecordEvent(_ event: NSEvent, index: Int) {
+        let keyCode = event.keyCode
+
+        // Escape cancels recording.
+        if keyCode == 53 { cancelRecording(); return }
+
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        var carbon: UInt32 = 0
+        if flags.contains(.command) { carbon |= UInt32(cmdKey) }
+        if flags.contains(.shift)   { carbon |= UInt32(shiftKey) }
+        if flags.contains(.option)  { carbon |= UInt32(optionKey) }
+        if flags.contains(.control) { carbon |= UInt32(controlKey) }
+
+        if carbon == 0 {
+            // Plain Delete/Backspace (no modifier) clears the hotkey.
+            if keyCode == 51 || keyCode == 117 {
+                entries[index, default: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale)].keyCode = nil
+                entries[index]?.modifiers = 0
+                persist()
+                cancelRecording()
+            }
+            // Otherwise keep waiting — a plain key would hijack normal typing.
+            return
+        }
+
+        entries[index, default: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale)].keyCode = keyCode
+        entries[index]?.modifiers = carbon
+        persist()
+        cancelRecording()
+    }
+
+    // MARK: Persistence
+
+    private func load() {
+        var loaded: [Int: HotkeyState] = [
+            1: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale),
+            2: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale)
+        ]
+        if let raw = CFPreferencesCopyValue(
+            Self.hotkeysKey as CFString,
+            Self.domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        ) as? [String: Any] {
+            for (name, value) in raw {
+                guard let index = hotkeyIndex(fromName: name),
+                      let entry = value as? [String: Any] else { continue }
+                let keyCode = (entry["keyCode"] as? NSNumber)?.uint16Value
+                let modifiers = (entry["modifiers"] as? NSNumber)?.uint32Value ?? 0
+                let scale = (entry["scale"] as? NSNumber)?.doubleValue ?? Self.defaultScale
+                loaded[index] = HotkeyState(keyCode: keyCode, modifiers: modifiers, scale: scale)
+            }
+        }
+        entries = loaded
+    }
+
+    private func persist() {
+        var dict: [String: [String: Any]] = [:]
+        for (index, entry) in entries {
+            guard let keyCode = entry.keyCode else { continue }
+            dict["hotkey\(index)"] = [
+                "keyCode": Int(keyCode),
+                "modifiers": Int(entry.modifiers),
+                "scale": entry.scale
+            ]
+        }
+        CFPreferencesSetValue(
+            Self.hotkeysKey as CFString,
+            dict as CFPropertyList,
+            Self.domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        )
+        CFPreferencesSynchronize(
+            Self.domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        )
+        // Tell the Helper to re-register the Carbon hotkeys immediately.
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName(Self.changedNotification as CFString),
+            nil,
+            nil,
+            true
+        )
+    }
+
+    private func hotkeyIndex(fromName name: String) -> Int? {
+        switch name {
+        case "hotkey1": return 1
+        case "hotkey2": return 2
+        default: return nil
+        }
+    }
+
+    // MARK: Display helpers
+
+    private func comboLabel(_ state: HotkeyState?) -> String {
+        guard let state = state, let keyCode = state.keyCode else { return "Not Set" }
+        return modifierSymbols(state.modifiers) + keyLabel(keyCode)
+    }
+
+    private func modifierSymbols(_ modifiers: UInt32) -> String {
+        var symbols = ""
+        if modifiers & UInt32(controlKey) != 0 { symbols += "⌃" }
+        if modifiers & UInt32(optionKey) != 0 { symbols += "⌥" }
+        if modifiers & UInt32(shiftKey) != 0 { symbols += "⇧" }
+        if modifiers & UInt32(cmdKey) != 0 { symbols += "⌘" }
+        return symbols
+    }
+
+    private func keyLabel(_ keyCode: UInt16) -> String {
+        switch Int(keyCode) {
+        case kVK_ANSI_A: return "A"
+        case kVK_ANSI_B: return "B"
+        case kVK_ANSI_C: return "C"
+        case kVK_ANSI_D: return "D"
+        case kVK_ANSI_E: return "E"
+        case kVK_ANSI_F: return "F"
+        case kVK_ANSI_G: return "G"
+        case kVK_ANSI_H: return "H"
+        case kVK_ANSI_I: return "I"
+        case kVK_ANSI_J: return "J"
+        case kVK_ANSI_K: return "K"
+        case kVK_ANSI_L: return "L"
+        case kVK_ANSI_M: return "M"
+        case kVK_ANSI_N: return "N"
+        case kVK_ANSI_O: return "O"
+        case kVK_ANSI_P: return "P"
+        case kVK_ANSI_Q: return "Q"
+        case kVK_ANSI_R: return "R"
+        case kVK_ANSI_S: return "S"
+        case kVK_ANSI_T: return "T"
+        case kVK_ANSI_U: return "U"
+        case kVK_ANSI_V: return "V"
+        case kVK_ANSI_W: return "W"
+        case kVK_ANSI_X: return "X"
+        case kVK_ANSI_Y: return "Y"
+        case kVK_ANSI_Z: return "Z"
+        case kVK_ANSI_0: return "0"
+        case kVK_ANSI_1: return "1"
+        case kVK_ANSI_2: return "2"
+        case kVK_ANSI_3: return "3"
+        case kVK_ANSI_4: return "4"
+        case kVK_ANSI_5: return "5"
+        case kVK_ANSI_6: return "6"
+        case kVK_ANSI_7: return "7"
+        case kVK_ANSI_8: return "8"
+        case kVK_ANSI_9: return "9"
+        case kVK_ANSI_Minus: return "-"
+        case kVK_ANSI_Equal: return "="
+        case kVK_ANSI_LeftBracket: return "["
+        case kVK_ANSI_RightBracket: return "]"
+        case kVK_ANSI_Semicolon: return ";"
+        case kVK_ANSI_Quote: return "'"
+        case kVK_ANSI_Comma: return ","
+        case kVK_ANSI_Period: return "."
+        case kVK_ANSI_Slash: return "/"
+        case kVK_ANSI_Backslash: return "\\"
+        case kVK_ANSI_Grave: return "`"
+        case kVK_Return: return "↩"
+        case kVK_Tab: return "⇥"
+        case kVK_Space: return "Space"
+        case kVK_Delete: return "⌫"
+        case kVK_ForwardDelete: return "⌦"
+        case kVK_Escape: return "⎋"
+        case kVK_LeftArrow: return "←"
+        case kVK_RightArrow: return "→"
+        case kVK_UpArrow: return "↑"
+        case kVK_DownArrow: return "↓"
+        case kVK_Home: return "↖"
+        case kVK_End: return "↘"
+        case kVK_PageUp: return "⇞"
+        case kVK_PageDown: return "⇟"
+        case kVK_F1: return "F1"
+        case kVK_F2: return "F2"
+        case kVK_F3: return "F3"
+        case kVK_F4: return "F4"
+        case kVK_F5: return "F5"
+        case kVK_F6: return "F6"
+        case kVK_F7: return "F7"
+        case kVK_F8: return "F8"
+        case kVK_F9: return "F9"
+        case kVK_F10: return "F10"
+        case kVK_F11: return "F11"
+        case kVK_F12: return "F12"
+        default: return "Key \(keyCode)"
+        }
     }
 }
