@@ -971,12 +971,17 @@ struct ArrowSHotkeySettingsContent: View {
         // Escape cancels recording.
         if keyCode == 53 { cancelRecording(); return }
 
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        // Hotkey identity uses only intentional modifier bits.  Strip capsLock
+        // and every non-modifier flag (function/numericPad/help) so the stored
+        // Carbon mask never contains state bits like alphaLock.
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
         var carbon: UInt32 = 0
         if flags.contains(.command) { carbon |= UInt32(cmdKey) }
         if flags.contains(.shift)   { carbon |= UInt32(shiftKey) }
         if flags.contains(.option)  { carbon |= UInt32(optionKey) }
         if flags.contains(.control) { carbon |= UInt32(controlKey) }
+        let usableMask: UInt32 = 256 | 512 | 2048 | 4096 | 8192  // cmd|shift|option|control|fn
+        carbon &= usableMask
 
         if carbon == 0 {
             // Plain Delete/Backspace (no modifier) clears the hotkey.
