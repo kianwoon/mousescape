@@ -902,48 +902,58 @@ struct ArrowSHotkeySettingsContent: View {
     @State private var monitor: Any? = nil
 
     var body: some View {
-        Group {
-            row(index: 1)
-            row(index: 2)
+        Grid(alignment: .center, horizontalSpacing: 8, verticalSpacing: 8) {
+            GridRow {
+                Text("Hotkey 1")
+                    .gridColumnAlignment(.leading)
+                hotkeyButton(index: 1)
+                scaleField(index: 1)
+                Text("x")
+            }
+            GridRow {
+                Text("Hotkey 2")
+                hotkeyButton(index: 2)
+                scaleField(index: 2)
+                Text("x")
+            }
         }
         .onAppear { load() }
         .onDisappear { cancelRecording() }
     }
 
-    // MARK: Row
+    // MARK: Row controls
 
     @ViewBuilder
-    private func row(index: Int) -> some View {
-        HStack(spacing: 12) {
-            Text("Hotkey \(index)")
-            Spacer()
-
-            Button {
-                startRecording(index)
-            } label: {
-                Text(recordingIndex == index ? "Press keys…" : comboLabel(entries[index]))
-                    .frame(minWidth: 90)
-            }
-            .buttonStyle(.bordered)
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.accentColor, lineWidth: recordingIndex == index ? 2 : 0)
-            )
-
-            TextField("\(Self.defaultScale, specifier: "%.1f")", value: Binding(
-                get: { entries[index]?.scale ?? Self.defaultScale },
-                set: { newValue in
-                    entries[index, default: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale)].scale =
-                        min(max(0.5, newValue), 96.0)
-                    persist()
-                }
-            ), format: .number.precision(.fractionLength(1)))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 70)
-                .multilineTextAlignment(.trailing)
-
-            Text("x")
+    private func hotkeyButton(index: Int) -> some View {
+        Button {
+            startRecording(index)
+        } label: {
+            Text(recordingIndex == index ? "Press keys…" : comboLabel(entries[index]))
+                .frame(minWidth: 80)
         }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.accentColor, lineWidth: recordingIndex == index ? 2 : 0)
+        )
+    }
+
+    @ViewBuilder
+    private func scaleField(index: Int) -> some View {
+        TextField("", value: Binding(
+            get: { entries[index]?.scale ?? Self.defaultScale },
+            set: { newValue in
+                entries[index, default: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale)].scale =
+                    min(max(0.5, newValue), 96.0)
+                persist()
+            }
+        ), format: .number.precision(.fractionLength(1)))
+            .textFieldStyle(.roundedBorder)
+            .controlSize(.regular)
+            .labelsHidden()
+            .frame(width: 70)
+            .multilineTextAlignment(.trailing)
     }
 
     // MARK: Recording
