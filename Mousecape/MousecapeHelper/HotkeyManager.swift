@@ -2,14 +2,21 @@
 //  HotkeyManager.swift
 //  MousecapeHelper
 //
-//  Two global hotkeys that set the per-cursor scale of the "Arrow S" cursor
-//  (com.apple.coregraphics.ArrowS).  Both the key combo AND the scale are
+//  N user-managed global hotkeys, each mapping a CursorType to a per-cursor
+//  scale.  An entry = {identifier, key combo, scale}; the combo AND scale are
 //  user-configured in the GUI Settings, persisted under the CFPreferences key
-//  "MCArrowSHotkeys" (domain com.sdmj76.Mousecape, currentHost).
+//  "MCCursorScaleHotkeys" (domain com.sdmj76.Mousecape, currentHost) as an
+//  ARRAY of dicts:
+//    { id: String (UUID), identifier: String (CursorType rawValue),
+//      keyCode: Int (0 = disabled), modifiers: Int (Carbon mask, 0 = disabled),
+//      scale: Double }
 //
 //  Uses Carbon RegisterEventHotKey so we do NOT need Accessibility /
 //  Input-Monitoring permission and fire system-wide even when Mousecape is
 //  not frontmost.  The Owner is this Helper (menu-bar login item, always on).
+//
+//  The mechanism is pure data: no hardcoded cursor identifier, slot count or
+//  combo anywhere.
 //
 
 import Foundation
@@ -17,28 +24,38 @@ import AppKit
 import Carbon.HIToolbox
 import os
 
-final class ArrowSHotkeyManager {
+final class CursorHotkeyManager {
 
-    static let shared = ArrowSHotkeyManager()
+    static let shared = CursorHotkeyManager()
 
     // Visible (public-privacy) diagnostic channel. NSLog from this launchd
     // instance does not surface in the unified log, so we log through os_log
     // with an explicit subsystem + public privacy for every field.
-    private static let log = Logger(subsystem: "com.sdmj76.MousecapeHelper", category: "ArrowSHotkeys")
+    private static let log = Logger(subsystem: "com.sdmj76.MousecapeHelper", category: "CursorHotkeys")
 
     // MARK: Constants
 
     private static let domain = "com.sdmj76.Mousecape" as CFString
-    private static let hotkeysKey = "MCArrowSHotkeys" as CFString
+    private static let hotkeysKey = "MCCursorScaleHotkeys" as CFString
+    private static let legacyHotkeysKey = "MCArrowSHotkeys" as CFString
     private static let perCursorScalesKey = "MCPerCursorScales" as CFString
     private static let scaleModeKey = "MCScaleMode" as CFString
-    private static let arrowSIdentifier = "com.apple.coregraphics.ArrowS"
-    private static let changedNotification = "com.sdmj76.Mousecape.arrowSHotkeysChanged"
+    private static let changedNotification = "com.sdmj76.Mousecape.cursorHotkeysChanged"
 
-    // Four-character signature 'MCAS' for our EventHotKeyIDs.
-    private static let signature: OSType = 0x4D434153
+    // The one identifier the legacy (2-slot) config always meant — used only by
+    // the one-time migration, never by the registration/apply mechanism.
+    private static let legacyIdentifier = "com.apple.coregraphics.ArrowS"
 
-    private struct HotkeyConfig {
+    // Hotkey identity uses only intentional modifier bits: cmd|shift|option|control|fn.
+    // alphaLock (caps-lock state) and any other junk must never participate.
+    private static let usableMask: UInt32 = 256 | 512 | 2048 | 4096 | 8192
+
+    // Four-character signature 'MCHK' for our EventHotKeyIDs.
+    private static let signature: OSType = 0x4D43484B
+
+    private struct HotkeyEntry {
+        let id: String
+        let identifier: String
         let keyCode: UInt32
         let modifiers: UInt32
         let scale: Double
@@ -47,6 +64,11 @@ final class ArrowSHotkeyManager {
     // MARK: State
 
     private var hotKeyRefs: [EventHotKeyRef] = []
+    // Carbon id (index+1) → entry UUID for the CURRENTLY-registered generation.
+    // Always describes exactly the refs in hotKeyRefs; reset on every
+    // unregister/re-register.  Fire resolution must go through this map (never
+    // array position) so a mid-list delete can't alias onto a different entry.
+    private var generationMap: [UInt32: String] = [:]
     private var eventHandlerRef: EventHandlerRef?
     private var cfObserverContext: UnsafeMutableRawPointer?
 
@@ -55,11 +77,12 @@ final class ArrowSHotkeyManager {
     // MARK: Lifecycle
 
     func start() {
-        Self.log.log("ArrowS hotkey manager start() invoked")
+        Self.log.log("Cursor hotkey manager start() invoked")
         installHandlerIfNeeded()
+        migrateLegacyIfNeeded()
         registerHotkeysFromPrefs()
         observeConfigChanges()
-        Self.log.log("ArrowS hotkey manager started")
+        Self.log.log("Cursor hotkey manager started")
     }
 
     // MARK: Carbon event handler
@@ -76,7 +99,7 @@ final class ArrowSHotkeyManager {
             GetApplicationEventTarget(),
             { (_, event, userData) -> OSStatus in
                 guard let userData = userData else { return noErr }
-                let manager = Unmanaged<ArrowSHotkeyManager>
+                let manager = Unmanaged<CursorHotkeyManager>
                     .fromOpaque(userData).takeUnretainedValue()
                 return manager.handleHotkeyEvent(event)
             },
@@ -110,7 +133,7 @@ final class ArrowSHotkeyManager {
         }
 
         Self.log.log("Hotkey event fired: id=\(hotKeyID.id, privacy: .public)")
-        applyHotkey(index: Int(hotKeyID.id))
+        applyHotkey(carbonId: hotKeyID.id)
         return noErr
     }
 
@@ -119,20 +142,31 @@ final class ArrowSHotkeyManager {
     private func registerHotkeysFromPrefs() {
         unregisterHotkeys()
 
-        let configs = loadConfig()
-        Self.log.log("Re/registering ArrowS hotkeys: \(configs.count, privacy: .public) configured slot(s)")
-        // Hotkey identity uses only intentional modifier bits: cmd|shift|option|control|fn.
-        // alphaLock (caps-lock state) and any other junk must never participate.
-        let usableMask: UInt32 = 256 | 512 | 2048 | 4096 | 8192
-        // Deterministic order (1 then 2) for readable logs.
-        for index in configs.keys.sorted() {
-            let cfg = configs[index]!
-            let cleanMods = cfg.modifiers & usableMask
-            Self.log.log("Slot \(index, privacy: .public) config: keyCode=\(cfg.keyCode, privacy: .public) modifiers_raw=\(cfg.modifiers, privacy: .public) modifiers_clean=\(cleanMods, privacy: .public) scale=\(cfg.scale, privacy: .public)")
+        let entries = loadConfig()
+        Self.log.log("Re/registering cursor hotkeys: \(entries.count, privacy: .public) entr(y/ies)")
+
+        var seenCombos = Set<UInt64>()
+        for (index, entry) in entries.enumerated() {
+            let cleanMods = entry.modifiers & Self.usableMask
+
+            // Disabled entry: no combo recorded.
+            if entry.keyCode == 0 || cleanMods == 0 {
+                Self.log.log("Entry \(index, privacy: .public) disabled (keyCode=\(entry.keyCode, privacy: .public) cleanMods=\(cleanMods, privacy: .public)) — skipped")
+                continue
+            }
+
+            // Duplicate combo guard: first entry wins, never let a dup reach Carbon.
+            let comboKey = (UInt64(entry.keyCode) << 32) | UInt64(cleanMods)
+            if seenCombos.contains(comboKey) {
+                Self.log.log("Entry \(index, privacy: .public) duplicate combo (keyCode=\(entry.keyCode, privacy: .public) cleanMods=\(cleanMods, privacy: .public)) — skipped")
+                continue
+            }
+            seenCombos.insert(comboKey)
+
             var ref: EventHotKeyRef?
-            let hotKeyID = EventHotKeyID(signature: Self.signature, id: UInt32(index))
+            let hotKeyID = EventHotKeyID(signature: Self.signature, id: UInt32(index + 1))
             let status = RegisterEventHotKey(
-                cfg.keyCode,
+                entry.keyCode,
                 cleanMods,
                 hotKeyID,
                 GetApplicationEventTarget(),
@@ -141,9 +175,10 @@ final class ArrowSHotkeyManager {
             )
             if status == noErr, let ref = ref {
                 hotKeyRefs.append(ref)
-                Self.log.log("Registered ArrowS hotkey \(index, privacy: .public): keyCode=\(cfg.keyCode, privacy: .public) modifiers=\(cleanMods, privacy: .public) scale=\(cfg.scale, privacy: .public)")
+                generationMap[UInt32(index + 1)] = entry.id
+                Self.log.log("Registered hotkey id=\(index + 1, privacy: .public): identifier=\(entry.identifier, privacy: .public) keyCode=\(entry.keyCode, privacy: .public) modifiers=\(cleanMods, privacy: .public) scale=\(entry.scale, privacy: .public)")
             } else {
-                Self.log.error("RegisterEventHotKey \(index, privacy: .public) FAILED: OSStatus \(status, privacy: .public) (rawMods=\(cfg.modifiers, privacy: .public) cleanMods=\(cleanMods, privacy: .public))")
+                Self.log.error("RegisterEventHotKey id=\(index + 1, privacy: .public) FAILED: OSStatus \(status, privacy: .public) (identifier=\(entry.identifier, privacy: .public) rawMods=\(entry.modifiers, privacy: .public) cleanMods=\(cleanMods, privacy: .public))")
             }
         }
     }
@@ -153,6 +188,7 @@ final class ArrowSHotkeyManager {
             UnregisterEventHotKey(ref)
         }
         hotKeyRefs.removeAll()
+        generationMap.removeAll()
     }
 
     private func handleConfigChanged() {
@@ -171,7 +207,7 @@ final class ArrowSHotkeyManager {
             context,
             { (_, observer, _, _, _) in
                 guard let observer = observer else { return }
-                let manager = Unmanaged<ArrowSHotkeyManager>
+                let manager = Unmanaged<CursorHotkeyManager>
                     .fromOpaque(observer).takeUnretainedValue()
                 // Carbon registration touches the app event target — do it on main.
                 DispatchQueue.main.async {
@@ -201,47 +237,98 @@ final class ArrowSHotkeyManager {
 
     // MARK: Config load
 
-    private func loadConfig() -> [Int: HotkeyConfig] {
+    private func loadConfig() -> [HotkeyEntry] {
         guard let raw = CFPreferencesCopyValue(
             Self.hotkeysKey,
             Self.domain,
             kCFPreferencesCurrentUser,
             kCFPreferencesCurrentHost
-        ) as? [String: Any] else {
-            Self.log.log("MCArrowSHotkeys not present/parseable in currentHost — no slots")
-            return [:]
+        ) as? [[String: Any]] else {
+            Self.log.log("MCCursorScaleHotkeys not present/parseable in currentHost — no entries")
+            return []
         }
 
-        Self.log.log("MCArrowSHotkeys raw read: \(raw.count, privacy: .public) raw slot(s)")
-        var result: [Int: HotkeyConfig] = [:]
-        for (name, value) in raw {
-            guard let index = hotkeyIndex(fromName: name),
-                  let entry = value as? [String: Any]
-            else { continue }
+        Self.log.log("MCCursorScaleHotkeys raw read: \(raw.count, privacy: .public) raw entr(y/ies)")
 
+        var result: [HotkeyEntry] = []
+        for slot in raw {
             // Type-tolerant (see AppState.getPerCursorScale / SettingsView.loadPerCursorScales):
-            // values may be NSString after `defaults write` CLI or script edits — accept
-            // Double/String/NSNumber forms for keyCode, modifiers and scale.
-            guard let keyCode = Self.number(entry["keyCode"]),
-                  let modifiers = Self.number(entry["modifiers"]),
-                  let scale = Self.number(entry["scale"]),
-                  modifiers != 0
+            // values may be NSString after `defaults write` CLI or script edits.
+            guard let identifier = slot["identifier"] as? String, !identifier.isEmpty,
+                  let keyCode = Self.number(slot["keyCode"]),
+                  let modifiers = Self.number(slot["modifiers"]),
+                  let scale = Self.number(slot["scale"])
             else { continue }
-            result[index] = HotkeyConfig(
+            let id = (slot["id"] as? String) ?? UUID().uuidString
+            result.append(HotkeyEntry(
+                id: id,
+                identifier: identifier,
                 keyCode: UInt32(keyCode),
                 modifiers: UInt32(modifiers),
                 scale: scale
-            )
+            ))
         }
         return result
     }
 
-    private func hotkeyIndex(fromName name: String) -> Int? {
-        switch name {
-        case "hotkey1": return 1
-        case "hotkey2": return 2
-        default: return nil
+    /// One-time migration from the legacy 2-slot "MCArrowSHotkeys" dict to the
+    /// new "MCCursorScaleHotkeys" array.  Idempotent; deletes the legacy key so
+    /// no stale shadow remains.
+    private func migrateLegacyIfNeeded() {
+        if let existing = CFPreferencesCopyValue(
+            Self.hotkeysKey,
+            Self.domain,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        ) as? [Any], !existing.isEmpty {
+            return
         }
+
+        guard let legacy = CFPreferencesCopyValue(
+            Self.legacyHotkeysKey,
+            Self.domain,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        ) as? [String: Any], !legacy.isEmpty else {
+            return
+        }
+
+        var migrated: [[String: Any]] = []
+        for name in ["hotkey1", "hotkey2"] {
+            guard let slot = legacy[name] as? [String: Any],
+                  let keyCode = Self.number(slot["keyCode"]),
+                  let modifiers = Self.number(slot["modifiers"]),
+                  let scale = Self.number(slot["scale"])
+            else { continue }
+            migrated.append([
+                "id": UUID().uuidString,
+                "identifier": Self.legacyIdentifier,
+                "keyCode": Int(keyCode),
+                "modifiers": Int(modifiers),
+                "scale": scale
+            ])
+        }
+
+        guard !migrated.isEmpty else { return }
+
+        CFPreferencesSetValue(
+            Self.hotkeysKey,
+            migrated as CFPropertyList,
+            Self.domain,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        )
+        CFPreferencesSynchronize(Self.domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        // Remove the legacy key so it can never shadow the new config.
+        CFPreferencesSetValue(
+            Self.legacyHotkeysKey,
+            nil,
+            Self.domain,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        )
+        CFPreferencesSynchronize(Self.domain, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        Self.log.log("Migrated \(migrated.count, privacy: .public) legacy ArrowS hotkey(s) to MCCursorScaleHotkeys; removed legacy key")
     }
 
     /// Type-tolerant numeric parse: CFPreferences values may arrive as NSNumber,
@@ -255,29 +342,33 @@ final class ArrowSHotkeyManager {
 
     // MARK: Apply
 
-    private func applyHotkey(index: Int) {
-        // Re-read the scale from prefs every fire so Settings edits apply
-        // without a Helper restart.
-        guard let cfg = loadConfig()[index] else {
-            Self.log.log("Hotkey \(index, privacy: .public) fired but is not configured")
+    private func applyHotkey(carbonId: UInt32) {
+        // Re-read the config fresh from prefs every fire so Settings edits
+        // apply without a Helper restart.  Resolve the entry by UUID via the
+        // registration-generation map — NOT by array position — so a mid-list
+        // delete cannot alias this fire onto a different entry.
+        let entries = loadConfig()
+        guard let uuid = generationMap[carbonId],
+              let entry = entries.first(where: { $0.id == uuid }) else {
+            Self.log.log("Stale hotkey fire ignored (entry deleted): id=\(carbonId, privacy: .public)")
             return
         }
 
-        Self.log.log("Hotkey \(index, privacy: .public) applying: scale=\(cfg.scale, privacy: .public)")
+        Self.log.log("Hotkey id=\(carbonId, privacy: .public) applying: entry=\(entry.id, privacy: .public) identifier=\(entry.identifier, privacy: .public) scale=\(entry.scale, privacy: .public)")
 
-        // a. Write the per-cursor scale for ArrowS only (currentHost, matching
-        //    the codebase's MCPerCursorScales scope).
-        writeArrowSScale(cfg.scale)
+        // a. Write the per-cursor scale for this entry's cursor only (currentHost,
+        //    matching the codebase's MCPerCursorScales scope).
+        writeCursorScale(identifier: entry.identifier, rawScale: entry.scale)
 
         // b. Custom mode is required for per-cursor scales to take effect.
         ensureCustomScaleMode()
 
         // c. User-initiated apply (bypasses the shared wake cooldown).
         let success = applyCurrentCapeUserInitiated()
-        Self.log.log("Hotkey \(index, privacy: .public) apply result: \(success ? "succeeded" : "FAILED", privacy: .public)")
+        Self.log.log("Hotkey id=\(carbonId, privacy: .public) apply result: \(success ? "succeeded" : "FAILED", privacy: .public)")
     }
 
-    private func writeArrowSScale(_ rawScale: Double) {
+    private func writeCursorScale(identifier: String, rawScale: Double) {
         let scale = min(max(0.5, rawScale), 96.0)
 
         var dict = (CFPreferencesCopyValue(
@@ -289,11 +380,11 @@ final class ArrowSHotkeyManager {
 
         if abs(scale - 1.0) < 0.01 {
             // Keep the dict clean: 1.0 means "no override".
-            dict.removeValue(forKey: Self.arrowSIdentifier)
-            Self.log.log("ArrowS scale removed from MCPerCursorScales (scale≈1.0)")
+            dict.removeValue(forKey: identifier)
+            Self.log.log("Scale removed from MCPerCursorScales for \(identifier, privacy: .public) (scale≈1.0)")
         } else {
-            dict[Self.arrowSIdentifier] = scale
-            Self.log.log("ArrowS scale written to MCPerCursorScales: \(scale, privacy: .public)")
+            dict[identifier] = scale
+            Self.log.log("Scale written to MCPerCursorScales for \(identifier, privacy: .public): \(scale, privacy: .public)")
         }
 
         CFPreferencesSetValue(
@@ -329,6 +420,6 @@ final class ArrowSHotkeyManager {
         Self.log.log("Scale mode is \(mode ?? "nil", privacy: .public) — switching to custom")
         setCustomScaleMode(true)
         _ = setCursorScale(1.0)
-        Self.log.log("Switched scale mode to custom for ArrowS hotkey")
+        Self.log.log("Switched scale mode to custom for cursor hotkey")
     }
 }

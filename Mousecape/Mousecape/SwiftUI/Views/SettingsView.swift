@@ -194,9 +194,9 @@ struct GeneralSettingsView: View {
                 }
             }
 
-            Section("\(CursorType.arrowS.displayName) Hotkeys") {
-                ArrowSHotkeySettingsContent()
-                Text("Pressing a hotkey resizes only the \(CursorType.arrowS.displayName) cursor system-wide.")
+            Section("Cursor Scale Hotkeys") {
+                CursorHotkeySettingsContent()
+                Text("Pressing a hotkey resizes only its chosen cursor system-wide.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -877,44 +877,56 @@ struct CustomScaleView: View {
     }
 }
 
-// MARK: - Arrow S Hotkeys
+// MARK: - Cursor Scale Hotkeys
 
-/// Two configurable global hotkeys that set the *per-cursor* scale of only the
-/// "Arrow S" cursor (com.apple.coregraphics.ArrowS).  The combo + scale are the
-/// whole mechanism — no combo/scale is hardcoded.  Changes are persisted to
-/// CFPreferences (currentHost) and announced to the Helper via a Darwin
-/// notification, which re-registers the Carbon hotkeys at runtime.
-struct ArrowSHotkeySettingsContent: View {
+/// N user-managed global hotkeys, each mapping a chosen CursorType to a
+/// per-cursor scale.  An entry = {cursor type, key combo, scale}; the combo +
+/// scale are the whole mechanism — no cursor identifier, slot count or combo is
+/// hardcoded.  Changes are persisted to CFPreferences (currentHost) and
+/// announced to the Helper via a Darwin notification, which re-registers the
+/// Carbon hotkeys at runtime.
+struct CursorHotkeySettingsContent: View {
 
-    private struct HotkeyState {
+    private struct HotkeyEntry: Identifiable {
+        var id: UUID
+        var cursorType: CursorType
         var keyCode: UInt16?
         var modifiers: UInt32
         var scale: Double
     }
 
     private static let domain = "com.sdmj76.Mousecape"
-    private static let hotkeysKey = "MCArrowSHotkeys"
-    private static let changedNotification = "com.sdmj76.Mousecape.arrowSHotkeysChanged"
+    private static let hotkeysKey = "MCCursorScaleHotkeys"
+    private static let legacyHotkeysKey = "MCArrowSHotkeys"
+    private static let changedNotification = "com.sdmj76.Mousecape.cursorHotkeysChanged"
     private static let defaultScale = 2.0
 
-    @State private var entries: [Int: HotkeyState] = [:]
-    @State private var recordingIndex: Int? = nil
+    @State private var entries: [HotkeyEntry] = []
+    @State private var recordingID: UUID? = nil
     @State private var monitor: Any? = nil
 
     var body: some View {
-        Grid(alignment: .center, horizontalSpacing: 8, verticalSpacing: 8) {
-            GridRow {
-                Text("Hotkey 1")
-                    .gridColumnAlignment(.leading)
-                hotkeyButton(index: 1)
-                scaleField(index: 1)
-                Text("x")
+        VStack(alignment: .leading, spacing: 8) {
+            Grid(alignment: .center, horizontalSpacing: 8, verticalSpacing: 8) {
+                ForEach($entries) { entry in
+                    GridRow {
+                        picker(entry: entry)
+                        hotkeyButton(entry: entry)
+                        scaleField(entry: entry)
+                        Text("x")
+                        deleteButton(entry: entry)
+                    }
+                }
             }
-            GridRow {
-                Text("Hotkey 2")
-                hotkeyButton(index: 2)
-                scaleField(index: 2)
-                Text("x")
+            HStack {
+                Button {
+                    addEntry()
+                } label: {
+                    Label("Add Hotkey", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                Spacer()
             }
         }
         .onAppear { load() }
@@ -924,28 +936,40 @@ struct ArrowSHotkeySettingsContent: View {
     // MARK: Row controls
 
     @ViewBuilder
-    private func hotkeyButton(index: Int) -> some View {
+    private func picker(entry: Binding<HotkeyEntry>) -> some View {
+        Picker("", selection: entry.cursorType) {
+            ForEach(CursorType.allCases) { type in
+                Text(type.displayName).tag(type)
+            }
+        }
+        .pickerStyle(.menu)
+        .labelsHidden()
+        .frame(maxWidth: 140)
+        .onChange(of: entry.wrappedValue.cursorType) { _, _ in persist() }
+    }
+
+    @ViewBuilder
+    private func hotkeyButton(entry: Binding<HotkeyEntry>) -> some View {
         Button {
-            startRecording(index)
+            startRecording(entry.wrappedValue.id)
         } label: {
-            Text(recordingIndex == index ? "Press keys…" : comboLabel(entries[index]))
+            Text(recordingID == entry.wrappedValue.id ? "Press keys…" : comboLabel(entry.wrappedValue))
                 .frame(minWidth: 80)
         }
         .buttonStyle(.bordered)
         .controlSize(.regular)
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(Color.accentColor, lineWidth: recordingIndex == index ? 2 : 0)
+                .stroke(Color.accentColor, lineWidth: recordingID == entry.wrappedValue.id ? 2 : 0)
         )
     }
 
     @ViewBuilder
-    private func scaleField(index: Int) -> some View {
+    private func scaleField(entry: Binding<HotkeyEntry>) -> some View {
         TextField("", value: Binding(
-            get: { entries[index]?.scale ?? Self.defaultScale },
+            get: { entry.wrappedValue.scale },
             set: { newValue in
-                entries[index, default: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale)].scale =
-                    min(max(0.5, newValue), 96.0)
+                entry.wrappedValue.scale = min(max(0.5, newValue), 96.0)
                 persist()
             }
         ), format: .number.precision(.fractionLength(1)))
@@ -956,13 +980,23 @@ struct ArrowSHotkeySettingsContent: View {
             .multilineTextAlignment(.trailing)
     }
 
+    @ViewBuilder
+    private func deleteButton(entry: Binding<HotkeyEntry>) -> some View {
+        Button(role: .destructive) {
+            deleteEntry(id: entry.wrappedValue.id)
+        } label: {
+            Image(systemName: "minus.circle.fill")
+        }
+        .buttonStyle(.borderless)
+    }
+
     // MARK: Recording
 
-    private func startRecording(_ index: Int) {
+    private func startRecording(_ id: UUID) {
         cancelRecording()
-        recordingIndex = index
+        recordingID = id
         monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { event in
-            handleRecordEvent(event, index: index)
+            handleRecordEvent(event)
             return nil   // swallow while recording
         }
     }
@@ -972,10 +1006,15 @@ struct ArrowSHotkeySettingsContent: View {
             NSEvent.removeMonitor(monitor)
         }
         monitor = nil
-        recordingIndex = nil
+        recordingID = nil
     }
 
-    private func handleRecordEvent(_ event: NSEvent, index: Int) {
+    private func handleRecordEvent(_ event: NSEvent) {
+        guard let id = recordingID,
+              let index = entries.firstIndex(where: { $0.id == id }) else {
+            cancelRecording()
+            return
+        }
         let keyCode = event.keyCode
 
         // Escape cancels recording.
@@ -996,8 +1035,8 @@ struct ArrowSHotkeySettingsContent: View {
         if carbon == 0 {
             // Plain Delete/Backspace (no modifier) clears the hotkey.
             if keyCode == 51 || keyCode == 117 {
-                entries[index, default: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale)].keyCode = nil
-                entries[index]?.modifiers = 0
+                entries[index].keyCode = nil
+                entries[index].modifiers = 0
                 persist()
                 cancelRecording()
             }
@@ -1005,8 +1044,8 @@ struct ArrowSHotkeySettingsContent: View {
             return
         }
 
-        entries[index, default: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale)].keyCode = keyCode
-        entries[index]?.modifiers = carbon
+        entries[index].keyCode = keyCode
+        entries[index].modifiers = carbon
         persist()
         cancelRecording()
     }
@@ -1014,41 +1053,49 @@ struct ArrowSHotkeySettingsContent: View {
     // MARK: Persistence
 
     private func load() {
-        var loaded: [Int: HotkeyState] = [
-            1: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale),
-            2: HotkeyState(keyCode: nil, modifiers: 0, scale: Self.defaultScale)
-        ]
-        if let raw = CFPreferencesCopyValue(
+        migrateLegacyIfNeeded()
+        guard let raw = CFPreferencesCopyValue(
             Self.hotkeysKey as CFString,
             Self.domain as CFString,
             kCFPreferencesCurrentUser,
             kCFPreferencesCurrentHost
-        ) as? [String: Any] {
-            for (name, value) in raw {
-                guard let index = hotkeyIndex(fromName: name),
-                      let entry = value as? [String: Any] else { continue }
-                let keyCode = (entry["keyCode"] as? NSNumber)?.uint16Value
-                let modifiers = (entry["modifiers"] as? NSNumber)?.uint32Value ?? 0
-                let scale = (entry["scale"] as? NSNumber)?.doubleValue ?? Self.defaultScale
-                loaded[index] = HotkeyState(keyCode: keyCode, modifiers: modifiers, scale: scale)
-            }
+        ) as? [[String: Any]] else {
+            entries = []
+            return
+        }
+        var loaded: [HotkeyEntry] = []
+        for slot in raw {
+            guard let identifier = slot["identifier"] as? String,
+                  let cursorType = CursorType(rawValue: identifier),
+                  let keyCode = Self.number(slot["keyCode"]),
+                  let modifiers = Self.number(slot["modifiers"]),
+                  let scale = Self.number(slot["scale"])
+            else { continue }
+            let id = (slot["id"] as? String).flatMap(UUID.init(uuidString:)) ?? UUID()
+            loaded.append(HotkeyEntry(
+                id: id,
+                cursorType: cursorType,
+                keyCode: keyCode == 0 ? nil : UInt16(keyCode),
+                modifiers: UInt32(modifiers),
+                scale: scale
+            ))
         }
         entries = loaded
     }
 
     private func persist() {
-        var dict: [String: [String: Any]] = [:]
-        for (index, entry) in entries {
-            guard let keyCode = entry.keyCode else { continue }
-            dict["hotkey\(index)"] = [
-                "keyCode": Int(keyCode),
+        let array: [[String: Any]] = entries.map { entry in
+            [
+                "id": entry.id.uuidString,
+                "identifier": entry.cursorType.rawValue,
+                "keyCode": Int(entry.keyCode ?? 0),
                 "modifiers": Int(entry.modifiers),
                 "scale": entry.scale
             ]
         }
         CFPreferencesSetValue(
             Self.hotkeysKey as CFString,
-            dict as CFPropertyList,
+            array as CFPropertyList,
             Self.domain as CFString,
             kCFPreferencesCurrentUser,
             kCFPreferencesCurrentHost
@@ -1068,19 +1115,85 @@ struct ArrowSHotkeySettingsContent: View {
         )
     }
 
-    private func hotkeyIndex(fromName name: String) -> Int? {
-        switch name {
-        case "hotkey1": return 1
-        case "hotkey2": return 2
-        default: return nil
+    private func addEntry() {
+        entries.append(HotkeyEntry(id: UUID(), cursorType: .arrow, keyCode: nil, modifiers: 0, scale: Self.defaultScale))
+        persist()
+    }
+
+    private func deleteEntry(id: UUID) {
+        entries.removeAll { $0.id == id }
+        persist()
+    }
+
+    /// One-time migration from the legacy 2-slot "MCArrowSHotkeys" dict to the
+    /// new "MCCursorScaleHotkeys" array.  Idempotent; deletes the legacy key so
+    /// no stale shadow remains.
+    private func migrateLegacyIfNeeded() {
+        if let existing = CFPreferencesCopyValue(
+            Self.hotkeysKey as CFString,
+            Self.domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        ) as? [Any], !existing.isEmpty {
+            return
         }
+        guard let legacy = CFPreferencesCopyValue(
+            Self.legacyHotkeysKey as CFString,
+            Self.domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        ) as? [String: Any], !legacy.isEmpty else {
+            return
+        }
+        var migrated: [[String: Any]] = []
+        for name in ["hotkey1", "hotkey2"] {
+            guard let slot = legacy[name] as? [String: Any],
+                  let keyCode = Self.number(slot["keyCode"]),
+                  let modifiers = Self.number(slot["modifiers"]),
+                  let scale = Self.number(slot["scale"])
+            else { continue }
+            migrated.append([
+                "id": UUID().uuidString,
+                "identifier": CursorType.arrowS.rawValue,
+                "keyCode": Int(keyCode),
+                "modifiers": Int(modifiers),
+                "scale": scale
+            ])
+        }
+        guard !migrated.isEmpty else { return }
+        CFPreferencesSetValue(
+            Self.hotkeysKey as CFString,
+            migrated as CFPropertyList,
+            Self.domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        )
+        CFPreferencesSynchronize(Self.domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+        // Remove the legacy key so it can never shadow the new config.
+        CFPreferencesSetValue(
+            Self.legacyHotkeysKey as CFString,
+            nil,
+            Self.domain as CFString,
+            kCFPreferencesCurrentUser,
+            kCFPreferencesCurrentHost
+        )
+        CFPreferencesSynchronize(Self.domain as CFString, kCFPreferencesCurrentUser, kCFPreferencesCurrentHost)
+    }
+
+    /// Type-tolerant numeric parse: CFPreferences values may arrive as NSNumber,
+    /// Double, or NSString (from `defaults write` CLI / script edits).
+    private static func number(_ value: Any?) -> Double? {
+        if let d = value as? Double { return d }
+        if let s = value as? String { return Double(s) }
+        if let n = value as? NSNumber { return n.doubleValue }
+        return nil
     }
 
     // MARK: Display helpers
 
-    private func comboLabel(_ state: HotkeyState?) -> String {
-        guard let state = state, let keyCode = state.keyCode else { return "Not Set" }
-        return modifierSymbols(state.modifiers) + keyLabel(keyCode)
+    private func comboLabel(_ entry: HotkeyEntry) -> String {
+        guard let keyCode = entry.keyCode else { return "Not Set" }
+        return modifierSymbols(entry.modifiers) + keyLabel(keyCode)
     }
 
     private func modifierSymbols(_ modifiers: UInt32) -> String {

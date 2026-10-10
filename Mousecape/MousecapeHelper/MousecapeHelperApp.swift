@@ -48,9 +48,9 @@ class HelperAppDelegate: NSObject, NSApplicationDelegate {
         )
         NSLog("[MousecapeHelper] Wake notification observer registered")
 
-        // Global ArrowS scale hotkeys (Carbon RegisterEventHotKey — no
+        // Global cursor-scale hotkeys (Carbon RegisterEventHotKey — no
         // Accessibility permission required).  Config lives in prefs.
-        ArrowSHotkeyManager.shared.start()
+        CursorHotkeyManager.shared.start()
     }
 
     @objc private func workspaceDidWake(_ notification: Notification) {
