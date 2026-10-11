@@ -1193,26 +1193,19 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
         return NO;
     }
     MCSetDefault(dictionary[MCCursorDictionaryIdentifierKey], MCPreferencesAppliedCursorKey);
-    // Force an immediate display refresh.  On this OS (27.2 beta) the displayed
-    // cursor recomposites ONLY on real pointer movement — registration alone
-    // and every store-side invalidator (hide/show pair, hidden scale bump,
-    // CGSSetRegisteredCursor rebind, warp) were user-tested and ignored.  Post
-    // a synthetic 1px move and back: the same event class as real movement,
-    // which is the one proven refresh trigger.  Requires Accessibility trust;
-    // without it, degrade gracefully to refresh-on-next-move and say so.
-    if (AXIsProcessTrusted()) {
-        CGEventRef locRef = CGEventCreate(NULL);
-        CGPoint p = locRef ? CGEventGetLocation(locRef) : CGPointZero;
-        if (locRef) CFRelease(locRef);
-        CGPoint bumped = CGPointMake(p.x + 1.0, p.y);
-        CGEventRef moveOut = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, bumped, kCGMouseButtonLeft);
-        CGEventRef moveBack = CGEventCreateMouseEvent(NULL, kCGEventMouseMoved, p, kCGMouseButtonLeft);
-        if (moveOut) { CGEventPost(kCGHIDEventTap, moveOut); CFRelease(moveOut); }
-        if (moveBack) { CGEventPost(kCGHIDEventTap, moveBack); CFRelease(moveBack); }
-        MMLog("  Posted synthetic 1px move-and-back to force cursor recomposite");
-    } else {
-        MMLog(YELLOW "  Accessibility trust missing — cursor refreshes on next mouse move. Grant MousecapeHelper in System Settings > Privacy & Security > Accessibility" RESET);
-    }
+    // Force an immediate on-screen refresh.  In-place re-registration updates
+    // the stored image, but WindowServer only recomposites the cursor when a
+    // display invalidation occurs (the full apply's ramp uses a scale change
+    // for this).  A bare hide/show pair is coalesced; a scale bump while
+    // hidden, then restore, then show, is the proven ramp shape (see the
+    // extraction boost above).  Saved scale restored exactly; cursor is
+    // hidden for the bump so nothing paints at the bumped size.
+    float savedScale = 1.0f;
+    CGSGetCursorScale(CGSMainConnectionID(), &savedScale);
+    CGSSetCursorScale(CGSMainConnectionID(), savedScale + 0.01f);
+    CGSHideCursor(CGSMainConnectionID());
+    CGSSetCursorScale(CGSMainConnectionID(), savedScale);
+    CGSShowCursor(CGSMainConnectionID());
     MMLog(BOLD GREEN "Surgical apply complete — no unregister/ramp/uad-kill performed" RESET);
     return YES;
 }
