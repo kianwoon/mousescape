@@ -1193,13 +1193,6 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
         return NO;
     }
     MCSetDefault(dictionary[MCCursorDictionaryIdentifierKey], MCPreferencesAppliedCursorKey);
-    // Force an immediate on-screen refresh: in-place re-registration updates
-    // the stored image, but the visible cursor keeps the old art until its
-    // next redraw trigger (mouse movement).  A matched hide/show pair in the
-    // same runloop turn makes WindowServer recomposite the cursor now — the
-    // same primitive the full apply's ramp uses.  No net visibility change.
-    CGSHideCursor(CGSMainConnectionID());
-    CGSShowCursor(CGSMainConnectionID());
     MMLog(BOLD GREEN "Surgical apply complete — no unregister/ramp/uad-kill performed" RESET);
     return YES;
 }
