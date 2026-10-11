@@ -1193,6 +1193,16 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
         return NO;
     }
     MCSetDefault(dictionary[MCCursorDictionaryIdentifierKey], MCPreferencesAppliedCursorKey);
+    // Force an immediate display refresh: CGSSetCursorScale makes WindowServer
+    // re-render all cursors, picking up the freshly registered images.  The
+    // bump must be UNHIDDEN — hidden cursors are never rendered, so a hidden
+    // bump is silently dropped (verified on macOS 27.2: hidden bump ignored,
+    // unhidden bump recomposites).  +0.01 on any scale is sub-pixel
+    // imperceptible and is restored immediately after.
+    float savedScale = 1.0f;
+    CGSGetCursorScale(CGSMainConnectionID(), &savedScale);
+    CGSSetCursorScale(CGSMainConnectionID(), savedScale + 0.01f);
+    CGSSetCursorScale(CGSMainConnectionID(), savedScale);
     MMLog(BOLD GREEN "Surgical apply complete — no unregister/ramp/uad-kill performed" RESET);
     return YES;
 }
