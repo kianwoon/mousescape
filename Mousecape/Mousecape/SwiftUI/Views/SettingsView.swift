@@ -199,6 +199,9 @@ struct GeneralSettingsView: View {
                 Text("Pressing a hotkey resizes only its chosen cursor system-wide.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                Text("The new size appears on your next mouse movement.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Cursor") {
