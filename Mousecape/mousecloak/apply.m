@@ -1193,12 +1193,18 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
         return NO;
     }
     MCSetDefault(dictionary[MCCursorDictionaryIdentifierKey], MCPreferencesAppliedCursorKey);
-    // Force an immediate on-screen refresh: in-place re-registration updates
-    // the stored image, but the visible cursor keeps the old art until its
-    // next redraw trigger (mouse movement).  A matched hide/show pair in the
-    // same runloop turn makes WindowServer recomposite the cursor now — the
-    // same primitive the full apply's ramp uses.  No net visibility change.
+    // Force an immediate on-screen refresh.  In-place re-registration updates
+    // the stored image, but WindowServer only recomposites the cursor when a
+    // display invalidation occurs (the full apply's ramp uses a scale change
+    // for this).  A bare hide/show pair is coalesced; a scale bump while
+    // hidden, then restore, then show, is the proven ramp shape (see the
+    // extraction boost above).  Saved scale restored exactly; cursor is
+    // hidden for the bump so nothing paints at the bumped size.
+    float savedScale = 1.0f;
+    CGSGetCursorScale(CGSMainConnectionID(), &savedScale);
+    CGSSetCursorScale(CGSMainConnectionID(), savedScale + 0.01f);
     CGSHideCursor(CGSMainConnectionID());
+    CGSSetCursorScale(CGSMainConnectionID(), savedScale);
     CGSShowCursor(CGSMainConnectionID());
     MMLog(BOLD GREEN "Surgical apply complete — no unregister/ramp/uad-kill performed" RESET);
     return YES;
