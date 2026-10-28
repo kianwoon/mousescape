@@ -1,0 +1,23 @@
+<!-- baseline-guard:allow new standalone test fixture, no prior baseline possible -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ClickAssistTest-Ready</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #ffffff; font: 16px -apple-system, sans-serif; }
+  #activate { position: absolute; left: 80px; top: 120px; width: 240px; height: 64px; font-size: 18px; }
+  #marker { position: absolute; left: 80px; top: 210px; color: #0a7a26; font-weight: 600; }
+  #secret { position: absolute; left: 80px; top: 330px; width: 260px; height: 36px; font-size: 16px; }
+  #secretLabel { position: absolute; left: 80px; top: 305px; color: #333; }
+</style>
+</head>
+<body>
+  <button id="activate" aria-label="Activate ClickAssist"
+          onclick="document.getElementById('marker').textContent='CLICKED-MARKER'; document.title='CLICKED-ClickAssistTest';">Activate ClickAssist</button>
+  <div id="marker">not-clicked</div>
+  <label id="secretLabel" for="secret">Password</label>
+  <input id="secret" type="password" aria-label="Secret Password" autocomplete="off">
+  <script>document.title = 'ClickAssistTest-Ready';</script>
+</body>
+</html>
