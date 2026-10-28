@@ -38,6 +38,18 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var lastResolvedPid: pid_t = 0
     private var running = false
     private var loggedSecure: Set<String> = []
+    /// Per-target last time the AX walk (or pointer seed) actually saw it. Used to
+    /// keep a monotonic union across truncated walks.
+    private var lastSeen: [String: CFTimeInterval] = [:]
+    /// Last VALID published target set. Kept resolver-side so a transient invalid
+    /// snapshot cannot erase the union before the next walk re-merges it.
+    private var unionTargets: [CachedTarget] = []
+    private var unionPid: pid_t = 0
+    /// A published target survives this long without being re-seen. Longer than one
+    /// truncated walk, short enough that genuinely gone controls disappear promptly.
+    private static let targetFreshnessWindow: CFTimeInterval = 2.5
+    private static let nodeBudget = 600
+    private static let seedAncestryDepth = 8
 
     init(cache: CacheStore, log: @escaping (String) -> Void) {
         self.cache = cache
@@ -173,9 +185,24 @@ final class AccessibilityResolver: @unchecked Sendable {
         ensureObserver(pid: pid, appElement: appEl)
 
         var out: [CachedTarget] = []
-        var budget = 600
+        var budget = Self.nodeBudget
         let deadline = t0 + 0.25
         let screenUnion = Self.screenUnionAX()
+        let pointer = currentPointer()
+
+        // Reset the union when the frontmost app changes: never carry one app's
+        // targets (or their keys) into another app's snapshot.
+        if unionPid != pid {
+            lastSeen.removeAll()
+            unionTargets.removeAll()
+            unionPid = pid
+        }
+
+        // Pointer-region seed FIRST: resolve the element under the cursor and walk
+        // its immediate ancestry, so the visibly hovered control is captured even
+        // when the global walk later exhausts its budget in a huge web-content tree.
+        let seedHit = seedAtPointer(appEl, pointer: pointer, out: &out, budget: &budget,
+                                    deadline: deadline, screenUnion: screenUnion)
 
         if let raw = attr(appEl, kAXWindowsAttribute), let windows = axArray(raw) {
             for w in windows {
@@ -192,17 +219,45 @@ final class AccessibilityResolver: @unchecked Sendable {
         // AX API failure means "unavailable".
         let partial = budget <= 0
 
-        let pointer = currentPointer()
+        // Monotonic union: a truncated walk must never drop a target that was
+        // present before. Merge the new walk with the previously published set,
+        // refreshing last-seen for anything seen now and expiring only targets
+        // stale beyond the freshness window.
+        let now = CACurrentMediaTime()
+        var order: [String] = []
+        var byKey: [String: CachedTarget] = [:]
+        for t in out where byKey[t.key] == nil {
+            byKey[t.key] = t
+            order.append(t.key)
+            lastSeen[t.key] = now
+        }
+        let newCount = order.count
+        var droppedExpired = 0
+        for previous in unionTargets where byKey[previous.key] == nil {
+            if let seen = lastSeen[previous.key], now - seen <= Self.targetFreshnessWindow {
+                byKey[previous.key] = previous
+                order.append(previous.key)
+            } else {
+                lastSeen.removeValue(forKey: previous.key)
+                droppedExpired += 1
+            }
+        }
+        lastSeen = lastSeen.filter { byKey[$0.key] != nil }
+        out = order.compactMap { byKey[$0] }
+        unionTargets = out
+
         let near = out.filter { Self.boundaryDistance(pointer, $0.rect) <= 80 }.count
         let ms = (CACurrentMediaTime() - t0) * 1000
+        let visited = Self.nodeBudget - budget
         let gen = nextGeneration()
         let snap = CacheSnapshot(generation: gen, targets: out, valid: true, reason: "fresh",
                                  stamp: CACurrentMediaTime(), resolverMs: ms, pointer: pointer,
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d nearPointer=%d resolver_ms=%.2f partial=%d",
-                   gen, appName, pid, out.count, near, ms, partial ? 1 : 0))
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d",
+                   gen, appName, pid, out.count, newCount, near, visited,
+                   seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0))
 
         let rects = out.map { "\($0.key):\(ScreenSpace.fmt($0.rect.origin)):\(Int($0.rect.width))x\(Int($0.rect.height))" }
         if rects != lastRects {
@@ -235,33 +290,66 @@ final class AccessibilityResolver: @unchecked Sendable {
 
     // MARK: - AX walk
 
+    /// Resolve the element under the pointer and walk its ancestry (child → parent).
+    /// This spend is tiny (≤ seedAncestryDepth nodes) and happens before the global
+    /// walk, so the hovered control survives any later budget cut.
+    private func seedAtPointer(_ appEl: AXUIElement, pointer: CGPoint, out: inout [CachedTarget],
+                               budget: inout Int, deadline: CFTimeInterval,
+                               screenUnion: CGRect) -> Bool {
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(appEl, Float(pointer.x), Float(pointer.y), &element) == .success,
+              var current = element else { return false }
+        var found = false
+        var depth = 0
+        while budget > 0, depth < Self.seedAncestryDepth, CACurrentMediaTime() < deadline {
+            budget -= 1
+            if collect(current, out: &out, screenUnion: screenUnion) { found = true }
+            guard let parentRaw = attr(current, kAXParentAttribute),
+                  let parent = axElement(parentRaw) else { break }
+            current = parent
+            depth += 1
+        }
+        return found
+    }
+
+    /// Extract one element as a candidate if its role/geometry qualifies.
+    @discardableResult
+    private func collect(_ el: AXUIElement, out: inout [CachedTarget],
+                         screenUnion: CGRect) -> Bool {
+        guard let role = stringAttr(el, kAXRoleAttribute), Self.eligibleRoles.contains(role) else {
+            return false
+        }
+        // Secure text fields are never redirect candidates: a near miss must
+        // pass through instead of being clamped into a password control.
+        let subrole = stringAttr(el, kAXSubroleAttribute)
+        if subrole == (kAXSecureTextFieldSubrole as String) {
+            let title = stringAttr(el, kAXTitleAttribute)
+                ?? stringAttr(el, kAXDescriptionAttribute) ?? "-"
+            if !loggedSecure.contains(title) {
+                loggedSecure.insert(title)
+                let r = frame(el).map { "\($0)" } ?? "nil"
+                log("RESOLVER_SKIP_SECURE label=\"\(title)\" subrole=AXSecureTextField rect=\(r) reason=never-redirect")
+            }
+            return false
+        }
+        guard let rect = frame(el), rect.width >= 4, rect.height >= 4,
+              rect.width < 4000, rect.height < 2000, rect.intersects(screenUnion) else {
+            return false
+        }
+        let ident = stringAttr(el, kAXIdentifierAttribute)
+        let title = stringAttr(el, kAXTitleAttribute)
+        let key = ident ?? title ?? "\(role)@\(Int(rect.minX)),\(Int(rect.minY))"
+        let label = title ?? stringAttr(el, kAXDescriptionAttribute) ?? role
+        out.append(CachedTarget(key: key, role: role, label: label, rect: rect, inset: 2))
+        return true
+    }
+
     private func walk(_ el: AXUIElement, depth: Int, out: inout [CachedTarget], budget: inout Int,
                       deadline: CFTimeInterval, screenUnion: CGRect, appElement: AXUIElement, pid: pid_t) {
         guard budget > 0, depth <= 12, CACurrentMediaTime() < deadline else { return }
         budget -= 1
 
-        if let role = stringAttr(el, kAXRoleAttribute), Self.eligibleRoles.contains(role) {
-            // Secure text fields are never redirect candidates: a near miss must
-            // pass through instead of being clamped into a password control.
-            let subrole = stringAttr(el, kAXSubroleAttribute)
-            let secure = subrole == (kAXSecureTextFieldSubrole as String)
-            if secure {
-                let title = stringAttr(el, kAXTitleAttribute)
-                    ?? stringAttr(el, kAXDescriptionAttribute) ?? "-"
-                if !loggedSecure.contains(title) {
-                    loggedSecure.insert(title)
-                    let r = frame(el).map { "\($0)" } ?? "nil"
-                    log("RESOLVER_SKIP_SECURE label=\"\(title)\" subrole=AXSecureTextField rect=\(r) reason=never-redirect")
-                }
-            } else if let rect = frame(el), rect.width >= 4, rect.height >= 4,
-               rect.width < 4000, rect.height < 2000, rect.intersects(screenUnion) {
-                let ident = stringAttr(el, kAXIdentifierAttribute)
-                let title = stringAttr(el, kAXTitleAttribute)
-                let key = ident ?? title ?? "\(role)@\(Int(rect.minX)),\(Int(rect.minY))"
-                let label = title ?? stringAttr(el, kAXDescriptionAttribute) ?? role
-                out.append(CachedTarget(key: key, role: role, label: label, rect: rect, inset: 2))
-            }
-        }
+        collect(el, out: &out, screenUnion: screenUnion)
 
         // Window move/resize notifications are registered on window elements.
         if let role = stringAttr(el, kAXRoleAttribute), role == "AXWindow", let observer, pid == observedPid {
