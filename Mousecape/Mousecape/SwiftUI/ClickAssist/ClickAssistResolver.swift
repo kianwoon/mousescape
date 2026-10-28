@@ -45,6 +45,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// snapshot cannot erase the union before the next walk re-merges it.
     private var unionTargets: [CachedTarget] = []
     private var unionPid: pid_t = 0
+    /// Set when a walk bails out because the 0.25 s deadline passed. Reset per
+    /// refresh; drives both `partial` and the published `trunc=` reason.
+    private var truncatedByDeadline = false
     /// A published target survives this long without being re-seen. Longer than one
     /// truncated walk, short enough that genuinely gone controls disappear promptly.
     private static let targetFreshnessWindow: CFTimeInterval = 2.5
@@ -187,6 +190,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         var out: [CachedTarget] = []
         var budget = Self.nodeBudget
         let deadline = t0 + 0.25
+        truncatedByDeadline = false
         let screenUnion = Self.screenUnionAX()
         let pointer = currentPointer()
 
@@ -216,8 +220,16 @@ final class AccessibilityResolver: @unchecked Sendable {
         }
 
         // Budget/deadline exhaustion publishes the PARTIAL set (still valid); only
-        // AX API failure means "unavailable".
-        let partial = budget <= 0
+        // AX API failure means "unavailable". Report WHY: a deadline cut used to be
+        // logged as partial=0 because only the node budget was checked.
+        let budgetHit = budget <= 0
+        let deadlineHit = truncatedByDeadline || CACurrentMediaTime() >= deadline
+        let trunc: String
+        if budgetHit && deadlineHit { trunc = "both" }
+        else if budgetHit { trunc = "budget" }
+        else if deadlineHit { trunc = "deadline" }
+        else { trunc = "none" }
+        let partial = trunc != "none"
 
         // Monotonic union: a truncated walk must never drop a target that was
         // present before. Merge the new walk with the previously published set,
@@ -255,9 +267,9 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@",
                    gen, appName, pid, out.count, newCount, near, visited,
-                   seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0))
+                   seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0, trunc as NSString))
 
         let rects = out.map { "\($0.key):\(ScreenSpace.fmt($0.rect.origin)):\(Int($0.rect.width))x\(Int($0.rect.height))" }
         if rects != lastRects {
@@ -309,6 +321,7 @@ final class AccessibilityResolver: @unchecked Sendable {
             current = parent
             depth += 1
         }
+        if CACurrentMediaTime() >= deadline { truncatedByDeadline = true }
         return found
     }
 
@@ -346,7 +359,11 @@ final class AccessibilityResolver: @unchecked Sendable {
 
     private func walk(_ el: AXUIElement, depth: Int, out: inout [CachedTarget], budget: inout Int,
                       deadline: CFTimeInterval, screenUnion: CGRect, appElement: AXUIElement, pid: pid_t) {
-        guard budget > 0, depth <= 12, CACurrentMediaTime() < deadline else { return }
+        guard budget > 0, depth <= 12 else { return }
+        guard CACurrentMediaTime() < deadline else {
+            truncatedByDeadline = true
+            return
+        }
         budget -= 1
 
         collect(el, out: &out, screenUnion: screenUnion)
