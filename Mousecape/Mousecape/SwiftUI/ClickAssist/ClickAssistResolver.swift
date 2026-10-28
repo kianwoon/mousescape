@@ -48,9 +48,23 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Set when a walk bails out because the 0.25 s deadline passed. Reset per
     /// refresh; drives both `partial` and the published `trunc=` reason.
     private var truncatedByDeadline = false
-    /// A published target survives this long without being re-seen. Longer than one
-    /// truncated walk, short enough that genuinely gone controls disappear promptly.
-    private static let targetFreshnessWindow: CFTimeInterval = 2.5
+    /// Persisted breadth-first frontier. The head cursor survives refreshes, so
+    /// successive 600-node slices advance into different subtrees instead of
+    /// re-walking the same prefix. Bounded and reset on invalidation/app change.
+    private var frontier: [(element: AXUIElement, depth: Int)] = []
+    private var frontierHead = 0
+    private var sliceIndex = 0
+    private var coverageKeys: Set<String> = []
+    private static let maxFrontierNodes = 20_000
+    private static let frontierCompactionThreshold = 1_024
+    /// Bounded spend for the pointer-window fallback probe (Chromium hit-testing).
+    /// Kept separate from the main budget so rotation always gets ≥ 480 nodes.
+    private static let seedWindowProbeBudget = 120
+    /// A published target survives this long without being re-seen. Large Chromium
+    /// trees need several slices to complete one pass, so this must exceed a pass
+    /// (typically <2 s at 600 nodes/150 ms). Trade-off: a control that truly
+    /// disappeared can linger in the union for up to this window before expiring.
+    private static let targetFreshnessWindow: CFTimeInterval = 10.0
     private static let nodeBudget = 600
     private static let seedAncestryDepth = 8
 
@@ -114,9 +128,20 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Real-time invalidation: publish "do not route" immediately, refresh after.
     func invalidate(reason: String, prefixStale: Bool = true) {
         publishInvalid(reason: prefixStale ? "stale:\(reason)" : reason, pointer: currentPointer())
+        // Rotation state is invalid after any invalidation (window move/destroy,
+        // app/space switch): the persisted frontier would point at stale geometry.
+        queue.async { [weak self] in self?.resetRotation() }
         queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.refresh(lastPointer: .zero)
         }
+    }
+
+    /// Clears the persisted slice frontier and coverage counters. Resolver-queue only.
+    private func resetRotation() {
+        frontier.removeAll()
+        frontierHead = 0
+        sliceIndex = 0
+        coverageKeys.removeAll()
     }
 
     private var isRefreshAllowed: Bool {
@@ -194,13 +219,17 @@ final class AccessibilityResolver: @unchecked Sendable {
         let screenUnion = Self.screenUnionAX()
         let pointer = currentPointer()
 
-        // Reset the union when the frontmost app changes: never carry one app's
-        // targets (or their keys) into another app's snapshot.
+        // Reset union + rotation when the frontmost app changes: never carry one
+        // app's targets, keys or frontier into another app's snapshot.
         if unionPid != pid {
             lastSeen.removeAll()
             unionTargets.removeAll()
+            resetRotation()
             unionPid = pid
         }
+
+        let windows: [AXUIElement] = attr(appEl, kAXWindowsAttribute).flatMap(axArray) ?? []
+        let menuBar: AXUIElement? = attr(appEl, kAXMenuBarAttribute).flatMap(axElement)
 
         // Pointer-region seed FIRST: resolve the element under the cursor and walk
         // its immediate ancestry, so the visibly hovered control is captured even
@@ -208,16 +237,29 @@ final class AccessibilityResolver: @unchecked Sendable {
         let seedHit = seedAtPointer(appEl, pointer: pointer, out: &out, budget: &budget,
                                     deadline: deadline, screenUnion: screenUnion)
 
-        if let raw = attr(appEl, kAXWindowsAttribute), let windows = axArray(raw) {
-            for w in windows {
-                walk(w, depth: 0, out: &out, budget: &budget, deadline: deadline,
-                     screenUnion: screenUnion, appElement: appEl, pid: pid)
-            }
-        }
-        if let raw = attr(appEl, kAXMenuBarAttribute), let bar = axElement(raw) {
-            walk(bar, depth: 0, out: &out, budget: &budget, deadline: deadline,
+        // Seed fallback: Chromium web content often refuses AX hit-testing. Ask the
+        // window server which window is under the pointer and spend a small bounded
+        // probe on that window's subtree so its controls are prioritised.
+        let seedWindow: AXUIElement? = seedHit ? nil
+            : windowUnderPointer(windows: windows, pointer: pointer)
+        var probeSpent = 0
+        if let seedWindow {
+            var probeBudget = Self.seedWindowProbeBudget
+            walk(seedWindow, depth: 0, out: &out, budget: &probeBudget, deadline: deadline,
                  screenUnion: screenUnion, appElement: appEl, pid: pid)
+            probeSpent = Self.seedWindowProbeBudget - probeBudget
         }
+
+        // Rotating BFS slice: resumes the persisted frontier so each cycle visits a
+        // different part of the tree instead of re-walking the same 600-node prefix.
+        var roots = windows
+        if let seedWindow, let idx = roots.firstIndex(where: { CFEqual($0, seedWindow) }) {
+            roots.remove(at: idx)
+            roots.insert(seedWindow, at: 0)
+        }
+        if let menuBar { roots.append(menuBar) }
+        let sliceId = walkSlice(roots: roots, out: &out, budget: &budget, deadline: deadline,
+                                screenUnion: screenUnion, appElement: appEl, pid: pid)
 
         // Budget/deadline exhaustion publishes the PARTIAL set (still valid); only
         // AX API failure means "unavailable". Report WHY: a deadline cut used to be
@@ -242,6 +284,7 @@ final class AccessibilityResolver: @unchecked Sendable {
             byKey[t.key] = t
             order.append(t.key)
             lastSeen[t.key] = now
+            coverageKeys.insert(t.key)
         }
         let newCount = order.count
         var droppedExpired = 0
@@ -260,16 +303,17 @@ final class AccessibilityResolver: @unchecked Sendable {
 
         let near = out.filter { Self.boundaryDistance(pointer, $0.rect) <= 80 }.count
         let ms = (CACurrentMediaTime() - t0) * 1000
-        let visited = Self.nodeBudget - budget
+        let visited = (Self.nodeBudget - budget) + probeSpent
         let gen = nextGeneration()
         let snap = CacheSnapshot(generation: gen, targets: out, valid: true, reason: "fresh",
                                  stamp: CACurrentMediaTime(), resolverMs: ms, pointer: pointer,
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d",
                    gen, appName, pid, out.count, newCount, near, visited,
-                   seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0, trunc as NSString))
+                   seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
+                   trunc as NSString, sliceId, coverageKeys.count))
 
         let rects = out.map { "\($0.key):\(ScreenSpace.fmt($0.rect.origin)):\(Int($0.rect.width))x\(Int($0.rect.height))" }
         if rects != lastRects {
@@ -301,6 +345,82 @@ final class AccessibilityResolver: @unchecked Sendable {
     }
 
     // MARK: - AX walk
+
+    /// Consume up to `budget` nodes from the persisted breadth-first frontier,
+    /// advancing the head cursor so the next cycle continues deeper/differently.
+    /// When the frontier drains, a new pass restarts from the roots.
+    private func walkSlice(roots: [AXUIElement], out: inout [CachedTarget], budget: inout Int,
+                           deadline: CFTimeInterval, screenUnion: CGRect,
+                           appElement: AXUIElement, pid: pid_t) -> Int {
+        if frontierHead >= frontier.count {
+            frontier.removeAll()
+            frontierHead = 0
+            sliceIndex = 0
+            coverageKeys.removeAll()
+            for root in roots { frontier.append((root, 0)) }
+        }
+        let sliceId = sliceIndex
+        sliceIndex += 1
+
+        while frontierHead < frontier.count, budget > 0 {
+            guard CACurrentMediaTime() < deadline else {
+                truncatedByDeadline = true
+                break
+            }
+            let node = frontier[frontierHead]
+            frontierHead += 1
+            budget -= 1
+            collect(node.element, out: &out, screenUnion: screenUnion)
+
+            // Window move/resize notifications are registered on window elements.
+            if let role = stringAttr(node.element, kAXRoleAttribute), role == "AXWindow",
+               let observer, pid == observedPid {
+                for note in [kAXWindowMovedNotification, kAXWindowResizedNotification] {
+                    AXObserverAddNotification(observer, node.element, note as CFString,
+                                              Unmanaged.passUnretained(self).toOpaque())
+                }
+            }
+
+            if node.depth < 12,
+               let raw = attr(node.element, kAXChildrenAttribute),
+               let kids = axArray(raw) {
+                for k in kids where frontier.count < Self.maxFrontierNodes {
+                    frontier.append((k, node.depth + 1))
+                }
+            }
+        }
+
+        // Compact consumed prefix occasionally so the array does not grow forever.
+        if frontierHead > Self.frontierCompactionThreshold, frontierHead * 2 > frontier.count {
+            frontier.removeFirst(frontierHead)
+            frontierHead = 0
+        }
+        return sliceId
+    }
+
+    /// Window-server fallback for apps whose web content refuses AX hit-testing:
+    /// find the on-screen window under the pointer and map it to its AX window.
+    private func windowUnderPointer(windows: [AXUIElement], pointer: CGPoint) -> AXUIElement? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        for entry in list {
+            guard let bounds = entry[kCGWindowBounds as String] as? [String: Any] else { continue }
+            var rect = CGRect.zero
+            guard CGRectMakeWithDictionaryRepresentation(bounds as CFDictionary, &rect),
+                  rect.contains(pointer) else { continue }
+            // AX frames use the same top-left global space as CGWindowBounds.
+            if let exact = windows.first(where: { w in
+                frame(w).map { $0.equalTo(rect) } ?? false
+            }) { return exact }
+            if let overlapping = windows.first(where: { w in
+                frame(w).map { $0.intersects(rect) } ?? false
+            }) { return overlapping }
+            return nil
+        }
+        return nil
+    }
 
     /// Resolve the element under the pointer and walk its ancestry (child → parent).
     /// This spend is tiny (≤ seedAncestryDepth nodes) and happens before the global
