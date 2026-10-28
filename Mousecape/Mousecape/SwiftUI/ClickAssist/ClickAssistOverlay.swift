@@ -26,6 +26,15 @@ final class OverlayView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        // Blank means PIXELS blank, not just state blank. The clear path sets
+        // isBlank=true + needsDisplay, and this guard erases the previously
+        // drawn ring/frame/pointer with a copy-mode clear instead of re-stroking
+        // the stale stored geometry.
+        guard !isBlank else {
+            NSColor.clear.setFill()
+            dirtyRect.fill(using: .copy)
+            return
+        }
         // Effective tolerance region: dashed ring outside the AX frame.
         let ring = cgFrame.insetBy(dx: -tolerance, dy: -tolerance)
         let ringRect = CGRect(x: local(ring.origin).x, y: local(ring.origin).y,
