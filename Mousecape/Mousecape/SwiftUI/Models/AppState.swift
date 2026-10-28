@@ -175,9 +175,11 @@ final class AppState: @unchecked Sendable {
 
     // MARK: - Click Assist
 
-    /// App-hosted Click Assist engine. Starts only when `MCClickAssistEnabled`
-    /// is set; owned here so the Settings toggle and termination share one lifecycle.
-    let clickAssist = ClickAssistEngine.shared
+    /// Preference-only bridge. The Mousecape app never hosts the click-assist
+    /// runtime: the persistent ClickAssistAgent is the sole owner of the HID tap,
+    /// resolver and overlay. The app target does not compile the engine/host
+    /// sources, so a second tap cannot be created here even by accident.
+    let clickAssist = ClickAssistSettingsModel.shared
 
     // MARK: - Initialization
 
@@ -192,20 +194,10 @@ final class AppState: @unchecked Sendable {
         }
     }
 
-    /// Called after launch completes (never during init) so no AX work can block
-    /// the launch handshake.
-    func startClickAssistIfNeeded() {
-        clickAssist.startFromAppIfNeeded()
-    }
-
-    /// Settings toggle path: write the pref, then let the engine re-read and
-    /// start/stop from the validated snapshot.
+    /// Settings toggle path: write the pref only. The agent observes the pref
+    /// domain's Darwin notification and starts/stops itself.
     func setClickAssistEnabled(_ enabled: Bool) {
         clickAssist.requestEnabled(enabled)
-    }
-
-    func shutdownClickAssist() {
-        clickAssist.shutdown()
     }
 
     private func setupLibraryController() {

@@ -89,9 +89,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Launch helper automatically when main app starts
         launchHelper()
 
-        // Start Click Assist only if the pref is enabled; deferred until launch completes.
-        AppState.shared.startClickAssistIfNeeded()
-
         debugLog("Application finished launching")
     }
 
@@ -162,7 +159,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Flush any debounced Apply click so quitting mid-burst doesn't
         // silently drop the user's last scale/cape change.
-        AppState.shared.shutdownClickAssist()
         AppState.shared.flushPendingApply()
         #if DEBUG
         MCLoggerClose()

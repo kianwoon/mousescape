@@ -9,11 +9,6 @@
 /* Begin PBXBuildFile section */
 		C1B0000000000000000000B1 /* ClickAssistConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A1 /* ClickAssistConfig.swift */; };
 		C1B0000000000000000000B2 /* ClickAssistDecisionCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A2 /* ClickAssistDecisionCore.swift */; };
-		C1B0000000000000000000B3 /* ClickAssistCacheStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A3 /* ClickAssistCacheStore.swift */; };
-		C1B0000000000000000000B4 /* ClickAssistTap.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A4 /* ClickAssistTap.swift */; };
-		C1B0000000000000000000B5 /* ClickAssistResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A5 /* ClickAssistResolver.swift */; };
-		C1B0000000000000000000B6 /* ClickAssistOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A6 /* ClickAssistOverlay.swift */; };
-		C1B0000000000000000000B7 /* ClickAssistEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A7 /* ClickAssistEngine.swift */; };
 		1B57EC46401E4928B48C5E89 /* ArgumentParser in Frameworks */ = {isa = PBXBuildFile; productRef = 86D2A987242A45FBB21AE949 /* ArgumentParser */; };
 		9CB312EE7052700D9F29C682 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A5B757C0780EA0A10BF1469 /* main.swift */; };
 		DE27927D2F61D93200CCEBD3 /* UserPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE27927C2F61D93200CCEBD3 /* UserPreferences.swift */; };
@@ -776,11 +771,6 @@
 			files = (
 				C1B0000000000000000000B1 /* ClickAssistConfig.swift in Sources */,
 				C1B0000000000000000000B2 /* ClickAssistDecisionCore.swift in Sources */,
-				C1B0000000000000000000B3 /* ClickAssistCacheStore.swift in Sources */,
-				C1B0000000000000000000B4 /* ClickAssistTap.swift in Sources */,
-				C1B0000000000000000000B5 /* ClickAssistResolver.swift in Sources */,
-				C1B0000000000000000000B6 /* ClickAssistOverlay.swift in Sources */,
-				C1B0000000000000000000B7 /* ClickAssistEngine.swift in Sources */,
 				FABA44D521D9D947009B10D9 /* NSBitmapImageRep+ColorSpace.m in Sources */,
 				FAEE653318A047E8003AA182 /* MCCursorLibrary.m in Sources */,
 				FAEE652F18A047E8003AA182 /* MCLibraryController.m in Sources */,

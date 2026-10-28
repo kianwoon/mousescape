@@ -1290,6 +1290,80 @@ struct CursorHotkeySettingsContent: View {
 
 // MARK: - Click Assist Settings
 
+/// App-side Click Assist settings bridge. It only reads/writes preferences and
+/// NEVER creates a tap, resolver or overlay: the persistent ClickAssistAgent is
+/// the sole runtime host. The app target does not compile the engine/host
+/// sources at all, so a second host cannot be started by accident.
+@MainActor
+@Observable
+final class ClickAssistSettingsModel {
+    static let shared = ClickAssistSettingsModel()
+
+    private let prefs = ClickAssistPreferences()
+    private(set) var config: ClickAssistConfig
+    private var prefObserverRegistered = false
+
+    private init() {
+        config = prefs.readConfig()
+        registerForPrefChanges()
+    }
+
+    /// Re-sync the explicit domain and re-read/validate ALL keys.
+    func refreshFromPreferences() {
+        CFPreferencesSynchronize(ClickAssistPreferences.domain as CFString,
+                                 kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        registerForPrefChanges()
+        config = prefs.readConfig()
+    }
+
+    var requestedSummary: String {
+        "Requested: \(config.enabled ? "Enabled" : "Disabled") · " +
+        String(format: "%.1f pt", config.tolerancePoints) +
+        " · Indicator \(config.indicatorEnabled ? "On" : "Off")"
+    }
+
+    // MARK: - requests (prefs only; the agent reacts via Darwin notification)
+
+    func requestEnabled(_ value: Bool) {
+        guard value != config.enabled else { return }
+        prefs.writeEnabled(value)
+        config = prefs.readConfig()
+    }
+
+    func requestTolerancePoints(_ value: CGFloat) {
+        let clamped = ClickAssistConfig.validated(enabled: config.enabled,
+                                                  tolerancePoints: value,
+                                                  indicatorEnabled: config.indicatorEnabled).tolerancePoints
+        guard clamped != config.tolerancePoints else { return }
+        prefs.writeTolerancePoints(clamped)
+        config = prefs.readConfig()
+    }
+
+    func requestIndicatorEnabled(_ value: Bool) {
+        guard value != config.indicatorEnabled else { return }
+        prefs.writeIndicatorEnabled(value)
+        config = prefs.readConfig()
+    }
+
+    // MARK: - external pref change observation
+
+    private func registerForPrefChanges() {
+        guard !prefObserverRegistered else { return }
+        prefObserverRegistered = true
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(),
+                                        Unmanaged.passUnretained(self).toOpaque(),
+                                        Self.prefChangedCallback,
+                                        ClickAssistPreferences.changedNotification as CFString,
+                                        nil, .deliverImmediately)
+    }
+
+    private static let prefChangedCallback: CFNotificationCallback = { _, observer, _, _, _ in
+        guard let observer else { return }
+        let model = Unmanaged<ClickAssistSettingsModel>.fromOpaque(observer).takeUnretainedValue()
+        Task { @MainActor in model.refreshFromPreferences() }
+    }
+}
+
 /// Reads the agent's runtime status record (file = truth). The Darwin
 /// notification is only a hint to re-read; the timer covers a missed hint and a
 /// stale heartbeat covers an agent that died without cleaning up.
@@ -1352,11 +1426,11 @@ final class ClickAssistStatusObserver {
     }
 }
 
-/// App-hosted Click Assist controls. Values are read from the engine's validated
-/// snapshot (no @AppStorage shadow copy); every mutation writes the pref domain and
-/// lets the engine re-read it.
+/// Click Assist settings controls. Values are read from the preference bridge's
+/// validated snapshot (no @AppStorage shadow copy); every mutation writes the pref
+/// domain and the agent picks it up via Darwin notification.
 struct ClickAssistSettingsView: View {
-    @State private var engine = ClickAssistEngine.shared
+    @State private var assist = ClickAssistSettingsModel.shared
     @State private var status = ClickAssistStatusObserver()
     @State private var agentLoginItem = SMAppService.loginItem(identifier: ClickAssistSettingsView.agentBundleIdentifier).status == .enabled
     @State private var loginItemError: String?
@@ -1367,25 +1441,25 @@ struct ClickAssistSettingsView: View {
         Form {
             Section("Click Assist") {
                 Toggle("Enable Click Assist", isOn: Binding(
-                    get: { engine.config.enabled },
+                    get: { assist.config.enabled },
                     set: { appState.setClickAssistEnabled($0) }))
 
                 HStack(spacing: 12) {
                     Text("Tolerance")
                     Slider(value: Binding(
-                        get: { Double(engine.config.tolerancePoints) },
-                        set: { engine.requestTolerancePoints(CGFloat($0)) }),
+                        get: { Double(assist.config.tolerancePoints) },
+                        set: { assist.requestTolerancePoints(CGFloat($0)) }),
                            in: Double(ClickAssistConfig.toleranceRange.lowerBound)...Double(ClickAssistConfig.toleranceRange.upperBound),
                            step: 0.5)
-                    Text(String(format: "%.1f pt", engine.config.tolerancePoints))
+                    Text(String(format: "%.1f pt", assist.config.tolerancePoints))
                         .monospacedDigit()
                         .foregroundStyle(.secondary)
                         .frame(width: 60, alignment: .trailing)
                 }
 
                 Toggle("Show targeting indicator", isOn: Binding(
-                    get: { engine.config.indicatorEnabled },
-                    set: { engine.requestIndicatorEnabled($0) }))
+                    get: { assist.config.indicatorEnabled },
+                    set: { assist.requestIndicatorEnabled($0) }))
             }
 
             Section("Agent") {
@@ -1404,7 +1478,7 @@ struct ClickAssistSettingsView: View {
             }
 
             Section("Status") {
-                Text(engine.requestedSummary)
+                Text(assist.requestedSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 8) {
@@ -1421,7 +1495,7 @@ struct ClickAssistSettingsView: View {
         }
         .formStyle(.grouped)
         .onAppear {
-            engine.refreshFromPreferences()
+            assist.refreshFromPreferences()
             status.start()
             agentLoginItem = SMAppService.loginItem(identifier: Self.agentBundleIdentifier).status == .enabled
         }
