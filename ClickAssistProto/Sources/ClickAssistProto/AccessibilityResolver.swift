@@ -168,6 +168,15 @@ final class AccessibilityResolver {
         let pid = front.processIdentifier
         let appName = front.localizedName ?? front.bundleIdentifier ?? "pid:\(pid)"
 
+        // Structural self-RPC guard: a query to our own process must be serviced by
+        // our own main thread, which can be inside AX notification handling. Never
+        // issue AX element/attribute/observer calls for self; publish non-routable.
+        if pid == getpid() {
+            lastResolvedPid = pid
+            publishSelfApp(t0: t0)
+            return
+        }
+
         // Poll-based switch detection: NSWorkspace activation notifications are not
         // reliably delivered on all OS versions; the 150 ms timer is authoritative.
         if lastResolvedPid != 0, pid != lastResolvedPid {
@@ -228,6 +237,17 @@ final class AccessibilityResolver {
                                  pointer: currentPointer(), appName: "-", pid: 0)
         cache.publish(snap)
         log("RESOLVER_UNAVAILABLE gen=\(gen) reason=\(reason) action=pass-through")
+    }
+
+    /// Deterministic fail-open state for the harness itself: no AX calls at all.
+    private func publishSelfApp(t0: CFTimeInterval) {
+        let gen = nextGeneration()
+        let snap = CacheSnapshot(generation: gen, targets: [], valid: false, reason: "self-app",
+                                 stamp: CACurrentMediaTime(),
+                                 resolverMs: (CACurrentMediaTime() - t0) * 1000,
+                                 pointer: currentPointer(), appName: "self", pid: getpid())
+        cache.publish(snap)
+        log("RESOLVER_SELF_APP gen=\(gen) pid=\(getpid()) axQueries=0 action=pass-through")
     }
 
     // MARK: - AX walk

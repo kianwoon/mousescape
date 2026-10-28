@@ -173,6 +173,12 @@ final class AppState: @unchecked Sendable {
 
     var libraryController: MCLibraryController?
 
+    // MARK: - Click Assist
+
+    /// App-hosted Click Assist engine. Starts only when `MCClickAssistEnabled`
+    /// is set; owned here so the Settings toggle and termination share one lifecycle.
+    let clickAssist = ClickAssistEngine.shared
+
     // MARK: - Initialization
 
     init() {
@@ -184,6 +190,22 @@ final class AppState: @unchecked Sendable {
         if capes.isEmpty {
             autoSelectArrowOnEdit = true
         }
+    }
+
+    /// Called after launch completes (never during init) so no AX work can block
+    /// the launch handshake.
+    func startClickAssistIfNeeded() {
+        clickAssist.startFromAppIfNeeded()
+    }
+
+    /// Settings toggle path: write the pref, then let the engine re-read and
+    /// start/stop from the validated snapshot.
+    func setClickAssistEnabled(_ enabled: Bool) {
+        clickAssist.requestEnabled(enabled)
+    }
+
+    func shutdownClickAssist() {
+        clickAssist.shutdown()
     }
 
     private func setupLibraryController() {

@@ -52,6 +52,8 @@ struct SettingsView: View {
             GeneralSettingsView()
         case .appearance:
             AppearanceSettingsView()
+        case .clickAssist:
+            ClickAssistSettingsView()
         case .advanced:
             AdvancedSettingsView()
         }
@@ -1282,5 +1284,57 @@ struct CursorHotkeySettingsContent: View {
         case kVK_F12: return "F12"
         default: return "Key \(keyCode)"
         }
+    }
+}
+
+// MARK: - Click Assist Settings
+
+/// App-hosted Click Assist controls. Values are read from the engine's validated
+/// snapshot (no @AppStorage shadow copy); every mutation writes the pref domain and
+/// lets the engine re-read it.
+struct ClickAssistSettingsView: View {
+    @State private var engine = ClickAssistEngine.shared
+    @Environment(AppState.self) private var appState
+
+    var body: some View {
+        Form {
+            Section("Click Assist") {
+                Toggle("Enable Click Assist", isOn: Binding(
+                    get: { engine.config.enabled },
+                    set: { appState.setClickAssistEnabled($0) }))
+
+                HStack(spacing: 12) {
+                    Text("Tolerance")
+                    Slider(value: Binding(
+                        get: { Double(engine.config.tolerancePoints) },
+                        set: { engine.requestTolerancePoints(CGFloat($0)) }),
+                           in: Double(ClickAssistConfig.toleranceRange.lowerBound)...Double(ClickAssistConfig.toleranceRange.upperBound),
+                           step: 0.5)
+                    Text(String(format: "%.1f pt", engine.config.tolerancePoints))
+                        .monospacedDigit()
+                        .foregroundStyle(.secondary)
+                        .frame(width: 60, alignment: .trailing)
+                }
+
+                Toggle("Show targeting indicator", isOn: Binding(
+                    get: { engine.config.indicatorEnabled },
+                    set: { engine.requestIndicatorEnabled($0) }))
+            }
+
+            Section("Status") {
+                Text(engine.requestedSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Circle()
+                        .fill(engine.runtimeStatus == .active ? Color.green : Color.orange)
+                        .frame(width: 8, height: 8)
+                    Text(engine.runtimeSummary)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .formStyle(.grouped)
+        .onAppear { engine.refreshFromPreferences() }
     }
 }
