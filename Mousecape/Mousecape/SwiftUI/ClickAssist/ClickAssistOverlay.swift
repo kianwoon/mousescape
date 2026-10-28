@@ -68,9 +68,30 @@ final class TargetingOverlay {
     private var dead = false
     private var lastSig = ""
 
+    /// Latest immutable snapshot the tap router also reads. Kept only to re-run
+    /// the same pure route against the LIVE pointer between snapshot publishes.
+    private var latestSnapshot: CacheSnapshot?
+    /// Pointer sampling cadence (~30 Hz): visually attached to the real cursor,
+    /// but each tick is just one pure DecisionCore.route() plus a few rect draws.
+    private static let repaintInterval: TimeInterval = 0.033
+    private var repaintTimer: Timer?
+
+    private var lastDrawnAction = ""
+    private var lastDrawnFrame: CGRect?
+    private var lastDrawnPointer = CGPoint(x: CGFloat.greatestFiniteMagnitude,
+                                           y: CGFloat.greatestFiniteMagnitude)
+    private var lastDrawnMode = ""
+    private var lastDrawnTolerance: CGFloat = -1
+
     init(tolerance: CGFloat, log: @escaping (String) -> Void) {
         self.tolerance = tolerance
         self.log = log
+        // The overlay's state is a pure function of (latest snapshot, live pointer).
+        // Snapshot publishes are sparse; this timer samples the pointer so the ring
+        // tracks it and clears promptly when no candidate applies.
+        repaintTimer = Timer.scheduledTimer(withTimeInterval: Self.repaintInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.repaintFromLivePointer() }
+        }
     }
 
     func setTolerance(_ v: CGFloat) {
@@ -80,12 +101,25 @@ final class TargetingOverlay {
     /// Called by CacheStore after each publish, on the resolver thread, with the SAME
     /// immutable snapshot struct the router consumes. Hops to main; never blocks.
     nonisolated func observe(_ s: CacheSnapshot) {
-        Task { @MainActor [weak self] in self?.render(s) }
+        Task { @MainActor [weak self] in
+            self?.latestSnapshot = s
+            self?.render(s)
+        }
+    }
+
+    /// Re-evaluate the LATEST snapshot against the current pointer. No AX calls,
+    /// no snapshot copy, no event-tap work — display-only.
+    private func repaintFromLivePointer() {
+        guard !dead, let snapshot = latestSnapshot else { return }
+        render(snapshot)
     }
 
     /// Gate 5: kill the instrument. The tap pipeline holds no reference to this path.
     func kill() {
         dead = true
+        repaintTimer?.invalidate()
+        repaintTimer = nil
+        latestSnapshot = nil
         if let panel { panel.orderOut(nil); panel.contentView = nil }
         panel = nil
         view = nil
@@ -140,6 +174,19 @@ final class TargetingOverlay {
     }
 
     private func draw(action: String, frame: CGRect?, pointer: CGPoint, mode: String) {
+        // Skip redundant redraws: state transitions always paint; pointer moves
+        // only matter while a highlight is shown. This keeps the 30 Hz sampling
+        // nearly free when the ring is static or blank.
+        let stateChanged = action != lastDrawnAction || frame != lastDrawnFrame
+            || mode != lastDrawnMode || tolerance != lastDrawnTolerance
+        let pointerChanged = pointer != lastDrawnPointer
+        guard stateChanged || (action == "show" && pointerChanged) else { return }
+        lastDrawnAction = action
+        lastDrawnFrame = frame
+        lastDrawnMode = mode
+        lastDrawnPointer = pointer
+        lastDrawnTolerance = tolerance
+
         guard action == "show", let frame else {
             // NO target highlight: keep the (click-through) panel but draw nothing.
             // Ordering it out would fire AX uielementdestroyed events and invalidate
