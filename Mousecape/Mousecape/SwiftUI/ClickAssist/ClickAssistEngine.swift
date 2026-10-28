@@ -29,6 +29,11 @@ final class ClickAssistEngine {
     private(set) var resolver: AccessibilityResolver?
     private(set) var overlay: TargetingOverlay?
 
+    /// When false the engine never auto-prompts for Accessibility; permission must
+    /// be requested by an explicit user action (the persistent agent uses this).
+    /// Default preserves the existing app-hosted behavior.
+    var promptsForAccessibility = true
+
     private var trustPromptRequested = false
     private var prefObserverRegistered = false
     private var cacheObserverInstalled = false
@@ -171,7 +176,7 @@ final class ClickAssistEngine {
         stopEngine()
         guard config.enabled else { return }
         guard AXIsProcessTrusted() else {
-            if !trustPromptRequested {
+            if !trustPromptRequested, promptsForAccessibility {
                 trustPromptRequested = true
                 let prompt = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
                 _ = AXIsProcessTrustedWithOptions(prompt)

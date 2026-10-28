@@ -10,6 +10,7 @@ import SwiftUI
 import AppKit
 import ServiceManagement
 import Carbon.HIToolbox
+import Observation
 
 struct SettingsView: View {
     @State private var selectedCategory: SettingsCategory = .general
@@ -1289,12 +1290,78 @@ struct CursorHotkeySettingsContent: View {
 
 // MARK: - Click Assist Settings
 
+/// Reads the agent's runtime status record (file = truth). The Darwin
+/// notification is only a hint to re-read; the timer covers a missed hint and a
+/// stale heartbeat covers an agent that died without cleaning up.
+@MainActor
+@Observable
+final class ClickAssistStatusObserver {
+    private(set) var text = "Not running — agent unavailable"
+    private(set) var isActive = false
+
+    private var timer: Timer?
+    private var isObserving = false
+
+    func start() {
+        guard !isObserving else { return }
+        isObserving = true
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            Self.changedCallback,
+            ClickAssistStatusStore.changedNotification as CFString,
+            nil, .deliverImmediately)
+        timer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+        refresh()
+    }
+
+    func stop() {
+        guard isObserving else { return }
+        isObserving = false
+        CFNotificationCenterRemoveObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            Unmanaged.passUnretained(self).toOpaque(),
+            CFNotificationName(rawValue: ClickAssistStatusStore.changedNotification as CFString),
+            nil)
+        timer?.invalidate()
+        timer = nil
+    }
+
+    func refresh() {
+        guard let record = ClickAssistStatusStore.read() else {
+            text = "Not running — agent unavailable"
+            isActive = false
+            return
+        }
+        // Stale heartbeat => the agent is not actually running, whatever the file says.
+        guard Date().timeIntervalSince(record.heartbeat) <= ClickAssistStatusStore.staleThreshold else {
+            text = "Not running — agent unavailable"
+            isActive = false
+            return
+        }
+        text = record.displayText()
+        isActive = record.state == .active
+    }
+
+    private static let changedCallback: CFNotificationCallback = { _, observer, _, _, _ in
+        guard let observer else { return }
+        let status = Unmanaged<ClickAssistStatusObserver>.fromOpaque(observer).takeUnretainedValue()
+        Task { @MainActor in status.refresh() }
+    }
+}
+
 /// App-hosted Click Assist controls. Values are read from the engine's validated
 /// snapshot (no @AppStorage shadow copy); every mutation writes the pref domain and
 /// lets the engine re-read it.
 struct ClickAssistSettingsView: View {
     @State private var engine = ClickAssistEngine.shared
+    @State private var status = ClickAssistStatusObserver()
+    @State private var agentLoginItem = SMAppService.loginItem(identifier: ClickAssistSettingsView.agentBundleIdentifier).status == .enabled
+    @State private var loginItemError: String?
     @Environment(AppState.self) private var appState
+    private static let agentBundleIdentifier = "com.sdmj76.ClickAssistAgent"
 
     var body: some View {
         Form {
@@ -1321,20 +1388,61 @@ struct ClickAssistSettingsView: View {
                     set: { engine.requestIndicatorEnabled($0) }))
             }
 
+            Section("Agent") {
+                Toggle("Run Click Assist Agent at login", isOn: $agentLoginItem)
+                    .onChange(of: agentLoginItem) { _, newValue in
+                        updateLoginItem(newValue)
+                    }
+                Text("Keeps assist running after Mousecape quits.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let loginItemError {
+                    Text(loginItemError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                }
+            }
+
             Section("Status") {
                 Text(engine.requestedSummary)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 HStack(spacing: 8) {
                     Circle()
-                        .fill(engine.runtimeStatus == .active ? Color.green : Color.orange)
+                        .fill(status.isActive ? Color.green : Color.orange)
                         .frame(width: 8, height: 8)
-                    Text(engine.runtimeSummary)
+                    Text(status.text)
                         .foregroundStyle(.secondary)
                 }
+                Text("Runtime reported by the Click Assist Agent; requested values above are your settings.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
             }
         }
         .formStyle(.grouped)
-        .onAppear { engine.refreshFromPreferences() }
+        .onAppear {
+            engine.refreshFromPreferences()
+            status.start()
+            agentLoginItem = SMAppService.loginItem(identifier: Self.agentBundleIdentifier).status == .enabled
+        }
+        .onDisappear {
+            status.stop()
+        }
+    }
+
+    /// Register/unregister the embedded login item from the app side.
+    private func updateLoginItem(_ enabled: Bool) {
+        let service = SMAppService.loginItem(identifier: Self.agentBundleIdentifier)
+        do {
+            if enabled {
+                try service.register()
+            } else {
+                try service.unregister()
+            }
+            loginItemError = nil
+        } catch {
+            loginItemError = error.localizedDescription
+            agentLoginItem = (service.status == .enabled)
+        }
     }
 }

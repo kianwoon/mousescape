@@ -115,4 +115,108 @@ enum ClickAssistRuntimeStatus: Equatable, Sendable {
         case .resolverUnavailable: return "Paused — Accessibility resolver unavailable"
         }
     }
+
+    /// Wire value persisted in the runtime status record. Deliberately distinct
+    /// from the preference layer: this describes what the agent is actually doing.
+    var reportedState: ClickAssistStatusState {
+        switch self {
+        case .active: return .active
+        case .pausedDisabled: return .pausedDisabled
+        case .pausedAccessibility: return .pausedPermission
+        case .tapFailed: return .tapFailed
+        case .resolverUnavailable: return .resolverUnavailable
+        }
+    }
+}
+
+// MARK: - Runtime status record (agent -> app)
+//
+// This is runtime truth, not configuration. It is written only by the agent to a
+// deterministic per-user file and read by the app. Prefs remain the user's intent.
+
+enum ClickAssistStatusState: String, Codable, Equatable, Sendable {
+    case active
+    case pausedPermission = "paused-permission"
+    case pausedDisabled = "paused-disabled"
+    case tapFailed = "tap-failed"
+    case resolverUnavailable = "resolver-unavailable"
+}
+
+struct ClickAssistStatusRecord: Codable, Equatable, Sendable {
+    var state: ClickAssistStatusState
+    /// Wall-clock heartbeat, refreshed by the agent while it runs. A stale value
+    /// means the agent is gone (or wedged) even if the file still exists.
+    var heartbeat: Date
+    /// The tolerance the agent is actually using, NOT the requested pref value.
+    var tolerancePoints: Double
+
+    /// User-facing status text rendered by the app Settings view.
+    func displayText() -> String {
+        switch state {
+        case .active:
+            let tol = tolerancePoints.rounded() == tolerancePoints
+                ? String(format: "%.0f", tolerancePoints)
+                : String(format: "%.1f", tolerancePoints)
+            return "Active — assist running at \(tol) pt"
+        case .pausedPermission: return "Paused — Accessibility access required"
+        case .pausedDisabled: return "Paused — disabled in Settings"
+        case .tapFailed: return "Paused — event tap could not start"
+        case .resolverUnavailable: return "Paused — Accessibility resolver unavailable"
+        }
+    }
+}
+
+/// Single deterministic per-user location for the runtime record, plus the
+/// namespaced Darwin hint posted after every change. The file is the record;
+/// the notification only tells listeners to re-read it.
+enum ClickAssistStatusStore {
+    static let changedNotification = ClickAssistPreferences.domain + ".click-assist-status-changed"
+    static let directoryName = "Mousecape/ClickAssistAgent"
+    static let fileName = "status.json"
+
+    /// A record whose heartbeat is older than this is treated as dead. The agent
+    /// heartbeats every 2 s, so this tolerates ~2 missed beats before the app
+    /// stops claiming assist is running.
+    static let staleThreshold: TimeInterval = 6
+
+    static var fileURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory,
+                                            in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Library/Application Support", isDirectory: true)
+        return base.appendingPathComponent(directoryName, isDirectory: true)
+                   .appendingPathComponent(fileName, isDirectory: false)
+    }
+
+    static func write(_ record: ClickAssistStatusRecord) {
+        let url = fileURL
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            let data = try JSONEncoder().encode(record)
+            // Atomic write: readers never observe a partially written record.
+            try data.write(to: url, options: .atomic)
+            postChanged()
+        } catch {
+            debugLog("[ClickAssist] STATUS_WRITE_FAILED error=\(error)")
+        }
+    }
+
+    static func read() -> ClickAssistStatusRecord? {
+        guard let data = try? Data(contentsOf: fileURL) else { return nil }
+        return try? JSONDecoder().decode(ClickAssistStatusRecord.self, from: data)
+    }
+
+    /// Clean shutdown: remove the record so the app never shows a false "Active".
+    static func remove() {
+        try? FileManager.default.removeItem(at: fileURL)
+        postChanged()
+    }
+
+    static func postChanged() {
+        CFNotificationCenterPostNotification(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            CFNotificationName(rawValue: changedNotification as CFString),
+            nil, nil, true)
+    }
 }
