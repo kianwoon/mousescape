@@ -87,30 +87,118 @@ enum DecisionCore {
                       snap: Snap, edgeCore: Bool)
     }
 
+    /// The target a shared resolution picked, with everything needed both to
+    /// draw it and to execute it.
+    struct Target: Sendable {
+        let candidate: Candidate
+        let dist: CGFloat
+        let destination: CGPoint
+        let snap: Snap
+    }
+
+    /// THE single decision. Rendering and execution both consume this — they may
+    /// never disagree about what was chosen.
+    enum Resolution: Sendable {
+        case winner(Target, alternates: [Target])
+        case ambiguous(scored: [(candidate: Candidate, dist: CGFloat)], tie: CGFloat)
+        case none
+    }
+
+    /// One selection rule, used by BOTH the indicator and the click:
+    /// 1. in-tolerance, minus elements that enclose two or more others;
+    /// 2. the element the pointer is INSIDE wins (first-class preferred, then the
+    ///    smallest) — a row is indicated and clicked on itself;
+    /// 3. otherwise the nearest in-tolerance candidate, first-class preferred,
+    ///    with a tie guard that is the same on both paths.
+    static func resolve(point: CGPoint, candidates: [Candidate], tolerance: CGFloat,
+                        tieEpsilon: CGFloat = DecisionCore.tieEpsilon) -> Resolution {
+        var scored: [(Candidate, CGFloat)] = []
+        for c in candidates {
+            let d = boundaryDistance(point, c.rect)
+            guard d <= tolerance else { continue }
+            scored.append((c, d))
+        }
+        guard !scored.isEmpty else { return .none }
+        let all = scored
+        let filtered = scored.filter { cand, _ in
+            all.filter { other in
+                other.0.key != cand.key && cand.rect.contains(other.0.rect)
+            }.count < 2
+        }
+        guard !filtered.isEmpty else { return .none }
+
+        let area = { (c: Candidate) in c.rect.width * c.rect.height }
+        let containing = filtered.filter { $0.1 == 0 }
+        let pool: [(Candidate, CGFloat)]
+        if !containing.isEmpty {
+            let fc = containing.filter { $0.0.tier == .firstClass }.sorted { area($0.0) < area($1.0) }
+            pool = fc.isEmpty
+                ? Array(containing.sorted { area($0.0) < area($1.0) }.prefix(1))
+                : fc
+        } else {
+            let fc = filtered.filter { $0.0.tier == .firstClass }.sorted { $0.1 < $1.1 }
+            if fc.isEmpty {
+                let sc = filtered.filter { $0.0.tier != .firstClass }.sorted { $0.1 < $1.1 }
+                guard let best = sc.first else { return .none }
+                if sc.count >= 2, sc[1].1 - best.1 <= tieEpsilon {
+                    return .ambiguous(scored: sc.prefix(3).map { ($0.0, $0.1) },
+                                      tie: sc[1].1 - best.1)
+                }
+                pool = [best]
+            } else {
+                if fc.count >= 2, fc[1].1 - fc[0].1 <= tieEpsilon {
+                    return .ambiguous(scored: fc.prefix(3).map { ($0.0, $0.1) },
+                                      tie: fc[1].1 - fc[0].1)
+                }
+                pool = fc
+            }
+        }
+
+        let targets = pool
+            .sorted { a, b in
+                if a.1 != b.1 { return a.1 < b.1 }
+                if area(a.0) != area(b.0) { return area(a.0) < area(b.0) }
+                return a.0.key < b.0.key
+            }
+            .map { cand, d -> Target in
+                let snap = snapMode(for: cand)
+                let dest = snap == .center
+                    ? centerPoint(into: cand.rect)
+                    : clampPoint(point, into: cand.rect, inset: cand.inset)
+                return Target(candidate: cand, dist: d, destination: dest, snap: snap)
+            }
+        guard let winner = targets.first else { return .none }
+        return .winner(winner, alternates: Array(targets.dropFirst().prefix(2)))
+    }
+
+    /// Click semantics layered on the shared resolution. Passthrough decisions
+    /// (direct hits) are reported as such so the caller leaves the event alone.
     static func route(point: CGPoint, candidates: [Candidate], tolerance: CGFloat,
                       tieEpsilon: CGFloat = DecisionCore.tieEpsilon) -> Decision {
-        // Direct-hit priority belongs to actionable controls only. A first-class
-        // hit is native behaviour, exactly as before.
-        if let hit = candidates.first(where: { $0.rect.contains(point) && $0.tier == .firstClass }) {
-            return directHit(hit, point: point, candidates: candidates)
-        }
-        // Direct hit on ONLY a second-class container: do not passthrough yet.
-        // A first-class control within tolerance is rescued from the container's
-        // direct-hit shadow (the YouTube seek-bar band). Otherwise the container
-        // keeps today's passthrough behaviour.
-        if let container = candidates.first(where: { $0.rect.contains(point) }) {
-            if let near = preferredNearMiss(point: point, candidates: candidates,
-                                            tolerance: tolerance, tieEpsilon: tieEpsilon,
-                                            firstClassOnly: true) {
-                return near
+        switch resolve(point: point, candidates: candidates,
+                       tolerance: tolerance, tieEpsilon: tieEpsilon) {
+        case .none:
+            return .noCandidate
+        case .ambiguous(let scored, let tie):
+            return .ambiguous(scored: scored, tie: tie)
+        case .winner(let target, _):
+            guard target.dist == 0 else {
+                return .redirect(candidate: target.candidate, corrected: target.destination,
+                                 boundaryDist: target.dist, snap: target.snap, edgeCore: false)
             }
-            return directHit(container, point: point, candidates: candidates)
+            // Inside the element: native, except a first-class button clicked
+            // outside its live core — that one is re-aimed at its bullseye.
+            if target.snap == .center, !isWithinCenterCore(point, rect: target.candidate.rect) {
+                return .redirect(candidate: target.candidate,
+                                 corrected: centerPoint(into: target.candidate.rect),
+                                 boundaryDist: 0, snap: .center, edgeCore: true)
+            }
+            let others = candidates
+                .filter { $0.key != target.candidate.key }
+                .map { (key: $0.key, dist: boundaryDistance(point, $0.rect)) }
+                .sorted { $0.dist < $1.dist }
+            return .directHit(candidate: target.candidate, others: others)
         }
-        // Near-miss: prefer first-class, fall back to second-class only when no
-        // first-class candidate is in tolerance. The ambiguity guard applies
-        // WITHIN the chosen tier (it never compares a tile against a control).
-        return preferredNearMiss(point: point, candidates: candidates,
-                                 tolerance: tolerance, tieEpsilon: tieEpsilon) ?? .noCandidate
     }
 
     private static func directHit(_ hit: Candidate, point: CGPoint,
@@ -128,35 +216,6 @@ enum DecisionCore {
             .map { (key: $0.key, dist: boundaryDistance(point, $0.rect)) }
             .sorted { $0.dist < $1.dist }
         return .directHit(candidate: hit, others: others)
-    }
-
-    /// Nearest in-tolerance candidate, tier-aware. Returns nil when nothing is
-    /// within tolerance. Boundary-distance semantics (d > 0, d <= tolerance) and
-    /// the tie maths are unchanged.
-    private static func preferredNearMiss(point: CGPoint, candidates: [Candidate],
-                                          tolerance: CGFloat,
-                                          tieEpsilon: CGFloat,
-                                          firstClassOnly: Bool = false) -> Decision? {
-        var firstClass: [(Candidate, CGFloat)] = []
-        var secondClass: [(Candidate, CGFloat)] = []
-        for c in candidates {
-            let d = boundaryDistance(point, c.rect)
-            guard d > 0, d <= tolerance else { continue }
-            if c.tier == .firstClass { firstClass.append((c, d)) }
-            else { secondClass.append((c, d)) }
-        }
-        let scored = (firstClass.isEmpty && !firstClassOnly ? secondClass : firstClass)
-            .sorted { $0.1 < $1.1 }
-        guard let best = scored.first else { return nil }
-        if scored.count >= 2, scored[1].1 - best.1 <= tieEpsilon {
-            return .ambiguous(scored: scored, tie: scored[1].1 - best.1)
-        }
-        let snap = snapMode(for: best.0)
-        let corrected = snap == .center
-            ? centerPoint(into: best.0.rect)
-            : clampPoint(point, into: best.0.rect, inset: best.0.inset)
-        return .redirect(candidate: best.0, corrected: corrected,
-                         boundaryDist: best.1, snap: snap, edgeCore: false)
     }
 
     /// Center-snap only first-class, position-agnostic controls. Second-class
@@ -203,55 +262,18 @@ enum DecisionCore {
     /// smaller area. First-class only when any first-class is in range (a
     /// container never competes with a control); `limit` bounds validation work.
     /// The winner of a click is always element 0.
+    /// Thin view over `resolve()` so the ring and the click can never pick
+    /// different winners. Order is the resolution order; the first is the winner.
     static func displayCandidates(point: CGPoint, candidates: [Candidate],
                                   tolerance: CGFloat, limit: Int = 3) -> [ScoredCandidate] {
-        var firstClass: [ScoredCandidate] = []
-        var secondClass: [ScoredCandidate] = []
-        for c in candidates {
-            let d = boundaryDistance(point, c.rect)
-            guard d <= tolerance else { continue }
-            let scored = ScoredCandidate(candidate: c, dist: d)
-            if c.tier == .firstClass { firstClass.append(scored) }
-            else { secondClass.append(scored) }
+        switch resolve(point: point, candidates: candidates, tolerance: tolerance) {
+        case .winner(let winner, let alternates):
+            return ([winner] + alternates).prefix(limit).map {
+                ScoredCandidate(candidate: $0.candidate, dist: $0.dist)
+            }
+        case .ambiguous, .none:
+            return []
         }
-        // INVARIANT: the element the pointer is INSIDE always outranks anything
-        // merely nearby — otherwise hovering a row makes the indicator (and a
-        // near-miss click) land on its NEIGHBOURS. Second-tier rows/tiles
-        // therefore compete on direct hits too. First-class controls keep
-        // priority only as tie-break at equal distance, and a second-tier
-        // direct hit with NO first-class control inside it is the row itself
-        // (indicated, click stays native passthrough).
-        let pool: [ScoredCandidate]
-        if firstClass.contains(where: { $0.dist == 0 }) {
-            pool = firstClass
-        } else if let inside = secondClass.first(where: { $0.dist == 0 }) {
-            // Defer to a first-class control only when it sits INSIDE the row;
-            // a neighbouring first-class control must not steal the row.
-            let insideRect = inside.candidate.rect
-            let embedded = firstClass.contains { insideRect.contains($0.candidate.rect) }
-            pool = embedded ? firstClass : [inside]
-        } else {
-            pool = firstClass.isEmpty ? secondClass.filter { $0.dist > 0 } : firstClass
-        }
-        // A container masquerading as a control (Brave exposes the whole tab
-        // strip as an AXTab-sized element, and a strip-sized AXGroup as a tile)
-        // encloses several real controls. It is never a target on its own: drop
-        // any candidate that encloses 2+ others, comparing against BOTH tiers.
-        let allScored = firstClass + secondClass
-        let filtered = pool.filter { candidate in
-            allScored.filter { other in
-                other.candidate.key != candidate.candidate.key
-                    && candidate.candidate.rect.contains(other.candidate.rect)
-            }.count < 2
-        }
-        let ordered = filtered.sorted { a, b in
-            if a.dist != b.dist { return a.dist < b.dist }
-            let areaA = a.candidate.rect.width * a.candidate.rect.height
-            let areaB = b.candidate.rect.width * b.candidate.rect.height
-            if areaA != areaB { return areaA < areaB }
-            return a.candidate.key < b.candidate.key
-        }
-        return Array(ordered.prefix(limit))
     }
 
     static func boundaryDistance(_ p: CGPoint, _ r: CGRect) -> CGFloat {
@@ -352,14 +374,11 @@ final class LegitimacyPolicy: @unchecked Sendable {
               let element, let hitFrame = axFrame(element) else { return .unknown }
         // The renderer's answer must cover the destination at all.
         guard hitFrame.contains(destination) else { return .mismatch }
-        // Candidate itself or a descendant/equal surface answered.
+        // Confirmation must prove THE CHOSEN TARGET, never a sibling: either the
+        // renderer's answer sits inside the candidate's own rect, or it IS the
+        // candidate's own surface (frame-equal within 1 pt).
         if candidate.contains(hitFrame) { return .confirmed }
-        // An equal-frame real control answered (Brave: tab group frame == tab).
-        if siblings.contains(where: { sameFrame($0, hitFrame) }) { return .confirmed }
-        // Or the renderer answered with a control row/strip that HOLDS a real
-        // control at this point (Brave's tab strip group covering the tabs).
-        if siblings.contains(where: { hitFrame.contains($0) }) { return .confirmed }
-        // Candidate is inside the hit but the hit is an unrelated container.
+        if sameFrame(candidate, hitFrame) { return .confirmed }
         return .mismatch
     }
 
