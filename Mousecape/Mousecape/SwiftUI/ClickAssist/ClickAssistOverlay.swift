@@ -1,5 +1,6 @@
 // baseline-guard:allow new standalone prototype file, no prior baseline possible
 import AppKit
+import ApplicationServices
 import CoreGraphics
 
 /// Borderless transparent panel that can NEVER become key/main and NEVER receives
@@ -97,6 +98,17 @@ final class TargetingOverlay {
                                            y: CGFloat.greatestFiniteMagnitude)
     private var lastDrawnMode = ""
     private var lastDrawnTolerance: CGFloat = -1
+    /// Ghost-ring suppression: per-target visibility verdict from the app's own
+    /// AX hit-test, cached briefly so the 30 Hz repaint does not issue an AX call
+    /// every tick (≈ one hit-test per 0.5 s per target key).
+    private struct VisibilityVerdict {
+        let visible: Bool
+        let stamp: CFTimeInterval
+    }
+    private var visibilityCache: [String: VisibilityVerdict] = [:]
+    private var lastGhostLog: [String: CFTimeInterval] = [:]
+    private static let visibilityTTL: CFTimeInterval = 0.5
+    private static let ghostLogInterval: CFTimeInterval = 5
 
     init(tolerance: CGFloat, log: @escaping (String) -> Void) {
         self.tolerance = tolerance
@@ -182,6 +194,36 @@ final class TargetingOverlay {
                 reason = "no-candidate-in-radius"
             }
         }
+        // GHOST-RING GATE (display only — never touches the tap's click path).
+        // Chromium exposes faded-out / opacity-0 elements through AX with no
+        // visibility flag. Its own AX hit-test only returns VISIBLE elements, so
+        // cross-check the target's center: a definitive hit whose frame does not
+        // contain that center means the element is invisible. Errors, nil and
+        // frameless results PASS (the hit-test is advisory and intermittently
+        // flakes). Mutations are unaffected: the click still redirects to the
+        // cached element.
+        var ghostKey: String?
+        if action == "show", let key = targetKey, let rect = frame, fresh,
+           !isVisibleNow(pid: s.pid, key: key, rect: rect) {
+            ghostKey = key
+            action = "none"
+            reason = "ghost-suppressed"
+            targetKey = nil
+            frame = nil
+        }
+        if let ghostKey {
+            // Rate-limited: one ghost line per target key per 5 s.
+            let now = CACurrentMediaTime()
+            if now - (lastGhostLog[ghostKey] ?? -Double.infinity) >= Self.ghostLogInterval {
+                lastGhostLog[ghostKey] = now
+                log(String(format: "OVERLAY_STATE gen=%llu action=none target=%@ pointer=(%.1f,%.1f) reason=ghost-suppressed",
+                           s.generation, ghostKey as NSString, pointer.x, pointer.y))
+            }
+            // Force a fresh "show" line when the element becomes visible again.
+            lastSig = "\(s.generation)|none|ghost|\(ghostKey)"
+            draw(action: action, frame: frame, pointer: pointer, mode: mode)
+            return
+        }
         let sig = "\(s.generation)|\(action)|\(targetKey ?? "-")|\(reason)"
         if sig != lastSig {
             lastSig = sig
@@ -195,6 +237,50 @@ final class TargetingOverlay {
             }
         }
         draw(action: action, frame: frame, pointer: pointer, mode: mode)
+    }
+
+    /// Advisory visibility check via the app's own AX hit-test at the candidate
+    /// center. Returns false ONLY on a definitive mismatch (an element was
+    /// returned and its frame excludes the queried center). Errors/nil pass.
+    /// Called on the main actor; a 0.1 s messaging timeout bounds the cost.
+    private func isVisibleNow(pid: pid_t, key: String, rect: CGRect) -> Bool {
+        let now = CACurrentMediaTime()
+        if let cached = visibilityCache[key], now - cached.stamp < Self.visibilityTTL {
+            return cached.visible
+        }
+        guard pid > 0, pid != getpid(), rect.width > 0, rect.height > 0 else { return true }
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.1)
+        var element: AXUIElement?
+        // Flaky rule: any error or nil element means "cannot judge" → pass.
+        guard AXUIElementCopyElementAtPosition(app, Float(center.x), Float(center.y),
+                                               &element) == .success,
+              let element else {
+            visibilityCache[key] = VisibilityVerdict(visible: true, stamp: now)
+            return true
+        }
+        guard let hitFrame = axFrame(element) else {
+            visibilityCache[key] = VisibilityVerdict(visible: true, stamp: now)
+            return true
+        }
+        let visible = hitFrame.contains(center)
+        visibilityCache[key] = VisibilityVerdict(visible: visible, stamp: now)
+        return visible
+    }
+
+    /// Frame of an AX element in global top-left coordinates.
+    private func axFrame(_ el: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let posRef, let sizeRef else { return nil }
+        var origin = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) else { return nil }
+        return CGRect(origin: origin, size: size)
     }
 
     private func draw(action: String, frame: CGRect?, pointer: CGPoint, mode: String) {
