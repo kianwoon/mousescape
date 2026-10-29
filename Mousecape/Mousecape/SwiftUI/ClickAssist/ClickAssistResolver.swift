@@ -103,14 +103,16 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var unionStashes: [pid_t: UnionStash] = [:]
     /// Bounded LRU so a long session cannot accumulate stale snapshots.
     private static let maxUnionStashes = 4
-    /// Pointer-window pid hysteresis. A NEW pointer-window pid must be observed on
-    /// this many consecutive refresh cycles before it may trigger a switch (union
-    /// swap + app-switch-polled). Overlapping-window boundaries flip the reported
-    /// owner between two apps every cycle; 2 consecutive samples filters that out.
-    /// Frontmost-app-driven changes are unaffected (they switch immediately).
-    private var pointerPidLatched: pid_t = 0
-    private var pendingPointerPid: pid_t = 0
-    private var pendingPointerPidCount = 0
+    /// Resolved-pid hysteresis. A NEW candidate pid (pointer window, or the
+    /// frontmost fallback when the pointer window is momentarily unresolvable)
+    /// must be observed on this many consecutive refresh cycles before it may
+    /// trigger a switch (union swap + app-switch-polled). Overlapping-window
+    /// boundaries flip the candidate between two pids — and sometimes between a
+    /// pid and nil (fallback to frontmost) — every cycle; 2 consecutive samples
+    /// filters both out. A genuine frontmost-app change switches immediately.
+    private var lastFrontPid: pid_t = 0
+    private var pendingResolvedPid: pid_t = 0
+    private var pendingResolvedPidCount = 0
     private static let pointerPidHysteresisCycles = 2
     /// Set when a walk bails out because the 0.25 s deadline passed. Reset per
     /// refresh; drives both `partial` and the published `trunc=` reason.
@@ -422,53 +424,45 @@ final class AccessibilityResolver: @unchecked Sendable {
         // pointer sat over a browser window). Chain: window-server owner pid ->
         // frontmost app -> (self pid) non-routable self pass-through below.
         let rawPointerPid = pointerWindowOwnerPid(pointer)
-        // HYSTERESIS: only a pointer-window pid seen on 2 consecutive cycles may
-        // retarget the resolver. While a new pid is still accumulating samples the
-        // latched pid stays active, so an overlapping-window boundary (reported
-        // owner alternating per cycle) never resets the union. Frontmost-only
-        // resolution (no accepted pointer-window pid) is untouched.
-        let pointerPid: pid_t?
-        if let raw = rawPointerPid, raw != getpid() {
-            if raw == pointerPidLatched {
-                pendingPointerPid = 0
-                pendingPointerPidCount = 0
-                pointerPid = raw
-            } else if pointerPidLatched == 0 {
-                // First acquisition: nothing cached to protect, adopt immediately.
-                pointerPidLatched = raw
-                pendingPointerPid = 0
-                pendingPointerPidCount = 0
-                pointerPid = raw
-            } else if raw == pendingPointerPid {
-                pendingPointerPidCount += 1
-                if pendingPointerPidCount >= Self.pointerPidHysteresisCycles {
-                    pointerPidLatched = raw
-                    pendingPointerPid = 0
-                    pendingPointerPidCount = 0
-                    pointerPid = raw
-                } else {
-                    pointerPid = (pointerPidLatched != 0) ? pointerPidLatched : nil
-                }
+        let pointerPid: pid_t? = (rawPointerPid != nil && rawPointerPid != getpid()) ? rawPointerPid : nil
+        let candidate = pointerPid ?? frontPid
+        // Frontmost-app changes are real user intent: switch immediately, exactly
+        // as before. Everything else (pointer-window pid, and the frontmost
+        // fallback while the pointer window is momentarily unresolvable) must be
+        // stable for `pointerPidHysteresisCycles` consecutive cycles. Overlapping-
+        // window boundaries alternate the candidate every cycle, so they never
+        // reach the threshold and the active union survives.
+        let frontChanged = lastFrontPid != 0 && frontPid != lastFrontPid
+        lastFrontPid = frontPid
+        let pid: pid_t
+        var hysteresisHeld = false
+        if candidate == lastResolvedPid || lastResolvedPid == 0 {
+            pendingResolvedPid = 0
+            pendingResolvedPidCount = 0
+            pid = candidate
+        } else if frontChanged {
+            pendingResolvedPid = 0
+            pendingResolvedPidCount = 0
+            pid = candidate
+        } else if candidate == pendingResolvedPid {
+            pendingResolvedPidCount += 1
+            if pendingResolvedPidCount >= Self.pointerPidHysteresisCycles {
+                pendingResolvedPid = 0
+                pendingResolvedPidCount = 0
+                pid = candidate
             } else {
-                pendingPointerPid = raw
-                pendingPointerPidCount = 1
-                pointerPid = (pointerPidLatched != 0) ? pointerPidLatched : nil
+                pid = lastResolvedPid
+                hysteresisHeld = true
             }
         } else {
-            pendingPointerPid = 0
-            pendingPointerPidCount = 0
-            pointerPid = nil
+            pendingResolvedPid = candidate
+            pendingResolvedPidCount = 1
+            pid = lastResolvedPid
+            hysteresisHeld = true
         }
-        if let raw = rawPointerPid, raw != getpid(), raw != pointerPidLatched,
-           let held = pointerPid, held != raw {
+        if hysteresisHeld {
             // Evidence for acceptance gate (a): the flip was suppressed this cycle.
-            log("RESOLVER_EVENT app-switch-held held=\(held) pending=\(raw) hysteresisCount=\(pendingPointerPidCount)")
-        }
-        let pid: pid_t
-        if let pointerPid, pointerPid != getpid() {
-            pid = pointerPid
-        } else {
-            pid = frontPid
+            log("RESOLVER_EVENT app-switch-held held=\(pid) pending=\(candidate) rawPointer=\(rawPointerPid.map { String($0) } ?? "-") hysteresisCount=\(pendingResolvedPidCount) front=\(frontPid)")
         }
         // Name is derived from the CHOSEN pid only — never from `front`. A frontmost
         // name next to a pointer-window pid is exactly the log lie this fixes
