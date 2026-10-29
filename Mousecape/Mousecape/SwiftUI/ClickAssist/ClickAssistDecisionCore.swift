@@ -12,10 +12,20 @@ enum DecisionCore {
     /// A cache snapshot older than this is treated as stale even if still marked valid.
     static let cacheMaxAge: CFTimeInterval = 1.0
 
+    /// Admission tier. FIRST-CLASS is a genuine control role; SECOND-CLASS is a
+    /// container admitted only by the tile/row size envelope (AXImage/AXGroup
+    /// tiles, oversized-but-row-admitted elements). Only first-class candidates
+    /// own direct-hit priority — a container never blocks a nearby control.
+    enum Tier: Sendable {
+        case firstClass
+        case secondClass
+    }
+
     struct Candidate {
         let key: String
         let rect: CGRect
         let inset: CGFloat
+        let tier: Tier
     }
 
     enum Decision {
@@ -27,23 +37,57 @@ enum DecisionCore {
 
     static func route(point: CGPoint, candidates: [Candidate], tolerance: CGFloat,
                       tieEpsilon: CGFloat = DecisionCore.tieEpsilon) -> Decision {
-        // Direct-hit priority: inside a cached actionable rect -> untouched.
-        if let hit = candidates.first(where: { $0.rect.contains(point) }) {
-            let others = candidates
-                .filter { $0.key != hit.key }
-                .map { (key: $0.key, dist: boundaryDistance(point, $0.rect)) }
-                .sorted { $0.dist < $1.dist }
-            return .directHit(candidate: hit, others: others)
+        // Direct-hit priority belongs to actionable controls only. A first-class
+        // hit is native behaviour, exactly as before.
+        if let hit = candidates.first(where: { $0.rect.contains(point) && $0.tier == .firstClass }) {
+            return directHit(hit, point: point, candidates: candidates)
         }
-        // Boundary distance to the nearest point inside each rect; outside only.
-        var scored: [(Candidate, CGFloat)] = []
+        // Direct hit on ONLY a second-class container: do not passthrough yet.
+        // A first-class control within tolerance is rescued from the container's
+        // direct-hit shadow (the YouTube seek-bar band). Otherwise the container
+        // keeps today's passthrough behaviour.
+        if let container = candidates.first(where: { $0.rect.contains(point) }) {
+            if let near = preferredNearMiss(point: point, candidates: candidates,
+                                            tolerance: tolerance, tieEpsilon: tieEpsilon,
+                                            firstClassOnly: true) {
+                return near
+            }
+            return directHit(container, point: point, candidates: candidates)
+        }
+        // Near-miss: prefer first-class, fall back to second-class only when no
+        // first-class candidate is in tolerance. The ambiguity guard applies
+        // WITHIN the chosen tier (it never compares a tile against a control).
+        return preferredNearMiss(point: point, candidates: candidates,
+                                 tolerance: tolerance, tieEpsilon: tieEpsilon) ?? .noCandidate
+    }
+
+    private static func directHit(_ hit: Candidate, point: CGPoint,
+                                  candidates: [Candidate]) -> Decision {
+        let others = candidates
+            .filter { $0.key != hit.key }
+            .map { (key: $0.key, dist: boundaryDistance(point, $0.rect)) }
+            .sorted { $0.dist < $1.dist }
+        return .directHit(candidate: hit, others: others)
+    }
+
+    /// Nearest in-tolerance candidate, tier-aware. Returns nil when nothing is
+    /// within tolerance. Boundary-distance semantics (d > 0, d <= tolerance) and
+    /// the tie maths are unchanged.
+    private static func preferredNearMiss(point: CGPoint, candidates: [Candidate],
+                                          tolerance: CGFloat,
+                                          tieEpsilon: CGFloat,
+                                          firstClassOnly: Bool = false) -> Decision? {
+        var firstClass: [(Candidate, CGFloat)] = []
+        var secondClass: [(Candidate, CGFloat)] = []
         for c in candidates {
             let d = boundaryDistance(point, c.rect)
-            if d > 0, d <= tolerance { scored.append((c, d)) }
+            guard d > 0, d <= tolerance else { continue }
+            if c.tier == .firstClass { firstClass.append((c, d)) }
+            else { secondClass.append((c, d)) }
         }
-        scored.sort { $0.1 < $1.1 }
-        guard let best = scored.first else { return .noCandidate }
-        // Ambiguity guard.
+        let scored = (firstClass.isEmpty && !firstClassOnly ? secondClass : firstClass)
+            .sorted { $0.1 < $1.1 }
+        guard let best = scored.first else { return nil }
         if scored.count >= 2, scored[1].1 - best.1 <= tieEpsilon {
             return .ambiguous(scored: scored, tie: scored[1].1 - best.1)
         }

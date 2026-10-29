@@ -142,14 +142,16 @@ final class AssistTap: @unchecked Sendable {
     private func resolution() -> Resolution {
         switch targetSource {
         case .staticTargets(let ts):
-            return Resolution(candidates: ts.map { Candidate(key: $0.name, rect: $0.rect, inset: $0.inset) },
+            return Resolution(candidates: ts.map { Candidate(key: $0.name, rect: $0.rect, inset: $0.inset,
+                                                              tier: .firstClass) },
                               valid: true, reason: "static", generation: 0, ageMs: 0, source: "static")
         case .cache(let store):
             let s = store.current()
             let ageMs = (CACurrentMediaTime() - s.stamp) * 1000
             let fresh = s.valid && ageMs <= DecisionCore.cacheMaxAge * 1000
             let reason = s.valid ? (fresh ? "fresh" : String(format: "stale:age(%.0fms)", ageMs)) : s.reason
-            return Resolution(candidates: s.targets.map { Candidate(key: $0.key, rect: $0.rect, inset: $0.inset) },
+            return Resolution(candidates: s.targets.map { Candidate(key: $0.key, rect: $0.rect,
+                                                                     inset: $0.inset, tier: $0.tier) },
                               valid: fresh, reason: reason, generation: s.generation,
                               ageMs: ageMs, source: "cache")
         }

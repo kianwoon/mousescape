@@ -11,6 +11,10 @@ struct CachedTarget: Sendable {
     let rect: CGRect
     /// Corrected point is clamped to rect.insetBy(inset, inset).
     let inset: CGFloat
+    /// Admission tier, fixed by the resolver at collected time. First-class =
+    /// genuine control role; second-class = container admitted by the tile/row
+    /// size envelope only.
+    let tier: DecisionCore.Tier
 }
 
 /// Immutable snapshot published by the background resolver and read by the tap.

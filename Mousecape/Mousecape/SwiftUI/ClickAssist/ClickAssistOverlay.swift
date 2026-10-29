@@ -161,12 +161,20 @@ final class TargetingOverlay {
         var frame: CGRect?
         var mode = "redirect"
         if fresh {
-            let cands = s.targets.map { DecisionCore.Candidate(key: $0.key, rect: $0.rect, inset: $0.inset) }
+            let cands = s.targets.map { DecisionCore.Candidate(key: $0.key, rect: $0.rect,
+                                                               inset: $0.inset, tier: $0.tier) }
             switch DecisionCore.route(point: pointer, candidates: cands, tolerance: tolerance) {
             case .redirect(let c, _, _):
                 action = "show"; targetKey = c.key; frame = c.rect; reason = "redirect"
             case .directHit(let c, _):
-                action = "show"; targetKey = c.key; frame = c.rect; reason = "direct-hit"; mode = "direct-hit"
+                if c.tier == .secondClass {
+                    // A second-class container under the pointer is NOT a
+                    // guaranteed target: render no highlight (neutral preview
+                    // only; the router may still rescue a first-class near-miss).
+                    reason = "second-class-direct-hit"
+                } else {
+                    action = "show"; targetKey = c.key; frame = c.rect; reason = "direct-hit"; mode = "direct-hit"
+                }
             case .ambiguous:
                 reason = "ambiguous"
             case .noCandidate:

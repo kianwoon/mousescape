@@ -894,7 +894,10 @@ final class AccessibilityResolver: @unchecked Sendable {
         let title = stringAttr(el, kAXTitleAttribute)
         let key = ident ?? title ?? "\(role)@\(Int(rect.minX)),\(Int(rect.minY))"
         let label = title ?? stringAttr(el, kAXDescriptionAttribute) ?? role
-        out.append(CachedTarget(key: key, role: role, label: label, rect: rect, inset: 2))
+        // Tier is decided ONCE here: a genuine control role is first-class; a
+        // candidate admitted only by the row/tile envelope is second-class.
+        let tier: DecisionCore.Tier = Self.eligibleRoles.contains(role) ? .firstClass : .secondClass
+        out.append(CachedTarget(key: key, role: role, label: label, rect: rect, inset: 2, tier: tier))
         return true
     }
 
