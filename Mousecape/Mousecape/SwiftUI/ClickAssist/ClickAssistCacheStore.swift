@@ -15,10 +15,6 @@ struct CachedTarget: Sendable {
     /// genuine control role; second-class = container admitted by the tile/row
     /// size envelope only.
     let tier: DecisionCore.Tier
-    /// True for a tab synthesized from a ✕-anchored strip (no tab bodies in AX).
-    var synth: Bool = false
-    /// For synthesized tab targets: the strip container the ✕s belong to.
-    var strip: CGRect? = nil
 }
 
 /// Immutable snapshot published by the background resolver and read by the tap.
