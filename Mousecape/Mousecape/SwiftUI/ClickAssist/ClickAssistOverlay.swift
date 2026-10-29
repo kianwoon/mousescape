@@ -174,14 +174,15 @@ final class TargetingOverlay {
         let pointer = CGEvent(source: nil)?.location ?? .zero
         var action = "none"
         var reason = s.valid ? String(format: "stale:age(%.0fms)", ageMs) : s.reason
-        var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool, tier: Int)?
-        var secondary: (key: String, rect: CGRect, tier: Int)?
+        var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool, tier: Int, synth: Bool)?
+        var secondary: (key: String, rect: CGRect, tier: Int, synth: Bool)?
         var confirmedCount = 0
         var suppressed: (key: String, verdict: LegitimacyPolicy.Verdict)?
         if fresh {
             let cands = s.targets.map { DecisionCore.Candidate(key: $0.key, rect: $0.rect,
                                                                inset: $0.inset, tier: $0.tier,
-                                                               role: $0.role) }
+                                                               role: $0.role, synth: $0.synth,
+                                                               strip: $0.strip) }
             // Up to three nearest in-tolerance first-class candidates, validated
             // at their own destination points (fail-closed). Every confirmed one
             // is indicated; the nearest wins the click.
@@ -198,7 +199,8 @@ final class TargetingOverlay {
                     pid: s.pid, generation: s.generation, key: choice.candidate.key,
                     candidate: choice.candidate.rect, destination: dest,
                     siblings: cands.filter { $0.key != choice.candidate.key && $0.tier == .firstClass }
-                                   .map { $0.rect }) ?? .confirmed
+                                   .map { $0.rect },
+                    strip: choice.candidate.strip) ?? .confirmed
                 if verdict == .confirmed {
                     confirmed.append((choice, dest))
                 } else if suppressed == nil {
@@ -209,12 +211,14 @@ final class TargetingOverlay {
             if let winner = confirmed.first {
                 primary = (winner.0.candidate.key, winner.0.candidate.rect, winner.1,
                            winner.0.dist, winner.0.dist == 0,
-                           winner.0.candidate.tier == .firstClass ? 1 : 2)
+                           winner.0.candidate.tier == .firstClass ? 1 : 2,
+                           winner.0.candidate.synth)
                 action = "show"
                 reason = winner.0.dist == 0 ? "direct-hit" : "redirect"
                 if confirmed.count > 1 {
                     secondary = (confirmed[1].0.candidate.key, confirmed[1].0.candidate.rect,
-                                 confirmed[1].0.candidate.tier == .firstClass ? 1 : 2)
+                                 confirmed[1].0.candidate.tier == .firstClass ? 1 : 2,
+                                 confirmed[1].0.candidate.synth)
                 }
             } else if let suppressed {
                 reason = "legitimacy-\(suppressed.verdict.rawValue)"
@@ -239,16 +243,18 @@ final class TargetingOverlay {
         if sig != lastSig {
             lastSig = sig
             if action == "show", let primary {
-                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed tier=%d cands=%d winner=1",
+                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed tier=%d%@ cands=%d winner=1",
                            s.generation, primary.key as NSString, primary.rect.origin.x, primary.rect.origin.y,
                            primary.rect.width, primary.rect.height, tolerance, pointer.x, pointer.y,
                            reason as NSString, (primary.direct ? "direct-hit" : "redirect") as NSString,
-                           primary.tier, confirmedCount))
+                           primary.tier, (primary.synth ? " synth=tab" : "") as NSString,
+                           confirmedCount))
                 if let secondary {
-                    log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=secondary mode=secondary legitimacy=confirmed tier=%d cands=%d winner=2",
+                    log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=secondary mode=secondary legitimacy=confirmed tier=%d%@ cands=%d winner=2",
                                s.generation, secondary.key as NSString, secondary.rect.origin.x, secondary.rect.origin.y,
                                secondary.rect.width, secondary.rect.height, tolerance, pointer.x, pointer.y,
-                               secondary.tier, confirmedCount))
+                               secondary.tier, (secondary.synth ? " synth=tab" : "") as NSString,
+                               confirmedCount))
                 }
             } else {
                 log(String(format: "OVERLAY_STATE gen=%llu action=none pointer=(%.1f,%.1f) reason=%@",

@@ -69,13 +69,20 @@ enum DecisionCore {
         /// AX role, needed for the snap-mode decision. Empty for the P0 static
         /// harness, which keeps first-class center snapping.
         let role: String
+        /// True for a tab synthesized from a ✕-anchored strip.
+        let synth: Bool
+        /// Strip container for a synthesized tab (legitimacy scoping).
+        let strip: CGRect?
 
-        init(key: String, rect: CGRect, inset: CGFloat, tier: Tier, role: String = "") {
+        init(key: String, rect: CGRect, inset: CGFloat, tier: Tier, role: String = "",
+             synth: Bool = false, strip: CGRect? = nil) {
             self.key = key
             self.rect = rect
             self.inset = inset
             self.tier = tier
             self.role = role
+            self.synth = synth
+            self.strip = strip
         }
     }
 
@@ -307,7 +314,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
     /// first-class candidate frames in the same snapshot (identity proxy).
     func validate(pid: pid_t, generation: UInt64, key: String,
                   candidate: CGRect, destination: CGPoint,
-                  siblings: [CGRect]) -> Verdict {
+                  siblings: [CGRect], strip: CGRect? = nil) -> Verdict {
         let now = CACurrentMediaTime()
         let cacheKey = "\(pid)|\(key)|\(Int(destination.x.rounded()))|\(Int(destination.y.rounded()))"
         lock.lock()
@@ -322,7 +329,8 @@ final class LegitimacyPolicy: @unchecked Sendable {
         lock.unlock()
 
         let verdict = Self.evaluate(pid: pid, candidate: candidate,
-                                    destination: destination, siblings: siblings)
+                                    destination: destination, siblings: siblings,
+                                    strip: strip)
         lock.lock()
         cache[cacheKey] = Entry(verdict: verdict, generation: generation, stamp: now)
         lock.unlock()
@@ -330,7 +338,8 @@ final class LegitimacyPolicy: @unchecked Sendable {
     }
 
     private static func evaluate(pid: pid_t, candidate: CGRect,
-                                 destination: CGPoint, siblings: [CGRect]) -> Verdict {
+                                 destination: CGPoint, siblings: [CGRect],
+                                 strip: CGRect?) -> Verdict {
         guard pid > 0, pid != getpid() else { return .unknown }
         let app = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(app, 0.1)
@@ -338,6 +347,12 @@ final class LegitimacyPolicy: @unchecked Sendable {
         guard AXUIElementCopyElementAtPosition(app, Float(destination.x), Float(destination.y),
                                                &element) == .success,
               let element, let hitFrame = axFrame(element) else { return .unknown }
+        // Synthesized tab: the strip is the authority. The renderer answered with
+        // real content INSIDE the strip (the tab div / strip group) -> confirmed;
+        // anything outside the strip -> mismatch. Errors stay unknown (fail-closed).
+        if let strip {
+            return strip.contains(hitFrame) ? .confirmed : .mismatch
+        }
         // The renderer's answer must cover the destination at all.
         guard hitFrame.contains(destination) else { return .mismatch }
         // Candidate itself or a descendant/equal surface answered.

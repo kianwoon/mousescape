@@ -160,7 +160,8 @@ final class AssistTap: @unchecked Sendable {
             let reason = s.valid ? (fresh ? "fresh" : String(format: "stale:age(%.0fms)", ageMs)) : s.reason
             return Resolution(candidates: s.targets.map { Candidate(key: $0.key, rect: $0.rect,
                                                                      inset: $0.inset, tier: $0.tier,
-                                                                     role: $0.role) },
+                                                                     role: $0.role, synth: $0.synth,
+                                                                     strip: $0.strip) },
                               valid: fresh, reason: reason, generation: s.generation,
                               ageMs: ageMs, source: "cache", pid: s.pid)
         }
@@ -176,7 +177,8 @@ final class AssistTap: @unchecked Sendable {
             .map { $0.rect }
         return legitimacy.validate(pid: res.pid, generation: res.generation,
                                    key: candidate.key, candidate: candidate.rect,
-                                   destination: destination, siblings: siblings)
+                                   destination: destination, siblings: siblings,
+                                   strip: candidate.strip)
     }
 
     /// Diagnostics helper for the no-candidate branch only: the nearest
@@ -296,7 +298,7 @@ final class AssistTap: @unchecked Sendable {
                 latched = (delta, best.key, snap, false)
                 emit("MUTATE", type: label, original: original, mutated: corrected,
                      reason: "redirect", res: res, started: started,
-                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", winner.0.dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(confirmed.count) winner=1")
+                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", winner.0.dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2)\(best.synth ? " synth=tab" : "") legitimacy=confirmed cands=\(confirmed.count) winner=1")
                 return Unmanaged.passUnretained(event)
             }
         }

@@ -636,6 +636,10 @@ final class AccessibilityResolver: @unchecked Sendable {
         let dedupe = dedupeNearIdentical(out)
         out = dedupe.kept
         dedupedCount = dedupe.removed
+        // ✕-anchored strips: some Electron apps expose only 16×16 close buttons
+        // and no tab bodies. Synthesize one tab-wide target per ✕ so the middle
+        // of a tab is reachable (fail-closed legitimation happens at routing).
+        out = synthesizeTabTargets(out)
         unionTargets = out
 
         let near = out.filter { Self.boundaryDistance(pointer, $0.rect) <= 80 }.count
@@ -1002,6 +1006,69 @@ final class AccessibilityResolver: @unchecked Sendable {
         let unionArea = a.width * a.height + b.width * b.height - interArea
         guard unionArea > 0 else { return 0 }
         return interArea / unionArea
+    }
+
+    /// Turn ✕-anchored strips into tab targets. A horizontal container (h ≤ 60,
+    /// w ≥ 3h) holding ≥ 2 same-size small buttons (≤ 24×24) in one row with a
+    /// pitch ≤ 4× button width is a close-only tab strip. Skip entirely when the
+    /// strip already holds ≥ 2 first-class candidates (real tab elements exist —
+    /// never shadow them). Each synthesized tab spans from the previous ✕'s
+    /// trailing edge (strip leading edge + inset for the first) to this ✕'s
+    /// trailing edge; second-class (position matters), edge-snapped, max 12.
+    private func synthesizeTabTargets(_ targets: [CachedTarget]) -> [CachedTarget] {
+        struct Group { let buttons: [CachedTarget]; let container: CachedTarget }
+        var groups: [Group] = []
+        for container in targets {
+            let cr = container.rect
+            guard cr.height >= 12, cr.height <= 60, cr.width >= 3 * cr.height else { continue }
+            let inside = targets.filter {
+                cr.contains(CGPoint(x: $0.rect.midX, y: $0.rect.midY))
+                    && $0.rect.width <= 24 && $0.rect.height <= 24
+                    && $0.rect.width >= 8 && $0.rect.height >= 8
+            }
+            guard inside.count >= 2 else { continue }
+            // Same-size buttons, one row.
+            let bySize = Dictionary(grouping: inside) { "\(Int($0.rect.width))x\(Int($0.rect.height))" }
+            guard let sameSize = bySize.values.max(by: { $0.count < $1.count }), sameSize.count >= 2 else { continue }
+            let midY = sameSize.map { $0.rect.midY }.sorted()[sameSize.count / 2]
+            let row = sameSize.filter { abs($0.rect.midY - midY) <= 3 }.sorted { $0.rect.minX < $1.rect.minX }
+            guard row.count >= 2 else { continue }
+            var aligned = true
+            for i in 1..<row.count {
+                let pitch = row[i].rect.midX - row[i - 1].rect.midX
+                if pitch <= 0 || pitch > 4 * row[i].rect.width { aligned = false; break }
+            }
+            guard aligned else { continue }
+            // Real tabs present: do not synthesize.
+            let firstClassInside = targets.filter {
+                $0.tier == .firstClass && cr.contains(CGPoint(x: $0.rect.midX, y: $0.rect.midY))
+            }
+            guard firstClassInside.count < 2 else { continue }
+            groups.append(Group(buttons: row, container: container))
+        }
+        guard !groups.isEmpty else { return targets }
+        var result = targets
+        var existing = Set(targets.map { $0.key })
+        for group in groups {
+            let strip = group.container.rect
+            var previousTrailing = strip.minX + 4
+            for (index, button) in group.buttons.prefix(12).enumerated() {
+                let x0 = previousTrailing
+                let x1 = button.rect.maxX
+                previousTrailing = x1
+                let tab = CGRect(x: x0, y: strip.minY + 2,
+                                 width: max(0, x1 - x0), height: max(0, strip.height - 4))
+                guard tab.width > 8, tab.height > 8 else { continue }
+                let key = "SynthTab@\(Int(tab.minX)),\(Int(tab.minY))"
+                guard !existing.contains(key) else { continue }
+                existing.insert(key)
+                result.append(CachedTarget(key: key, role: "AXTab", label: "Tab",
+                                           rect: tab, inset: 2, tier: .secondClass,
+                                           synth: true, strip: strip))
+                _ = index
+            }
+        }
+        return result
     }
 
     /// Extract one element as a candidate if its role/geometry qualifies.
