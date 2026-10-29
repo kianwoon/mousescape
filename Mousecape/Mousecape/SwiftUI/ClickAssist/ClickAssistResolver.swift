@@ -1023,8 +1023,13 @@ final class AccessibilityResolver: @unchecked Sendable {
             }
             return false
         }
+        // A value control's track is legitimately screen-wide in fullscreen video
+        // (observed: 7405×10 "progress bar" AXSlider spanning the display), so the
+        // page-container size cap must not apply to these thin track roles.
+        let isWideTrack = role == "AXSlider" || role == "AXScrollBar" || role == "AXValueIndicator"
         guard let rect = frame(el), rect.width >= 4, rect.height >= 4,
-              rect.width < 4000, rect.height < 2000, rect.intersects(screenUnion) else {
+              isWideTrack || (rect.width < 4000 && rect.height < 2000),
+              rect.intersects(screenUnion) else {
             return false
         }
         // Row-like roles pass the role filter only when row-sized; a page/sidebar
