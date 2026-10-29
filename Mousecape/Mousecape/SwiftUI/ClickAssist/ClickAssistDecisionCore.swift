@@ -355,6 +355,12 @@ final class LegitimacyPolicy: @unchecked Sendable {
         abs(a.width - b.width) <= eps && abs(a.height - b.height) <= eps
     }
 
+    private static func role(of el: AXUIElement) -> String {
+        var v: CFTypeRef?
+        AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &v)
+        return (v as? String) ?? ""
+    }
+
     private static func axFrame(_ el: AXUIElement) -> CGRect? {
         var posRef: CFTypeRef?
         var sizeRef: CFTypeRef?
@@ -404,8 +410,17 @@ final class LegitimacyPolicy: @unchecked Sendable {
         guard AXUIElementCopyElementAtPosition(app, Float(destination.x), Float(destination.y),
                                                &element) == .success,
               let element, let hitFrame = axFrame(element) else { return .unknown }
-        // The renderer's answer must cover the destination at all.
-        guard hitFrame.contains(destination) else { return .mismatch }
+        // The renderer's answer must cover the destination to mean anything.
+        // In macOS fullscreen Chromium answers out of a broken coordinate space
+        // (measured: the menu bar for a point at the bottom of the screen, or a
+        // different window's element). Such an answer is incoherent — it cannot
+        // testify about this point either way — so it is discarded and a real
+        // control whose own rect holds the destination stands on its geometry.
+        if !hitFrame.contains(destination) {
+            if candidate.contains(destination),
+               directControlRoles.contains(candidateRole) { return .confirmed }
+            return .unknown
+        }
         // Confirmation must prove THE CHOSEN TARGET. Two accepted answers:
         // 1. the renderer's answer sits inside the candidate's own rect, or IS
         //    the candidate's own surface (frame-equal within 1 pt);
@@ -423,6 +438,15 @@ final class LegitimacyPolicy: @unchecked Sendable {
         //    container or anonymous group can never be confirmed this way.
         if hitFrame.contains(candidate),
            Self.directControlRoles.contains(candidateRole) { return .confirmed }
+        // 4. A CONTAINER answer cannot veto a real control that covers the point.
+        //    Web players answer with the video/overlay group at points where the
+        //    seek bar is fully clickable (measured in fullscreen: menu bar or a
+        //    background window's group). Only an answer that IS a control may
+        //    block; a structural answer is treated as uninformative.
+        let hitRole = Self.role(of: element)
+        if candidate.contains(destination),
+           Self.directControlRoles.contains(candidateRole),
+           !Self.directControlRoles.contains(hitRole) { return .confirmed }
         return .mismatch
     }
 

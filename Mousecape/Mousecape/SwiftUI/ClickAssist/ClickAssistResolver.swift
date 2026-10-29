@@ -938,11 +938,15 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// hollow fullscreen strips have negative origins and do not contain it.
     private func axWindowContainingPointer(_ windows: [AXUIElement],
                                            pointer: CGPoint) -> (window: AXUIElement?, mode: String) {
+        // LARGEST containing window wins: a background window under the same
+        // pixel is smaller than the fullscreen window that actually covers the
+        // screen, and picking the smallest (observed) made the ring report a
+        // background window's controls instead of the fullscreen video.
         var best: (window: AXUIElement, area: CGFloat)?
         for w in windows {
             guard let f = frame(w), f.contains(pointer) else { continue }
             let area = f.width * f.height
-            if best == nil || area < best!.area { best = (w, area) }
+            if best == nil || area > best!.area { best = (w, area) }
         }
         if let best { return (best.window, "ax-contain") }
         return (nil, "none")
