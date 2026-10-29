@@ -75,6 +75,13 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Dedicated per-cycle budget for the pointer-window priority walk. Taken out
     /// of `nodeBudget`, so seed + pwin + rotation never exceed 600 nodes any cycle.
     private static let pointerWindowBudget = 300
+    /// Depth bound for the pointer-window walk. Deep nested web/player trees
+    /// (YouTube controls sit below several AXGroup/WebArea levels) need more than
+    /// the rotation walk's 12-level frontier guard. Still bounded, and the node
+    /// budget + deadline dominate: this only widens the shape, not the cost.
+    private static let pointerWindowMaxDepth = 24
+    /// Default depth bound for the shared `walk` (rotation-style consumers).
+    private static let walkMaxDepth = 12
     /// A published target survives this long without being re-seen. Large Chromium
     /// trees need several slices to complete one pass, so this must exceed a pass
     /// (typically <2 s at 600 nodes/150 ms). Trade-off: a control that truly
@@ -333,10 +340,12 @@ final class AccessibilityResolver: @unchecked Sendable {
         let pwin: AXUIElement? = windowUnderPointer(windows: windows, pointer: pointer, ownerPid: pid)
         let keysBeforePwin = Set(out.map { $0.key })
         var pwinSpent = 0
+        var pwinStats = WalkStats()
         if let pwin {
             var pwinBudget = min(Self.pointerWindowBudget, budget)
             walk(pwin, depth: 0, out: &out, budget: &pwinBudget, deadline: deadline,
-                 screenUnion: screenUnion, appElement: appEl, pid: pid)
+                 screenUnion: screenUnion, appElement: appEl, pid: pid,
+                 maxDepth: Self.pointerWindowMaxDepth, stats: &pwinStats)
             pwinSpent = min(Self.pointerWindowBudget, budget) - pwinBudget
             budget -= pwinSpent   // total work stays inside the shared node budget
         }
@@ -406,11 +415,12 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d rotationSkipped=%d",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d rotationSkipped=%d",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
-                   pwinTargets, pwinSpent, rotationSkipped ? 1 : 0))
+                   pwinTargets, pwinSpent, pwinStats.maxDepth,
+                   pwinStats.depthCapped ? 1 : 0, rotationSkipped ? 1 : 0))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
@@ -694,14 +704,29 @@ final class AccessibilityResolver: @unchecked Sendable {
         return true
     }
 
+    /// Depth/budget statistics for one walk invocation (depth-limited diagnostics).
+    private struct WalkStats {
+        var maxDepth = 0
+        var depthCapped = false
+    }
+
+    /// Depth-first walk used by the pointer-window priority pass. `maxDepth` is a
+    /// parameter so the pointer window can be explored deeper than the global
+    /// rotation walk (which stays at its own 12-level frontier guard).
     private func walk(_ el: AXUIElement, depth: Int, out: inout [CachedTarget], budget: inout Int,
-                      deadline: CFTimeInterval, screenUnion: CGRect, appElement: AXUIElement, pid: pid_t) {
-        guard budget > 0, depth <= 12 else { return }
+                      deadline: CFTimeInterval, screenUnion: CGRect, appElement: AXUIElement, pid: pid_t,
+                      maxDepth: Int = AccessibilityResolver.walkMaxDepth, stats: inout WalkStats) {
+        guard budget > 0 else { return }
+        guard depth <= maxDepth else {
+            stats.depthCapped = true
+            return
+        }
         guard CACurrentMediaTime() < deadline else {
             truncatedByDeadline = true
             return
         }
         budget -= 1
+        stats.maxDepth = max(stats.maxDepth, depth)
 
         collect(el, out: &out, screenUnion: screenUnion)
 
@@ -716,7 +741,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         if let raw = attr(el, kAXChildrenAttribute), let kids = axArray(raw) {
             for k in kids {
                 walk(k, depth: depth + 1, out: &out, budget: &budget, deadline: deadline,
-                     screenUnion: screenUnion, appElement: appElement, pid: pid)
+                     screenUnion: screenUnion, appElement: appElement, pid: pid,
+                     maxDepth: maxDepth, stats: &stats)
             }
         }
     }
