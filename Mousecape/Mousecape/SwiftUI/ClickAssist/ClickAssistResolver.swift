@@ -423,7 +423,14 @@ final class AccessibilityResolver: @unchecked Sendable {
         // that hover produce no targets (observed: app="OpenCode" logged while the
         // pointer sat over a browser window). Chain: window-server owner pid ->
         // frontmost app -> (self pid) non-routable self pass-through below.
-        let rawPointerPid = pointerWindowOwnerPid(pointer)
+        // POINTER OWNERSHIP FOLLOWS REAL CLICK ROUTING. A system-wide AX hit test
+        // identifies the element a click would actually reach, skipping
+        // click-through full-screen overlays (capture/screenshot HUDs) that the
+        // CG z-order reports above the real window. Only on failure/timeout do we
+        // fall back to the historical CG-order selection.
+        let pointerOwner = pointerOwnerPid(pointer)
+        let rawPointerPid = pointerOwner.pid
+        let pidSrc = pointerOwner.source
         let pointerPid: pid_t? = (rawPointerPid != nil && rawPointerPid != getpid()) ? rawPointerPid : nil
         let candidate = pointerPid ?? frontPid
         // Frontmost-app changes are real user intent: switch immediately, exactly
@@ -640,7 +647,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d deduped=%d pwinMode=%@",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d deduped=%d pwinMode=%@ pidSrc=%@",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -651,7 +658,8 @@ final class AccessibilityResolver: @unchecked Sendable {
                    pwinStats.guidedFallback ? 1 : 0,
                    (pwinStats.guidedFallbackReason ?? "-") as NSString,
                    rotationSkipped ? 1 : 0, rowTooLarge,
-                   tileTooSmall, tileTooLarge, dedupedCount, pwinMode as NSString))
+                   tileTooSmall, tileTooLarge, dedupedCount, pwinMode as NSString,
+                   pidSrc as NSString))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
@@ -780,6 +788,33 @@ final class AccessibilityResolver: @unchecked Sendable {
     ///     bundle id, and must have a reachable AX application element.
     /// Self windows at layer 0 are accepted here and caught by the self-RPC guard
     /// in `refresh`, preserving the existing non-routable pass-through behaviour.
+    /// Pointer ownership = real click routing. A system-wide AX hit test returns
+    /// the element a click would actually reach, which follows the visible/clickable
+    /// window rather than CG z-order — click-through capture overlays (Cua Driver,
+    /// cua-spacesd, screenshot/recording HUDs) are invisible to it. Falls back to
+    /// the historical CG-order scan only when the hit test fails or times out.
+    private func pointerOwnerPid(_ pointer: CGPoint) -> (pid: pid_t?, source: String) {
+        if let hit = systemWideHitPid(pointer), hit > 0, hit != getpid() {
+            return (hit, "ax-hit")
+        }
+        return (pointerWindowOwnerPid(pointer), "cg-fallback")
+    }
+
+    /// `AXUIElementCopyElementAtPosition` on the SYSTEM-WIDE element: the same
+    /// routing a real click takes. 100 ms messaging timeout keeps the fast path
+    /// inside the 250 ms resolver deadline (typically single-digit ms).
+    private func systemWideHitPid(_ pointer: CGPoint) -> pid_t? {
+        let sysWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(sysWide, 0.1)
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(sysWide, Float(pointer.x), Float(pointer.y),
+                                               &element) == .success,
+              let element else { return nil }
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return nil }
+        return pid
+    }
+
     private func pointerWindowOwnerPid(_ pointer: CGPoint) -> pid_t? {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                     kCGNullWindowID) as? [[String: Any]] else {
