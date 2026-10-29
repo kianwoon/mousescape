@@ -86,6 +86,32 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// snapshot cannot erase the union before the next walk re-merges it.
     private var unionTargets: [CachedTarget] = []
     private var unionPid: pid_t = 0
+    /// Per-pid stash of the union/rotation state. A LEGITIMATE pid switch parks the
+    /// outgoing app's resolvable state here; flipping back restores it instead of
+    /// rebuilding through 2-3 empty walk cycles. Transient window-boundary pid
+    /// flips never reach this (pointer hysteresis below), so a stash hit means the
+    /// user genuinely returned to a previously resolved app.
+    private struct UnionStash {
+        var targets: [CachedTarget]
+        var lastSeen: [String: CFTimeInterval]
+        var frontier: [(element: AXUIElement, depth: Int)]
+        var frontierHead: Int
+        var sliceIndex: Int
+        var coverageKeys: Set<String>
+        var lastUsed: CFTimeInterval
+    }
+    private var unionStashes: [pid_t: UnionStash] = [:]
+    /// Bounded LRU so a long session cannot accumulate stale snapshots.
+    private static let maxUnionStashes = 4
+    /// Pointer-window pid hysteresis. A NEW pointer-window pid must be observed on
+    /// this many consecutive refresh cycles before it may trigger a switch (union
+    /// swap + app-switch-polled). Overlapping-window boundaries flip the reported
+    /// owner between two apps every cycle; 2 consecutive samples filters that out.
+    /// Frontmost-app-driven changes are unaffected (they switch immediately).
+    private var pointerPidLatched: pid_t = 0
+    private var pendingPointerPid: pid_t = 0
+    private var pendingPointerPidCount = 0
+    private static let pointerPidHysteresisCycles = 2
     /// Set when a walk bails out because the 0.25 s deadline passed. Reset per
     /// refresh; drives both `partial` and the published `trunc=` reason.
     private var truncatedByDeadline = false
@@ -234,7 +260,12 @@ final class AccessibilityResolver: @unchecked Sendable {
         publishInvalid(reason: prefixStale ? "stale:\(reason)" : reason, pointer: currentPointer())
         // Rotation state is invalid after any invalidation (window move/destroy,
         // app/space switch): the persisted frontier would point at stale geometry.
-        queue.async { [weak self] in self?.resetRotation() }
+        // Hard discontinuity: stashed geometry for EVERY pid is stale too, so drop
+        // the stashes with the frontier rather than resurrect old targets later.
+        queue.async { [weak self] in
+            self?.resetRotation()
+            self?.unionStashes.removeAll()
+        }
         queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.refresh(lastPointer: .zero)
         }
@@ -271,6 +302,35 @@ final class AccessibilityResolver: @unchecked Sendable {
         frontierHead = 0
         sliceIndex = 0
         coverageKeys.removeAll()
+    }
+
+    /// Park the ACTIVE union + rotation frontier under its pid (bounded LRU).
+    /// Resolver-queue only. Evicts the least-recently-used pid past the cap.
+    private func stashUnion(pid: pid_t, log: (String) -> Void) {
+        unionStashes[pid] = UnionStash(targets: unionTargets, lastSeen: lastSeen,
+                                       frontier: frontier, frontierHead: frontierHead,
+                                       sliceIndex: sliceIndex, coverageKeys: coverageKeys,
+                                       lastUsed: CACurrentMediaTime())
+        while unionStashes.count > Self.maxUnionStashes {
+            guard let victim = unionStashes.min(by: { $0.value.lastUsed < $1.value.lastUsed })?.key else { break }
+            unionStashes.removeValue(forKey: victim)
+            log("RESOLVER_EVENT app-switch-stash pid=\(victim) action=evict stashes=\(unionStashes.count)")
+        }
+        log("RESOLVER_EVENT app-switch-stash pid=\(pid) action=store targets=\(unionTargets.count) frontier=\(frontier.count) stashes=\(unionStashes.count)")
+    }
+
+    /// Restore a stashed union/rotation state in place. One-shot: a restored stash
+    /// is consumed and re-created on the next departure. Returns false on miss
+    /// (caller rebuilds from scratch). Resolver-queue only.
+    private func restoreUnion(pid: pid_t) -> Bool {
+        guard let stash = unionStashes.removeValue(forKey: pid) else { return false }
+        unionTargets = stash.targets
+        lastSeen = stash.lastSeen
+        frontier = stash.frontier
+        frontierHead = stash.frontierHead
+        sliceIndex = stash.sliceIndex
+        coverageKeys = stash.coverageKeys
+        return true
     }
 
     /// Timer beat. Cheap on every tick; the expensive walk only runs when due.
@@ -361,7 +421,49 @@ final class AccessibilityResolver: @unchecked Sendable {
         // that hover produce no targets (observed: app="OpenCode" logged while the
         // pointer sat over a browser window). Chain: window-server owner pid ->
         // frontmost app -> (self pid) non-routable self pass-through below.
-        let pointerPid = pointerWindowOwnerPid(pointer)
+        let rawPointerPid = pointerWindowOwnerPid(pointer)
+        // HYSTERESIS: only a pointer-window pid seen on 2 consecutive cycles may
+        // retarget the resolver. While a new pid is still accumulating samples the
+        // latched pid stays active, so an overlapping-window boundary (reported
+        // owner alternating per cycle) never resets the union. Frontmost-only
+        // resolution (no accepted pointer-window pid) is untouched.
+        let pointerPid: pid_t?
+        if let raw = rawPointerPid, raw != getpid() {
+            if raw == pointerPidLatched {
+                pendingPointerPid = 0
+                pendingPointerPidCount = 0
+                pointerPid = raw
+            } else if pointerPidLatched == 0 {
+                // First acquisition: nothing cached to protect, adopt immediately.
+                pointerPidLatched = raw
+                pendingPointerPid = 0
+                pendingPointerPidCount = 0
+                pointerPid = raw
+            } else if raw == pendingPointerPid {
+                pendingPointerPidCount += 1
+                if pendingPointerPidCount >= Self.pointerPidHysteresisCycles {
+                    pointerPidLatched = raw
+                    pendingPointerPid = 0
+                    pendingPointerPidCount = 0
+                    pointerPid = raw
+                } else {
+                    pointerPid = (pointerPidLatched != 0) ? pointerPidLatched : nil
+                }
+            } else {
+                pendingPointerPid = raw
+                pendingPointerPidCount = 1
+                pointerPid = (pointerPidLatched != 0) ? pointerPidLatched : nil
+            }
+        } else {
+            pendingPointerPid = 0
+            pendingPointerPidCount = 0
+            pointerPid = nil
+        }
+        if let raw = rawPointerPid, raw != getpid(), raw != pointerPidLatched,
+           let held = pointerPid, held != raw {
+            // Evidence for acceptance gate (a): the flip was suppressed this cycle.
+            log("RESOLVER_EVENT app-switch-held held=\(held) pending=\(raw) hysteresisCount=\(pendingPointerPidCount)")
+        }
         let pid: pid_t
         if let pointerPid, pointerPid != getpid() {
             pid = pointerPid
@@ -388,7 +490,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         // This now also covers pointer-driven target changes (hovering another app's
         // window), so the union/rotation reset path is identical for both causes.
         if lastResolvedPid != 0, pid != lastResolvedPid {
-            log("RESOLVER_EVENT app-switch-polled prev=\(lastResolvedPid) new=\(pid) front=\(frontPid) pointerWindow=\(pointerPid.map { String($0) } ?? "-")")
+            log("RESOLVER_EVENT app-switch-polled prev=\(lastResolvedPid) new=\(pid) front=\(frontPid) pointerWindow=\(pointerPid.map { String($0) } ?? "-") hysteresisCount=\(Self.pointerPidHysteresisCycles)")
             // Activation/pointer-pid churn moves no rects: keep the prior snapshot
             // routable and let this same refresh publish the re-targeted union.
             softInvalidate(reason: "app-switch")
@@ -416,13 +518,24 @@ final class AccessibilityResolver: @unchecked Sendable {
         tileTooLarge = 0
         dedupedCount = 0
 
-        // Reset union + rotation when the frontmost app changes: never carry one
-        // app's targets, keys or frontier into another app's snapshot.
+        // Per-pid union swap. This is now reached only on a LEGITIMATE switch
+        // (pointer hysteresis filters boundary flips, frontmost changes are real).
+        // Park the outgoing app's state and restore the incoming app's stash, so a
+        // user flipping A -> B -> A never pays 2-3 empty rebuild cycles for A.
+        // Sets are never mixed across pids: exactly one app's union is active.
         if unionPid != pid {
-            lastSeen.removeAll()
-            unionTargets.removeAll()
-            resetRotation()
+            let outgoing = unionPid
+            if outgoing != 0 {
+                stashUnion(pid: outgoing, log: log)
+            }
+            let restored = restoreUnion(pid: pid)
+            if !restored {
+                lastSeen.removeAll()
+                unionTargets.removeAll()
+                resetRotation()
+            }
             unionPid = pid
+            log("RESOLVER_EVENT app-switch-union prev=\(outgoing) new=\(pid) stash=\(restored ? "hit" : "miss") stashes=\(unionStashes.count)")
         }
 
         let windows: [AXUIElement] = attr(appEl, kAXWindowsAttribute).flatMap(axArray) ?? []
