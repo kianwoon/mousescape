@@ -206,15 +206,15 @@ enum DecisionCore {
     static func displayCandidates(point: CGPoint, candidates: [Candidate],
                                   tolerance: CGFloat, limit: Int = 3) -> [ScoredCandidate] {
         var firstClass: [ScoredCandidate] = []
-        var secondClass: [ScoredCandidate] = []
-        for c in candidates {
+        for c in candidates where c.tier == .firstClass {
             let d = boundaryDistance(point, c.rect)
             guard d <= tolerance else { continue }
-            let scored = ScoredCandidate(candidate: c, dist: d)
-            if c.tier == .firstClass { firstClass.append(scored) }
-            else { secondClass.append(scored) }
+            firstClass.append(ScoredCandidate(candidate: c, dist: d))
         }
-        let pool = firstClass.isEmpty ? secondClass : firstClass
+        // Indication is for real controls only: a second-class tile/container is
+        // never a target (the old overlay behaviour), so empty strip space stays
+        // silent even when Chromium exposes a strip-sized AXGroup there.
+        let pool = firstClass
         // A container masquerading as a control (Brave exposes the whole tab
         // strip as an AXTab-sized element) contains several real controls. It is
         // never a target on its own: drop any candidate that encloses 2+ others.
