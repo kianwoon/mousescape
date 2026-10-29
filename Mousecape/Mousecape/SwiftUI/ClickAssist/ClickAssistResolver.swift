@@ -4,8 +4,9 @@ import ApplicationServices
 import CoreGraphics
 
 /// Accessibility-driven candidate resolver. Runs entirely OFF the tap callback:
-/// a serial background queue walks the frontmost app's AX tree, converts frames (AX
-/// global space == CGEvent global space, top-left origin), and publishes an immutable
+/// a serial background queue walks the AX tree of the app owning the window under
+/// the POINTER (falling back to the frontmost app), converts frames (AX global
+/// space == CGEvent global space, top-left origin), and publishes an immutable
 /// snapshot into CacheStore. The tap only ever reads that snapshot.
 ///
 /// Refresh triggers (throttled):
@@ -14,12 +15,26 @@ import CoreGraphics
 ///  * app activation / deactivation (NSWorkspace, NSApplication)
 /// Any of those publishes an INVALID snapshot first (fail-open) and then refreshes.
 final class AccessibilityResolver: @unchecked Sendable {
-    /// Roles that accept a click as a meaningful action.
+    /// Roles that accept a click as a meaningful action. This is the SINGLE
+    /// collection-time filter: the router and the overlay both read the published
+    /// snapshot, so anything excluded here can never be routed or highlighted.
+    /// Deliberately excluded: AXStaticText, AXGroup, AXScrollArea, AXWebArea,
+    /// AXImage, AXRow/AXCell/AXOutline and every other container — a click on those
+    /// is not a control activation, and highlighting them made the indicator noisy
+    /// (observed: a 1296x67 text-line element highlighted in direct-hit mode).
     private static let eligibleRoles: Set<String> = [
-        "AXButton", "AXLink", "AXCheckBox", "AXMenuItem", "AXPopUpButton",
-        "AXRadioButton", "AXMenuBarItem",
-        // P3 gesture-surface controls
-        "AXSlider", "AXScrollBar", "AXTextField", "AXTextArea"
+        // Buttons / links
+        "AXButton", "AXMenuButton", "AXLink",
+        // Toggles
+        "AXCheckBox", "AXRadioButton",
+        // Menus
+        "AXMenuItem", "AXMenuBarItem",
+        // Selection / tabs
+        "AXPopUpButton", "AXComboBox", "AXTab", "AXSegmentedControl",
+        // Value controls
+        "AXSlider", "AXDisclosureTriangle",
+        // Editable text (secure fields are still rejected below)
+        "AXTextField", "AXSearchField"
     ]
 
     private let cache: CacheStore
@@ -188,8 +203,24 @@ final class AccessibilityResolver: @unchecked Sendable {
             publishUnreachable(reason: "unavailable:no-frontmost-app", t0: t0)
             return
         }
-        let pid = front.processIdentifier
-        let appName = front.localizedName ?? front.bundleIdentifier ?? "pid:\(pid)"
+        let frontPid = front.processIdentifier
+        let pointer = currentPointer()
+
+        // TARGET THE WINDOW UNDER THE POINTER, not the frontmost app. The user can
+        // hover a visible window of a background app; resolving frontmost-only made
+        // that hover produce no targets (observed: app="OpenCode" logged while the
+        // pointer sat over a browser window). Chain: window-server owner pid ->
+        // frontmost app -> (self pid) non-routable self pass-through below.
+        let pointerPid = pointerWindowOwnerPid(pointer)
+        let pid: pid_t
+        if let pointerPid, pointerPid != getpid() {
+            pid = pointerPid
+        } else {
+            pid = frontPid
+        }
+        let targetApp = NSRunningApplication(processIdentifier: pid)
+        let appName = targetApp?.localizedName ?? targetApp?.bundleIdentifier
+            ?? front.localizedName ?? front.bundleIdentifier ?? "pid:\(pid)"
 
         // Structural self-RPC guard: a query to our own process must be serviced by
         // our own main thread, which can be inside AX notification handling. Never
@@ -202,8 +233,10 @@ final class AccessibilityResolver: @unchecked Sendable {
 
         // Poll-based switch detection: NSWorkspace activation notifications are not
         // reliably delivered on all OS versions; the 150 ms timer is authoritative.
+        // This now also covers pointer-driven target changes (hovering another app's
+        // window), so the union/rotation reset path is identical for both causes.
         if lastResolvedPid != 0, pid != lastResolvedPid {
-            log("RESOLVER_EVENT app-switch-polled prev=\(lastResolvedPid) new=\(pid)")
+            log("RESOLVER_EVENT app-switch-polled prev=\(lastResolvedPid) new=\(pid) front=\(frontPid) pointerWindow=\(pointerPid.map { String($0) } ?? "-")")
             invalidate(reason: "app-switch")
         }
         lastResolvedPid = pid
@@ -217,7 +250,6 @@ final class AccessibilityResolver: @unchecked Sendable {
         let deadline = t0 + 0.25
         truncatedByDeadline = false
         let screenUnion = Self.screenUnionAX()
-        let pointer = currentPointer()
 
         // Reset union + rotation when the frontmost app changes: never carry one
         // app's targets, keys or frontier into another app's snapshot.
@@ -396,6 +428,32 @@ final class AccessibilityResolver: @unchecked Sendable {
             frontierHead = 0
         }
         return sliceId
+    }
+
+    /// Owning pid of the topmost on-screen window containing `pointer`, in
+    /// front-to-back window-server order (the same order the user perceives).
+    /// Our own overlay panel is skipped: it is a click-through drawing surface
+    /// that follows the highlight, so treating it as the hovered window would
+    /// make every hover resolve to self. Self windows at normal layer are kept so
+    /// the self-RPC guard below still fires when the pointer is over our own GUI.
+    private func pointerWindowOwnerPid(_ pointer: CGPoint) -> pid_t? {
+        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        let selfPid = getpid()
+        for entry in list {
+            guard let bounds = entry[kCGWindowBounds as String] as? [String: Any] else { continue }
+            var rect = CGRect.zero
+            guard CGRectMakeWithDictionaryRepresentation(bounds as CFDictionary, &rect),
+                  rect.width > 0, rect.height > 0, rect.contains(pointer) else { continue }
+            guard let pidNum = entry[kCGWindowOwnerPID as String] as? NSNumber else { continue }
+            let owner = pid_t(truncating: pidNum)
+            let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+            if owner == selfPid, layer != 0 { continue }   // our overlay panel
+            return owner
+        }
+        return nil
     }
 
     /// Window-server fallback for apps whose web content refuses AX hit-testing:
