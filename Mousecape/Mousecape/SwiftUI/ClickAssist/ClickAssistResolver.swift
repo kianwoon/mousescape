@@ -49,6 +49,19 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// 120 000 pt² (≈ 600 × 200): admits a wide list row at full row height while
     /// rejecting page/sidebar containers (a 1200 × 800 cell is 960 000 pt²).
     private static let rowMaxArea: CGFloat = 120_000
+    /// Tile-like containers: thumbnails/tiles are exposed as AXImage and AXGroup in
+    /// web galleries. They are admitted only inside a tile envelope — each side at
+    /// least `tileMinDimension` and area at most `tileMaxArea` — so page-sized
+    /// AXGroup containers (1466×944, 1664×1526) stay rejected.
+    private static let tileLikeRoles: Set<String> = ["AXImage", "AXGroup"]
+    /// 30 pt: below this a tile is an icon/decoration, not a clickable thumbnail.
+    private static let tileMinDimension: CGFloat = 30
+    /// 120 000 pt² (≈ 346 × 346): same spirit as the row guard; a 204×290 thumbnail
+    /// (59 160) passes, a 1466×944 container (1 383 904) does not.
+    private static let tileMaxArea: CGFloat = 120_000
+    /// Two candidates whose frames overlap this completely are the SAME control
+    /// exposed twice (e.g. AXImage + its AXGroup wrapper); the smaller area wins.
+    private static let duplicateIoUThreshold: CGFloat = 0.85
 
     private let cache: CacheStore
     private let log: (String) -> Void
@@ -148,6 +161,12 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Diagnostics only: row-like elements (AXCell/AXRow/AXListItem) rejected by the
     /// row-size guard this cycle. Reset per refresh; published as `rowTooLarge=`.
     private var rowTooLarge = 0
+    /// Diagnostics only: tile-like elements (AXImage/AXGroup) rejected by the tile
+    /// envelope (too small / too large) and near-identical duplicates merged, per
+    /// cycle. Reset per refresh; published as `tileTooSmall=`/`tileTooLarge=`/`deduped=`.
+    private var tileTooSmall = 0
+    private var tileTooLarge = 0
+    private var dedupedCount = 0
 
     init(cache: CacheStore, log: @escaping (String) -> Void) {
         self.cache = cache
@@ -389,6 +408,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         rejectedNear.removeAll()
         rejectedScanned = 0
         rowTooLarge = 0
+        tileTooSmall = 0
+        tileTooLarge = 0
+        dedupedCount = 0
 
         // Reset union + rotation when the frontmost app changes: never carry one
         // app's targets, keys or frontier into another app's snapshot.
@@ -481,6 +503,12 @@ final class AccessibilityResolver: @unchecked Sendable {
         }
         lastSeen = lastSeen.filter { byKey[$0.key] != nil }
         out = order.compactMap { byKey[$0] }
+        // Collapse near-identical duplicates (AXImage + its AXGroup wrapper) BEFORE
+        // publication, so the ambiguity guard never sees the same control twice.
+        // Applies to the merged set; never drops a distinct neighbouring tile.
+        let dedupe = dedupeNearIdentical(out)
+        out = dedupe.kept
+        dedupedCount = dedupe.removed
         unionTargets = out
 
         let near = out.filter { Self.boundaryDistance(pointer, $0.rect) <= 80 }.count
@@ -492,7 +520,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d deduped=%d",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -502,7 +530,8 @@ final class AccessibilityResolver: @unchecked Sendable {
                    pwinStats.guidedSteps, pwinStats.guidedHits,
                    pwinStats.guidedFallback ? 1 : 0,
                    (pwinStats.guidedFallbackReason ?? "-") as NSString,
-                   rotationSkipped ? 1 : 0, rowTooLarge))
+                   rotationSkipped ? 1 : 0, rowTooLarge,
+                   tileTooSmall, tileTooLarge, dedupedCount))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
@@ -750,13 +779,55 @@ final class AccessibilityResolver: @unchecked Sendable {
         rejectedNear.append((role: role, label: label, rect: rect, dist: dist))
     }
 
+    /// Merge near-identical candidates: the same control is often exposed twice
+    /// (an AXImage and its tile-sized AXGroup wrapper with the same frame). Two
+    /// candidates whose IoU exceeds `duplicateIoUThreshold` are treated as one and
+    /// the SMALLER area is kept (the more specific element). Distinct neighbours
+    /// share at most a border, so their IoU stays far below the threshold.
+    ///
+    /// Deterministic: candidates are considered smallest-area first, ties broken by
+    /// key, so the survivor never depends on walk order. The returned array keeps
+    /// the original publication order of the surviving targets.
+    private func dedupeNearIdentical(_ targets: [CachedTarget]) -> (kept: [CachedTarget], removed: Int) {
+        guard targets.count > 1 else { return (targets, 0) }
+        let ordered = targets.indices.sorted { a, b in
+            let areaA = targets[a].rect.width * targets[a].rect.height
+            let areaB = targets[b].rect.width * targets[b].rect.height
+            if areaA != areaB { return areaA < areaB }
+            return targets[a].key < targets[b].key
+        }
+        var keepIndices: [Int] = []
+        var dropped = Set<Int>()
+        for i in ordered {
+            let rect = targets[i].rect
+            let duplicate = keepIndices.contains {
+                Self.intersectionOverUnion(rect, targets[$0].rect) > Self.duplicateIoUThreshold
+            }
+            if duplicate { dropped.insert(i) } else { keepIndices.append(i) }
+        }
+        guard !dropped.isEmpty else { return (targets, 0) }
+        let kept = targets.enumerated().filter { !dropped.contains($0.offset) }.map { $0.element }
+        return (kept, dropped.count)
+    }
+
+    /// IoU of two AX frames (0 when they do not intersect). Used only by dedupe.
+    private static func intersectionOverUnion(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let inter = a.intersection(b)
+        guard !inter.isNull, inter.width > 0, inter.height > 0 else { return 0 }
+        let interArea = inter.width * inter.height
+        let unionArea = a.width * a.height + b.width * b.height - interArea
+        guard unionArea > 0 else { return 0 }
+        return interArea / unionArea
+    }
+
     /// Extract one element as a candidate if its role/geometry qualifies.
     @discardableResult
     private func collect(_ el: AXUIElement, out: inout [CachedTarget],
                          screenUnion: CGRect) -> Bool {
         guard let role = stringAttr(el, kAXRoleAttribute) else { return false }
         let isRowLike = Self.rowLikeRoles.contains(role)
-        guard Self.eligibleRoles.contains(role) || isRowLike else {
+        let isTileLike = Self.tileLikeRoles.contains(role)
+        guard Self.eligibleRoles.contains(role) || isRowLike || isTileLike else {
             // Diagnostics only: remember near-pointer elements the role filter drops
             // (e.g. a <div> web button exposed as AXGroup). Bounded and per-cycle.
             noteRejectedNearPointer(el, role: role)
@@ -786,6 +857,22 @@ final class AccessibilityResolver: @unchecked Sendable {
             guard rect.height < Self.rowMaxHeight,
                   rect.width * rect.height < Self.rowMaxArea else {
                 rowTooLarge += 1
+                noteRejectedNearPointer(el, role: role)
+                return false
+            }
+        }
+        // Tile-like roles pass only inside the tile envelope: each side ≥ minimum
+        // (an icon/decoration below 30 pt is not a thumbnail) and area ≤ maximum
+        // (page containers such as 1466×944 stay out). Counted per reason.
+        if isTileLike {
+            guard rect.width >= Self.tileMinDimension,
+                  rect.height >= Self.tileMinDimension else {
+                tileTooSmall += 1
+                noteRejectedNearPointer(el, role: role)
+                return false
+            }
+            guard rect.width * rect.height <= Self.tileMaxArea else {
+                tileTooLarge += 1
                 noteRejectedNearPointer(el, role: role)
                 return false
             }
