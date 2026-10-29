@@ -12,14 +12,17 @@
 import Foundation
 import Synchronization
 
-/// Bounded per-user log file with one-step rotation.
+/// Bounded per-user log file with numbered multi-step rotation.
 private enum ClickAssistLogFile {
     /// Directory under the user's Library; created lazily on first append.
     static let directoryComponents = ["Library", "Logs", "Mousecape"]
     static let fileName = "ClickAssistAgent.log"
-    /// Rotate when the live file exceeds this size. One `.1` backup is kept, so
-    /// total disk use is bounded at ~2x this value.
-    static let maxBytes = 512 * 1024
+    /// Rotate when the live file exceeds this size. `backupCount` numbered
+    /// backups are kept (`.1` newest … `.3` oldest), so total disk use is
+    /// bounded at (backupCount + 1) × maxBytes = 8 MB.
+    static let maxBytes = 2 * 1024 * 1024
+    /// Number of rotated backups retained beyond the live file.
+    static let backupCount = 3
 
     static var url: URL {
         let base = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first
@@ -40,9 +43,18 @@ private enum ClickAssistLogFile {
             let attrs = try? fm.attributesOfItem(atPath: fileURL.path)
             let size = (attrs?[.size] as? NSNumber)?.intValue ?? 0
             if size > maxBytes {
-                let rotated = fileURL.deletingPathExtension().appendingPathExtension("1.log")
-                try? fm.removeItem(at: rotated)
-                try? fm.moveItem(at: fileURL, to: rotated)
+                // Shift oldest→newest so ordering survives: drop .N, then
+                // .(N-1) → .N … .1 → .2, and finally live → .1. Every step is
+                // `try?` so a partial failure never crashes the agent.
+                let base = fileURL.deletingPathExtension()
+                func backup(_ i: Int) -> URL { base.appendingPathExtension("\(i).log") }
+                try? fm.removeItem(at: backup(backupCount))
+                var i = backupCount - 1
+                while i >= 1 {
+                    try? fm.moveItem(at: backup(i), to: backup(i + 1))
+                    i -= 1
+                }
+                try? fm.moveItem(at: fileURL, to: backup(1))
             }
             if !fm.fileExists(atPath: fileURL.path) {
                 fm.createFile(atPath: fileURL.path, contents: nil)
