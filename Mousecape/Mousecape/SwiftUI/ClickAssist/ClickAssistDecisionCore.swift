@@ -21,18 +21,54 @@ enum DecisionCore {
         case secondClass
     }
 
+    /// How a redirected point is derived from the target rect.
+    /// - `center`: the bullseye for position-AGNOSTIC controls — the click
+    ///   ACTIVATES the control wherever it lands, so the safest interior point
+    ///   is the rect center (a corner landing can miss the hit area entirely;
+    ///   observed: Brave tab close X, 28×28 AXButton, click landed 2.8 pt in).
+    /// - `edge`: the minimal-delta clamp for position-SENSITIVE controls whose
+    ///   click POINT is the intent (slider thumbs, scrollbars, value
+    ///   indicators) and for second-class rows/tiles (a row may be a text
+    ///   field or list row where the clicked offset matters). Centering those
+    ///   would silently jump the value/selection, so keep the smallest move
+    ///   that lands inside the rect.
+    enum Snap: String, Sendable {
+        case center
+        case edge
+    }
+
+    /// Roles whose click POINT carries meaning. These are first-class controls
+    /// that must NOT be center-snapped. Scrollbar-ish roles are listed here even
+    /// though the resolver's role filter currently excludes them as containers —
+    /// the semantics belong with the routing math, not the filter.
+    static let positionSensitiveRoles: Set<String> = [
+        "AXSlider", "AXScrollBar", "AXValueIndicator"
+    ]
+
     struct Candidate {
         let key: String
         let rect: CGRect
         let inset: CGFloat
         let tier: Tier
+        /// AX role, needed for the snap-mode decision. Empty for the P0 static
+        /// harness, which keeps first-class center snapping.
+        let role: String
+
+        init(key: String, rect: CGRect, inset: CGFloat, tier: Tier, role: String = "") {
+            self.key = key
+            self.rect = rect
+            self.inset = inset
+            self.tier = tier
+            self.role = role
+        }
     }
 
     enum Decision {
         case directHit(candidate: Candidate, others: [(key: String, dist: CGFloat)])
         case noCandidate
         case ambiguous(scored: [(candidate: Candidate, dist: CGFloat)], tie: CGFloat)
-        case redirect(candidate: Candidate, corrected: CGPoint, boundaryDist: CGFloat)
+        case redirect(candidate: Candidate, corrected: CGPoint, boundaryDist: CGFloat,
+                      snap: Snap)
     }
 
     static func route(point: CGPoint, candidates: [Candidate], tolerance: CGFloat,
@@ -91,9 +127,30 @@ enum DecisionCore {
         if scored.count >= 2, scored[1].1 - best.1 <= tieEpsilon {
             return .ambiguous(scored: scored, tie: scored[1].1 - best.1)
         }
-        return .redirect(candidate: best.0,
-                         corrected: clampPoint(point, into: best.0.rect, inset: best.0.inset),
-                         boundaryDist: best.1)
+        let snap = snapMode(for: best.0)
+        let corrected = snap == .center
+            ? centerPoint(into: best.0.rect)
+            : clampPoint(point, into: best.0.rect, inset: best.0.inset)
+        return .redirect(candidate: best.0, corrected: corrected,
+                         boundaryDist: best.1, snap: snap)
+    }
+
+    /// Center-snap only first-class, position-agnostic controls. Second-class
+    /// rows/tiles and the position-sensitive roles keep the edge clamp.
+    static func snapMode(for candidate: Candidate) -> Snap {
+        guard candidate.tier == .firstClass,
+              !positionSensitiveRoles.contains(candidate.role) else { return .edge }
+        return .center
+    }
+
+    /// Bullseye of a rect, inset by max(2 pt, 10% of the smaller side) so a
+    /// sub-10 pt control still lands safely interior rather than on an edge.
+    /// (A symmetric inset does not move the midpoint; it documents the safety
+    /// margin the redirect guarantees.)
+    static func centerPoint(into rect: CGRect) -> CGPoint {
+        let inset = max(2, min(rect.width, rect.height) * 0.1)
+        let r = rect.insetBy(dx: inset, dy: inset)
+        return CGPoint(x: r.midX, y: r.midY)
     }
 
     static func clampPoint(_ p: CGPoint, into rect: CGRect, inset: CGFloat) -> CGPoint {

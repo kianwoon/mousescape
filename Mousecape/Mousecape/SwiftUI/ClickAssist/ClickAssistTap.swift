@@ -28,7 +28,7 @@ enum TargetSource: Sendable {
 final class AssistTap: @unchecked Sendable {
     private(set) var tap: CFMachPort?
     private var source: CFRunLoopSource?
-    private var latched: (delta: CGVector, target: String)?
+    private var latched: (delta: CGVector, target: String, snap: DecisionCore.Snap)?
     /// Set while the tap is intentionally disabled (P3 interruption gate): the system
     /// delivers tapDisabledByUserInput for a manual CGEvent.tapEnable(false), which
     /// must NOT auto-re-enable.
@@ -151,7 +151,8 @@ final class AssistTap: @unchecked Sendable {
             let fresh = s.valid && ageMs <= DecisionCore.cacheMaxAge * 1000
             let reason = s.valid ? (fresh ? "fresh" : String(format: "stale:age(%.0fms)", ageMs)) : s.reason
             return Resolution(candidates: s.targets.map { Candidate(key: $0.key, rect: $0.rect,
-                                                                     inset: $0.inset, tier: $0.tier) },
+                                                                     inset: $0.inset, tier: $0.tier,
+                                                                     role: $0.role) },
                               valid: fresh, reason: reason, generation: s.generation,
                               ageMs: ageMs, source: "cache")
         }
@@ -233,13 +234,13 @@ final class AssistTap: @unchecked Sendable {
                      reason: "ambiguous", res: res, started: started,
                      extra: "cands=[\(listed)] tie=\(String(format: "%.1f", tie)) tol=\(tolerance)")
                 return Unmanaged.passUnretained(event)
-            case .redirect(let best, let corrected, let dist):
+            case .redirect(let best, let corrected, let dist, let snap):
                 let delta = CGVector(dx: corrected.x - original.x, dy: corrected.y - original.y)
                 event.location = corrected
-                latched = (delta, best.key)
+                latched = (delta, best.key, snap)
                 emit("MUTATE", type: label, original: original, mutated: corrected,
                      reason: "redirect", res: res, started: started,
-                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", dist)) target=\(best.key) mode=return-modified-event")
+                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue)")
                 return Unmanaged.passUnretained(event)
             }
         }
@@ -250,7 +251,7 @@ final class AssistTap: @unchecked Sendable {
             event.location = corrected
             emit("MUTATE", type: label, original: original, mutated: corrected,
                  reason: "redirect", res: res, started: started,
-                 extra: "delta=\(ScreenSpace.fmt(l.delta)) gesture=latched-constant target=\(l.target) mode=return-modified-event")
+                 extra: "delta=\(ScreenSpace.fmt(l.delta)) gesture=latched-constant target=\(l.target) mode=return-modified-event snap=\(l.snap.rawValue)")
             if isUp { latched = nil }
             return Unmanaged.passUnretained(event)
         }

@@ -162,9 +162,10 @@ final class TargetingOverlay {
         var mode = "redirect"
         if fresh {
             let cands = s.targets.map { DecisionCore.Candidate(key: $0.key, rect: $0.rect,
-                                                               inset: $0.inset, tier: $0.tier) }
+                                                               inset: $0.inset, tier: $0.tier,
+                                                               role: $0.role) }
             switch DecisionCore.route(point: pointer, candidates: cands, tolerance: tolerance) {
-            case .redirect(let c, _, _):
+            case .redirect(let c, _, _, _):
                 action = "show"; targetKey = c.key; frame = c.rect; reason = "redirect"
             case .directHit(let c, _):
                 if c.tier == .secondClass {
