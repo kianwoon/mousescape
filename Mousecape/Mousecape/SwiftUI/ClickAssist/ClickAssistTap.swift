@@ -176,6 +176,7 @@ final class AssistTap: @unchecked Sendable {
             .map { $0.rect }
         return legitimacy.validate(pid: res.pid, generation: res.generation,
                                    key: candidate.key, candidate: candidate.rect,
+                                   candidateRole: candidate.role,
                                    destination: destination, siblings: siblings)
     }
 

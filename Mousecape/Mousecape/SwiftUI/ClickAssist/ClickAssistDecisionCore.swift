@@ -317,6 +317,13 @@ final class LegitimacyPolicy: @unchecked Sendable {
     private static let ttl: CFTimeInterval = 0.5
     private let lock = NSLock()
 
+    /// Roles that ARE an actionable control on their own. Only these may be
+    /// confirmed by sitting inside an answered surface (see evaluate step 3).
+    private static let directControlRoles: Set<String> = [
+        "AXButton", "AXCheckBox", "AXRadioButton", "AXSlider", "AXPopUpButton",
+        "AXMenuButton", "AXLink", "AXComboBox", "AXSearchField", "AXIncrementor"
+    ]
+
     /// Approximate frame equality used for "the renderer answered with this exact
     /// control surface" (Brave's tab group vs the tab's AXRadioButton).
     private static func sameFrame(_ a: CGRect, _ b: CGRect, eps: CGFloat = 1) -> Bool {
@@ -340,7 +347,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
     /// Validate `candidate` at `destination` for app `pid`. `siblings` are the
     /// first-class candidate frames in the same snapshot (identity proxy).
     func validate(pid: pid_t, generation: UInt64, key: String,
-                  candidate: CGRect, destination: CGPoint,
+                  candidate: CGRect, candidateRole: String, destination: CGPoint,
                   siblings: [CGRect]) -> Verdict {
         let now = CACurrentMediaTime()
         let cacheKey = "\(pid)|\(key)|\(Int(destination.x.rounded()))|\(Int(destination.y.rounded()))"
@@ -356,6 +363,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
         lock.unlock()
 
         let verdict = Self.evaluate(pid: pid, candidate: candidate,
+                                    candidateRole: candidateRole,
                                     destination: destination, siblings: siblings)
         lock.lock()
         cache[cacheKey] = Entry(verdict: verdict, generation: generation, stamp: now)
@@ -363,7 +371,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
         return verdict
     }
 
-    private static func evaluate(pid: pid_t, candidate: CGRect,
+    private static func evaluate(pid: pid_t, candidate: CGRect, candidateRole: String,
                                  destination: CGPoint, siblings: [CGRect]) -> Verdict {
         guard pid > 0, pid != getpid() else { return .unknown }
         let app = AXUIElementCreateApplication(pid)
@@ -385,6 +393,12 @@ final class LegitimacyPolicy: @unchecked Sendable {
         if sameFrame(candidate, hitFrame) { return .confirmed }
         if hitFrame.contains(candidate),
            siblings.contains(where: { sameFrame($0, hitFrame) }) { return .confirmed }
+        // 3. The renderer answered a surface that CONTAINS a real control placed
+        //    inside it (Chromium answers web video players with the player group
+        //    for their seek bar). Only direct-control roles qualify — a generic
+        //    container or anonymous group can never be confirmed this way.
+        if hitFrame.contains(candidate),
+           Self.directControlRoles.contains(candidateRole) { return .confirmed }
         return .mismatch
     }
 

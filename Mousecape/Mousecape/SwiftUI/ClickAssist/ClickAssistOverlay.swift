@@ -196,7 +196,8 @@ final class TargetingOverlay {
                                               inset: choice.candidate.inset)
                 let verdict = legitimacy?.validate(
                     pid: s.pid, generation: s.generation, key: choice.candidate.key,
-                    candidate: choice.candidate.rect, destination: dest,
+                    candidate: choice.candidate.rect,
+                    candidateRole: choice.candidate.role, destination: dest,
                     siblings: cands.filter { $0.key != choice.candidate.key && $0.tier == .firstClass }
                                    .map { $0.rect }) ?? .confirmed
                 if verdict == .confirmed {
