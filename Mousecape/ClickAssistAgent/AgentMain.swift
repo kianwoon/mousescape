@@ -103,8 +103,13 @@ final class AgentStatusController: NSObject, NSMenuDelegate {
         statusItem.menu = menu
     }
 
-    func menuWillOpen(_ menu: NSMenu) {
-        refresh()
+    /// AppKit can deliver NSMenuDelegate callbacks OFF the main thread on the
+    /// accessibility-inspection path (`-[NSMenu _openForInspection:]` →
+    /// `_sendMenuOpeningNotification`), e.g. when VoiceOver/AX readers probe the
+    /// status item. A MainActor-isolated method would assert here
+    /// (`_checkExpectedExecutor` → EXC_BREAKPOINT). Stay nonisolated and hop.
+    nonisolated func menuWillOpen(_ menu: NSMenu) {
+        Task { @MainActor in self.refresh() }
     }
 
     private func refresh() {
