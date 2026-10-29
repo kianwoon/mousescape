@@ -19,9 +19,10 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// collection-time filter: the router and the overlay both read the published
     /// snapshot, so anything excluded here can never be routed or highlighted.
     /// Deliberately excluded: AXStaticText, AXGroup, AXScrollArea, AXWebArea,
-    /// AXImage, AXRow/AXCell/AXOutline and every other container — a click on those
-    /// is not a control activation, and highlighting them made the indicator noisy
+    /// AXImage, AXOutline and every other container — a click on those is not a
+    /// control activation, and highlighting them made the indicator noisy
     /// (observed: a 1296x67 text-line element highlighted in direct-hit mode).
+    /// Row-like containers are handled separately by `rowLikeRoles` below.
     private static let eligibleRoles: Set<String> = [
         // Buttons / links
         "AXButton", "AXMenuButton", "AXLink",
@@ -36,6 +37,18 @@ final class AccessibilityResolver: @unchecked Sendable {
         // Editable text (secure fields are still rejected below)
         "AXTextField", "AXSearchField"
     ]
+    /// Row-like containers are clickable list rows/cells in many web and native
+    /// UIs (WhatsApp Web contact rows are `AXCell`), but the SAME roles also wrap
+    /// page-sized containers. They are admitted only when row-sized: below
+    /// `rowMaxHeight` tall AND below `rowMaxArea` in area. Anything larger stays
+    /// rejected (counted as `rowTooLarge`) so a full-page cell cannot hijack a click.
+    private static let rowLikeRoles: Set<String> = ["AXCell", "AXRow", "AXListItem"]
+    /// 200 pt: a list row taller than this is a multi-row group or a card, not a
+    /// single clickable row (observed contact row: 59 pt; two-row card ≈ 118 pt).
+    private static let rowMaxHeight: CGFloat = 200
+    /// 120 000 pt² (≈ 600 × 200): admits a wide list row at full row height while
+    /// rejecting page/sidebar containers (a 1200 × 800 cell is 960 000 pt²).
+    private static let rowMaxArea: CGFloat = 120_000
 
     private let cache: CacheStore
     private let log: (String) -> Void
@@ -132,6 +145,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var cyclePointer = CGPoint.zero
     private var rejectedNear: [(role: String, label: String, rect: CGRect, dist: CGFloat)] = []
     private var rejectedScanned = 0
+    /// Diagnostics only: row-like elements (AXCell/AXRow/AXListItem) rejected by the
+    /// row-size guard this cycle. Reset per refresh; published as `rowTooLarge=`.
+    private var rowTooLarge = 0
 
     init(cache: CacheStore, log: @escaping (String) -> Void) {
         self.cache = cache
@@ -372,6 +388,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         cyclePointer = pointer
         rejectedNear.removeAll()
         rejectedScanned = 0
+        rowTooLarge = 0
 
         // Reset union + rotation when the frontmost app changes: never carry one
         // app's targets, keys or frontier into another app's snapshot.
@@ -475,7 +492,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -485,7 +502,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                    pwinStats.guidedSteps, pwinStats.guidedHits,
                    pwinStats.guidedFallback ? 1 : 0,
                    (pwinStats.guidedFallbackReason ?? "-") as NSString,
-                   rotationSkipped ? 1 : 0))
+                   rotationSkipped ? 1 : 0, rowTooLarge))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
@@ -738,7 +755,8 @@ final class AccessibilityResolver: @unchecked Sendable {
     private func collect(_ el: AXUIElement, out: inout [CachedTarget],
                          screenUnion: CGRect) -> Bool {
         guard let role = stringAttr(el, kAXRoleAttribute) else { return false }
-        guard Self.eligibleRoles.contains(role) else {
+        let isRowLike = Self.rowLikeRoles.contains(role)
+        guard Self.eligibleRoles.contains(role) || isRowLike else {
             // Diagnostics only: remember near-pointer elements the role filter drops
             // (e.g. a <div> web button exposed as AXGroup). Bounded and per-cycle.
             noteRejectedNearPointer(el, role: role)
@@ -760,6 +778,17 @@ final class AccessibilityResolver: @unchecked Sendable {
         guard let rect = frame(el), rect.width >= 4, rect.height >= 4,
               rect.width < 4000, rect.height < 2000, rect.intersects(screenUnion) else {
             return false
+        }
+        // Row-like roles pass the role filter only when row-sized; a page/sidebar
+        // container in AXCell/AXRow/AXListItem clothing stays rejected and is counted
+        // so the guard is auditable. Both thresholds must hold.
+        if isRowLike {
+            guard rect.height < Self.rowMaxHeight,
+                  rect.width * rect.height < Self.rowMaxArea else {
+                rowTooLarge += 1
+                noteRejectedNearPointer(el, role: role)
+                return false
+            }
         }
         let ident = stringAttr(el, kAXIdentifierAttribute)
         let title = stringAttr(el, kAXTitleAttribute)
