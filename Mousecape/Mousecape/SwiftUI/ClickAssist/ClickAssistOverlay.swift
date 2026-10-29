@@ -197,6 +197,7 @@ final class TargetingOverlay {
         // ring; mismatch/unknown suppress the ring and the click passes through.
         var suppressedKey: String?
         var suppressedVerdict: LegitimacyPolicy.Verdict?
+        var shownVerdict: LegitimacyPolicy.Verdict = .confirmed
         if action == "show", let key = targetKey, let rect = frame,
            let dest = destination, fresh {
             let verdict = legitimacy?.validate(
@@ -204,6 +205,7 @@ final class TargetingOverlay {
                 candidate: rect, destination: dest,
                 siblings: s.targets.filter { $0.key != key && $0.tier == .firstClass }
                                     .map { $0.rect }) ?? .confirmed
+            shownVerdict = verdict
             if verdict != .confirmed {
                 suppressedKey = key
                 suppressedVerdict = verdict
@@ -229,9 +231,10 @@ final class TargetingOverlay {
         if sig != lastSig {
             lastSig = sig
             if action == "show", let targetKey, let frame {
-                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@",
+                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=%@",
                            s.generation, targetKey as NSString, frame.origin.x, frame.origin.y, frame.width, frame.height,
-                           tolerance, pointer.x, pointer.y, reason as NSString, mode as NSString))
+                           tolerance, pointer.x, pointer.y, reason as NSString, mode as NSString,
+                           shownVerdict.rawValue as NSString))
             } else {
                 log(String(format: "OVERLAY_STATE gen=%llu action=none pointer=(%.1f,%.1f) reason=%@",
                            s.generation, pointer.x, pointer.y, reason as NSString))
