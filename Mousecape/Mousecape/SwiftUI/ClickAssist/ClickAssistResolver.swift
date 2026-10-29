@@ -161,6 +161,8 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// (typically <2 s at 600 nodes/150 ms). Trade-off: a control that truly
     /// disappeared can linger in the union for up to this window before expiring.
     private static let targetFreshnessWindow: CFTimeInterval = 10.0
+    /// Targets within this radius of the pointer never expire (see the union merge).
+    private static let pointerHoldRadius: CGFloat = 48
     private static let nodeBudget = 600
     private static let seedAncestryDepth = 8
     /// SOFT-invalidation coalescing window. Multiple AX-churn notifications inside
@@ -571,7 +573,16 @@ final class AccessibilityResolver: @unchecked Sendable {
                        screenUnion: screenUnion, appElement: appEl, pid: pid,
                        maxDepth: Self.pointerWindowGuidedMaxDepth,
                        subtreeDepth: Self.pointerWindowMaxDepth, stats: &pwinStats)
-            pwinSpent = min(Self.pointerWindowBudget, budget) - pwinBudget
+            // Band BFS after the guided descent: catches the controls branch the
+            // guided path cannot reach (video players). Pruned by geometry, so it
+            // costs tens of nodes, not thousands.
+            var bandBudget = min(budget, 220)
+            let bandStart = bandBudget
+            walkBand(pwin, pointer: pointer, radius: 48, out: &out, budget: &bandBudget,
+                     deadline: deadline, screenUnion: screenUnion, appElement: appEl, pid: pid,
+                     maxDepth: Self.pointerWindowGuidedMaxDepth, stats: &pwinStats)
+            let bandSpent = bandStart - bandBudget
+            pwinSpent = (min(Self.pointerWindowBudget, budget) - pwinBudget) + bandSpent
             budget -= pwinSpent   // total work stays inside the shared node budget
         }
         let pwinTargets = Set(out.map { $0.key }).subtracting(keysBeforePwin).count
@@ -620,9 +631,18 @@ final class AccessibilityResolver: @unchecked Sendable {
         let newCount = order.count
         var droppedExpired = 0
         for previous in unionTargets where byKey[previous.key] == nil {
-            if let seen = lastSeen[previous.key], now - seen <= Self.targetFreshnessWindow {
+            // Sticky-under-pointer: while the pointer hovers a target, that target
+            // must not expire out of the union. Deep player controls are visited
+            // only every few rotation cycles (they are unreachable by the guided
+            // descent), so a 10 s expiry made a hovered seek bar blink in and out.
+            // Legitimacy validation still re-checks the renderer before any ring
+            // or redirect, so a stale rect cannot become a wrong action.
+            let heldByPointer = Self.boundaryDistance(pointer, previous.rect) <= Self.pointerHoldRadius
+            if let seen = lastSeen[previous.key],
+               now - seen <= Self.targetFreshnessWindow || heldByPointer {
                 byKey[previous.key] = previous
                 order.append(previous.key)
+                if heldByPointer { lastSeen[previous.key] = now }
             } else {
                 lastSeen.removeValue(forKey: previous.key)
                 droppedExpired += 1
@@ -928,6 +948,40 @@ final class AccessibilityResolver: @unchecked Sendable {
         return (nil, "none")
     }
 
+    /// Pointer-band BFS: breadth-first over `root`, enqueuing only children whose
+    /// rect intersects the pointer's ±radius box. A video player's DOM is huge but
+    /// geometrically shallow near the cursor, so the band prunes it to the few
+    /// containers that can actually be under or beside the pointer — deep player
+    /// controls become reachable within the per-cycle budget, which the guided
+    /// descent (which stops at the video element's leaf) never manages.
+    private func walkBand(_ root: AXUIElement, pointer: CGPoint, radius: CGFloat,
+                          out: inout [CachedTarget], budget: inout Int,
+                          deadline: CFTimeInterval, screenUnion: CGRect,
+                          appElement: AXUIElement, pid: pid_t, maxDepth: Int,
+                          stats: inout WalkStats) {
+        let band = CGRect(x: pointer.x - radius, y: pointer.y - radius,
+                          width: radius * 2, height: radius * 2)
+        var queue: [(AXUIElement, Int)] = [(root, 0)]
+        var head = 0
+        while head < queue.count, budget > 0, CACurrentMediaTime() < deadline {
+            let (el, depth) = queue[head]
+            head += 1
+            budget -= 1
+            stats.maxDepth = max(stats.maxDepth, depth)
+            stats.bandNodes += 1
+            collect(el, out: &out, screenUnion: screenUnion)
+            guard depth < maxDepth else { continue }
+            guard let raw = attr(el, kAXChildrenAttribute), let kids = axArray(raw) else { continue }
+            for kid in kids {
+                guard budget > 0, CACurrentMediaTime() < deadline else { break }
+                if let r = frame(kid), r.width > 0, r.height > 0, r.intersects(band) {
+                    queue.append((kid, depth + 1))
+                }
+            }
+            if queue.count > 4000 { break }   // hard bound on the frontier
+        }
+    }
+
     /// Resolve the element under the pointer and walk its ancestry (child → parent).
     /// This spend is tiny (≤ seedAncestryDepth nodes) and happens before the global
     /// walk, so the hovered control survives any later budget cut.
@@ -1102,6 +1156,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         /// no containing child, budget, or deadline) and fell back to a plain walk.
         var guidedFallback = false
         var guidedFallbackReason: String?
+        var bandNodes = 0
         /// Descent bound in force this cycle, published so a cap hit is legible
         /// as `pwinDepthCapped=1 pwinGuidedBound=<value>`.
         var guidedBound = 0
@@ -1204,12 +1259,14 @@ final class AccessibilityResolver: @unchecked Sendable {
            let parent = lastParentWithKids, budget > 0, CACurrentMediaTime() < deadline,
            let rawP = attr(parent, kAXChildrenAttribute), let siblings = axArray(rawP) {
             var rescue = min(budget, 160)
+            let rescueStart = rescue
             for k in siblings where rescue > 0 {
                 walk(k, depth: depth + 1, out: &out, budget: &rescue, deadline: deadline,
                      screenUnion: screenUnion, appElement: appElement, pid: pid,
                      maxDepth: depth + subtreeDepth, stats: &stats)
             }
             budget -= min(budget, 160) - rescue
+            log("PWIN_RESCUE siblings=\(siblings.count) depth=\(depth) spent=\(rescueStart - rescue) reason=\(stats.guidedFallbackReason ?? "-")")
         }
 
         // 3) Bounded subtree walk from the deepest node, unchanged width: the same
