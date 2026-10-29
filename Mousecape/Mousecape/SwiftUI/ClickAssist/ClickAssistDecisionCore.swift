@@ -132,9 +132,20 @@ enum DecisionCore {
         let pool: [(Candidate, CGFloat)]
         if !containing.isEmpty {
             let fc = containing.filter { $0.0.tier == .firstClass }.sorted { area($0.0) < area($1.0) }
-            pool = fc.isEmpty
-                ? Array(containing.sorted { area($0.0) < area($1.0) }.prefix(1))
-                : fc
+            if !fc.isEmpty {
+                pool = fc
+            } else {
+                // The pointer sits inside a second-tier container (a player control
+                // bar, a list row). A FIRST-CLASS control living inside that
+                // container is the real target (the seek slider inside the player
+                // bar); the container itself is only the fallback when it holds
+                // nothing actionable.
+                let container = containing.sorted { area($0.0) < area($1.0) }.first!.0
+                let inside = filtered
+                    .filter { $0.0.tier == .firstClass && container.rect.contains($0.0.rect) }
+                    .sorted { $0.1 < $1.1 }
+                pool = inside.isEmpty ? [(container, 0)] : inside
+            }
         } else {
             let fc = filtered.filter { $0.0.tier == .firstClass }.sorted { $0.1 < $1.1 }
             if fc.isEmpty {
@@ -154,12 +165,25 @@ enum DecisionCore {
             }
         }
 
-        let targets = pool
-            .sorted { a, b in
-                if a.1 != b.1 { return a.1 < b.1 }
-                if area(a.0) != area(b.0) { return area(a.0) < area(b.0) }
-                return a.0.key < b.0.key
-            }
+        // Ordered candidates: the primary pool first (position decided by the
+        // rules above), then every remaining in-tolerance candidate by distance.
+        // They are FALLBACKS only: if the primary fails renderer validation (the
+        // elapsed-time label under the pointer), the next legitimate candidate —
+        // the seek slider right beside it — is what gets indicated and clicked.
+        var seen = Set<String>()
+        var ordered: [(Candidate, CGFloat)] = []
+        for entry in pool.sorted(by: { a, b in
+            if a.1 != b.1 { return a.1 < b.1 }
+            if area(a.0) != area(b.0) { return area(a.0) < area(b.0) }
+            return a.0.key < b.0.key
+        }) where seen.insert(entry.0.key).inserted {
+            ordered.append(entry)
+        }
+        for entry in filtered.sorted(by: { $0.1 < $1.1 }) where seen.insert(entry.0.key).inserted {
+            ordered.append(entry)
+        }
+
+        let targets = ordered
             .map { cand, d -> Target in
                 let snap = snapMode(for: cand)
                 let dest = snap == .center
@@ -168,7 +192,7 @@ enum DecisionCore {
                 return Target(candidate: cand, dist: d, destination: dest, snap: snap)
             }
         guard let winner = targets.first else { return .none }
-        return .winner(winner, alternates: Array(targets.dropFirst().prefix(2)))
+        return .winner(winner, alternates: Array(targets.dropFirst().prefix(4)))
     }
 
     /// Click semantics layered on the shared resolution. Passthrough decisions
