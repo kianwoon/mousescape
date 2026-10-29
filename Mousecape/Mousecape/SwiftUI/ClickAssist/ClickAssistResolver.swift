@@ -423,6 +423,12 @@ final class AccessibilityResolver: @unchecked Sendable {
 
         let windows: [AXUIElement] = attr(appEl, kAXWindowsAttribute).flatMap(axArray) ?? []
         let menuBar: AXUIElement? = attr(appEl, kAXMenuBarAttribute).flatMap(axElement)
+        // Open NSMenus are usually NOT in kAXWindowsAttribute; a dropdown belongs to
+        // the application element as an AXMenu child (higher CG window layer, e.g.
+        // pop-up menu level ~101). Include it as a walk root so open menu items are
+        // reachable by the guided/rotating walk. Walked under the same node budget
+        // and deadline as every other root.
+        let openMenu: AXUIElement? = attr(appEl, "AXMenu").flatMap(axElement)
 
         // Pointer-region seed FIRST: resolve the element under the cursor and walk
         // its immediate ancestry, so the visibly hovered control is captured even
@@ -460,6 +466,7 @@ final class AccessibilityResolver: @unchecked Sendable {
             roots.insert(pwin, at: 0)
         }
         if let menuBar { roots.append(menuBar) }
+        if let openMenu { roots.append(openMenu) }
         let rotationSkipped = !rotationAllowed || budget <= 0 || CACurrentMediaTime() >= deadline
         let sliceId = rotationSkipped ? -1
             : walkSlice(roots: roots, out: &out, budget: &budget, deadline: deadline,
@@ -648,8 +655,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// the window list), so a WindowServer/Dock surface cannot mask the app beneath.
     ///
     /// Filter chain per entry, in order:
-    ///  1. layer == 0 only — menu bar extras, panels, overlays, the Dock and
-    ///     Control Center live above normal windows and are never app surfaces.
+    ///  1. ANY CG window layer is accepted. Open NSMenus (pop-up menu level ~101)
+    ///     and panels live above layer 0; owner acceptability — never the layer —
+    ///     decides whether such a window is a legitimate app surface.
     ///  2. non-empty bounds containing the pointer, and alpha > 0 (invisible
     ///     windows must not capture the hover).
     ///  3. our own non-GUI surfaces (non-zero layer) are skipped, so the overlay
@@ -671,16 +679,17 @@ final class AccessibilityResolver: @unchecked Sendable {
             guard CGRectMakeWithDictionaryRepresentation(bounds as CFDictionary, &rect),
                   rect.width > 0, rect.height > 0, rect.contains(pointer) else { continue }
             let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
-            guard layer == 0 else { continue }
             if let alpha = (entry[kCGWindowAlpha as String] as? NSNumber)?.doubleValue, alpha <= 0 {
                 continue
             }
             guard let pidNum = entry[kCGWindowOwnerPID as String] as? NSNumber else { continue }
             let owner = pid_t(truncating: pidNum)
             if owner == selfPid {
-                // Our own layer-0 GUI window is a legitimate hover target candidate;
-                // anything else of ours at layer 0 is still routed through the
-                // self-RPC guard rather than guessed at.
+                // Our own layer-0 GUI window is a legitimate hover target candidate
+                // (caught by the self-RPC guard in refresh). Our non-zero-layer
+                // surfaces (the overlay panel) are excluded here so they never mask
+                // the app beneath; the scan continues front-to-back.
+                if layer != 0 { continue }
                 return owner
             }
             guard acceptableWindowOwner(owner) else { continue }
