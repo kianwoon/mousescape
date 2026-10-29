@@ -1,6 +1,8 @@
 // baseline-guard:allow new standalone prototype file, no prior baseline possible
 import CoreGraphics
 import Foundation
+import ApplicationServices
+import QuartzCore
 
 /// The single source of routing math. The CGEventTap router calls `route()` in its
 /// callback; the P2a targeting overlay calls the SAME `route()` on the SAME published
@@ -196,5 +198,112 @@ enum DecisionCore {
         let dx = max(r.minX - p.x, 0, p.x - r.maxX)
         let dy = max(r.minY - p.y, 0, p.y - r.maxY)
         return sqrt(dx * dx + dy * dy)
+    }
+}
+
+// MARK: - Single legitimacy policy (renderer hit-test at the DESTINATION)
+
+/// The ONLY source of legitimacy for a ring or a redirect. The renderer's own
+/// hit-test at the exact destination point decides:
+/// - `confirmed`: the hit answer covers the destination and corresponds to the
+///   candidate (candidate contains the hit, or a real control occupies the same
+///   frame — e.g. a tab's close ✕ under the tab group's frame).
+/// - `mismatch`: the renderer answered with something that is not the candidate.
+/// - `unknown`: the hit-test errored / returned nothing.
+///
+/// Fail-closed: only `confirmed` allows a ring or a redirect. `mismatch` and
+/// `unknown` both pass the original click through untouched.
+final class LegitimacyPolicy: @unchecked Sendable {
+    enum Verdict: String, Sendable {
+        case confirmed
+        case mismatch
+        case unknown
+    }
+
+    private struct Entry {
+        let verdict: Verdict
+        let generation: UInt64
+        let stamp: CFTimeInterval
+    }
+
+    /// CFEqual-identity proxy: the snapshot carries no AXUIElement, so the key is
+    /// (pid, candidate key, rounded destination). Scoped to the snapshot
+    /// generation: any soft/hard invalidation bumps it and drops the cache.
+    private var cache: [String: Entry] = [:]
+    private var cachedGeneration: UInt64 = 0
+    private static let ttl: CFTimeInterval = 0.5
+    private let lock = NSLock()
+
+    /// Approximate frame equality used for "the renderer answered with this exact
+    /// control surface" (Brave's tab group vs the tab's AXRadioButton).
+    private static func sameFrame(_ a: CGRect, _ b: CGRect, eps: CGFloat = 1) -> Bool {
+        abs(a.minX - b.minX) <= eps && abs(a.minY - b.minY) <= eps &&
+        abs(a.width - b.width) <= eps && abs(a.height - b.height) <= eps
+    }
+
+    private static func axFrame(_ el: AXUIElement) -> CGRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
+              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
+              let posRef, let sizeRef else { return nil }
+        var origin = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &origin),
+              AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) else { return nil }
+        return CGRect(origin: origin, size: size)
+    }
+
+    /// Validate `candidate` at `destination` for app `pid`. `siblings` are the
+    /// first-class candidate frames in the same snapshot (identity proxy).
+    func validate(pid: pid_t, generation: UInt64, key: String,
+                  candidate: CGRect, destination: CGPoint,
+                  siblings: [CGRect]) -> Verdict {
+        let now = CACurrentMediaTime()
+        let cacheKey = "\(pid)|\(key)|\(Int(destination.x.rounded()))|\(Int(destination.y.rounded()))"
+        lock.lock()
+        if cachedGeneration != generation {
+            cache.removeAll()
+            cachedGeneration = generation
+        }
+        if let hit = cache[cacheKey], now - hit.stamp < Self.ttl, hit.generation == generation {
+            lock.unlock()
+            return hit.verdict
+        }
+        lock.unlock()
+
+        let verdict = Self.evaluate(pid: pid, candidate: candidate,
+                                    destination: destination, siblings: siblings)
+        lock.lock()
+        cache[cacheKey] = Entry(verdict: verdict, generation: generation, stamp: now)
+        lock.unlock()
+        return verdict
+    }
+
+    private static func evaluate(pid: pid_t, candidate: CGRect,
+                                 destination: CGPoint, siblings: [CGRect]) -> Verdict {
+        guard pid > 0, pid != getpid() else { return .unknown }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.1)
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(app, Float(destination.x), Float(destination.y),
+                                               &element) == .success,
+              let element, let hitFrame = axFrame(element) else { return .unknown }
+        // The renderer's answer must cover the destination at all.
+        guard hitFrame.contains(destination) else { return .mismatch }
+        // Candidate itself or a descendant/equal surface answered.
+        if candidate.contains(hitFrame) { return .confirmed }
+        // An equal-frame real control answered (Brave: tab group frame == tab).
+        if siblings.contains(where: { sameFrame($0, hitFrame) }) { return .confirmed }
+        // Candidate is inside the hit but the hit is an unrelated container.
+        return .mismatch
+    }
+
+    /// Drop cached verdicts (called on soft/hard invalidation).
+    func invalidate() {
+        lock.lock()
+        cache.removeAll()
+        cachedGeneration = 0
+        lock.unlock()
     }
 }

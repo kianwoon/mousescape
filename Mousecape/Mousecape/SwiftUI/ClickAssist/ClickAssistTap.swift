@@ -41,6 +41,8 @@ final class AssistTap: @unchecked Sendable {
     var assistEnabled = true
     private(set) var tolerance: CGFloat
     let log: (String) -> Void
+    /// The single legitimacy policy (renderer hit-test at the destination).
+    var legitimacy: LegitimacyPolicy?
 
     var targetSource: TargetSource = .staticTargets([])
 
@@ -140,6 +142,7 @@ final class AssistTap: @unchecked Sendable {
         let generation: UInt64
         let ageMs: Double
         let source: String
+        let pid: pid_t
     }
 
     /// Pure in-memory snapshot read. No IPC, no AX, no allocation beyond a retain.
@@ -148,7 +151,8 @@ final class AssistTap: @unchecked Sendable {
         case .staticTargets(let ts):
             return Resolution(candidates: ts.map { Candidate(key: $0.name, rect: $0.rect, inset: $0.inset,
                                                               tier: .firstClass) },
-                              valid: true, reason: "static", generation: 0, ageMs: 0, source: "static")
+                              valid: true, reason: "static", generation: 0, ageMs: 0,
+                              source: "static", pid: 0)
         case .cache(let store):
             let s = store.current()
             let ageMs = (CACurrentMediaTime() - s.stamp) * 1000
@@ -158,8 +162,21 @@ final class AssistTap: @unchecked Sendable {
                                                                      inset: $0.inset, tier: $0.tier,
                                                                      role: $0.role) },
                               valid: fresh, reason: reason, generation: s.generation,
-                              ageMs: ageMs, source: "cache")
+                              ageMs: ageMs, source: "cache", pid: s.pid)
         }
+    }
+
+    /// Single legitimacy check for a routing decision at its destination point.
+    /// No policy (static regression harness) keeps the legacy behaviour.
+    private func legitimacyVerdict(for candidate: Candidate, destination: CGPoint,
+                                   res: Resolution) -> LegitimacyPolicy.Verdict {
+        guard let legitimacy else { return .confirmed }
+        let siblings = res.candidates
+            .filter { $0.tier == .firstClass && $0.key != candidate.key }
+            .map { $0.rect }
+        return legitimacy.validate(pid: res.pid, generation: res.generation,
+                                   key: candidate.key, candidate: candidate.rect,
+                                   destination: destination, siblings: siblings)
     }
 
     /// Diagnostics helper for the no-candidate branch only: the nearest
@@ -216,7 +233,8 @@ final class AssistTap: @unchecked Sendable {
 
             switch DecisionCore.route(point: original, candidates: res.candidates, tolerance: tolerance) {
             case .directHit(let hit, let others):
-                var extra = "element=\(hit.key) boundary=0.0 action=passthrough"
+                let verdict = legitimacyVerdict(for: hit, destination: original, res: res)
+                var extra = "element=\(hit.key) boundary=0.0 action=passthrough legitimacy=\(verdict.rawValue)"
                 if let other = others.first { extra += " other=\(other.key) other_dist=\(String(format: "%.1f", other.dist))" }
                 emit("PASSTHROUGH", type: label, original: original, mutated: nil,
                      reason: "direct-hit", res: res, started: started, extra: extra)
@@ -240,13 +258,22 @@ final class AssistTap: @unchecked Sendable {
                      extra: "cands=[\(listed)] tie=\(String(format: "%.1f", tie)) tol=\(tolerance)")
                 return Unmanaged.passUnretained(event)
             case .redirect(let best, let corrected, let dist, let snap, let edgeCore):
+                // Fail-closed: only a renderer-confirmed destination may move the
+                // click. mismatch/unknown pass through untouched.
+                let verdict = legitimacyVerdict(for: best, destination: corrected, res: res)
+                guard verdict == .confirmed else {
+                    emit("PASSTHROUGH", type: label, original: original, mutated: nil,
+                         reason: "legitimacy-\(verdict.rawValue)", res: res, started: started,
+                         extra: "legitimacy=\(verdict.rawValue) target=\(best.key) dist=\(String(format: "%.1f", dist))")
+                    return Unmanaged.passUnretained(event)
+                }
                 let delta = CGVector(dx: corrected.x - original.x, dy: corrected.y - original.y)
                 event.location = corrected
                 latched = (delta, best.key, snap, edgeCore)
                 let marker = edgeCore ? " edgecore=1" : ""
                 emit("MUTATE", type: label, original: original, mutated: corrected,
                      reason: edgeCore ? "direct-hit" : "redirect", res: res, started: started,
-                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue)\(marker)")
+                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue)\(marker) legitimacy=confirmed")
                 return Unmanaged.passUnretained(event)
             }
         }

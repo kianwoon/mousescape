@@ -22,6 +22,9 @@ final class ClickAssistEngine {
     static let shared = ClickAssistEngine()
 
     let cache = CacheStore()
+    /// One legitimacy policy shared by the tap (click decisions) and the overlay
+    /// (ring decisions): the renderer's hit-test is the single source of truth.
+    let legitimacy = LegitimacyPolicy()
     let prefs = ClickAssistPreferences()
 
     private(set) var config: ClickAssistConfig
@@ -190,6 +193,7 @@ final class ClickAssistEngine {
             debugLog("[ClickAssist] \(line)")
         }
         t.targetSource = .cache(cache)
+        t.legitimacy = legitimacy
         guard t.start(point: .cghidEventTap) else {
             debugLog("[ClickAssist] ENGINE_PAUSED reason=tap-create-failed")
             return
@@ -226,6 +230,7 @@ final class ClickAssistEngine {
         let o = TargetingOverlay(tolerance: config.tolerancePoints) { line in
             debugLog("[ClickAssist] \(line)")
         }
+        o.legitimacy = legitimacy
         overlay = o
         // One permanent forwarder: overlay identity changes, observer count stays 1.
         if !cacheObserverInstalled {

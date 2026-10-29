@@ -98,21 +98,12 @@ final class TargetingOverlay {
                                            y: CGFloat.greatestFiniteMagnitude)
     private var lastDrawnMode = ""
     private var lastDrawnTolerance: CGFloat = -1
-    /// Ghost-ring suppression: per-target visibility verdict from the app's own
-    /// AX hit-test, cached briefly so the 30 Hz repaint does not issue an AX call
-    /// every tick (≈ one hit-test per 0.5 s per target key).
-    private enum GhostVerdict {
-        case visible
-        case ghost
-    }
-    private struct VisibilityVerdict {
-        let verdict: GhostVerdict
-        let stamp: CFTimeInterval
-    }
-    private var visibilityCache: [String: VisibilityVerdict] = [:]
-    private var lastGhostLog: [String: CFTimeInterval] = [:]
-    private static let visibilityTTL: CFTimeInterval = 0.5
-    private static let ghostLogInterval: CFTimeInterval = 5
+    /// The ONE legitimacy policy, shared with the tap. The overlay carries no
+    /// visibility heuristics of its own: a ring is drawn only when the renderer
+    /// confirms the destination point.
+    var legitimacy: LegitimacyPolicy?
+    private var lastSuppressLog: [String: CFTimeInterval] = [:]
+    private static let suppressLogInterval: CFTimeInterval = 5
 
     init(tolerance: CGFloat, log: @escaping (String) -> Void) {
         self.tolerance = tolerance
@@ -176,13 +167,15 @@ final class TargetingOverlay {
         var targetKey: String?
         var frame: CGRect?
         var mode = "redirect"
+        var destination: CGPoint?
         if fresh {
             let cands = s.targets.map { DecisionCore.Candidate(key: $0.key, rect: $0.rect,
                                                                inset: $0.inset, tier: $0.tier,
                                                                role: $0.role) }
             switch DecisionCore.route(point: pointer, candidates: cands, tolerance: tolerance) {
-            case .redirect(let c, _, _, _, _):
+            case .redirect(let c, let corrected, _, _, _):
                 action = "show"; targetKey = c.key; frame = c.rect; reason = "redirect"
+                destination = corrected
             case .directHit(let c, _):
                 if c.tier == .secondClass {
                     // A second-class container under the pointer is NOT a
@@ -191,6 +184,7 @@ final class TargetingOverlay {
                     reason = "second-class-direct-hit"
                 } else {
                     action = "show"; targetKey = c.key; frame = c.rect; reason = "direct-hit"; mode = "direct-hit"
+                    destination = pointer
                 }
             case .ambiguous:
                 reason = "ambiguous"
@@ -198,35 +192,36 @@ final class TargetingOverlay {
                 reason = "no-candidate-in-radius"
             }
         }
-        // GHOST-RING GATE (display only — never touches the tap's click path).
-        // Chromium exposes faded-out / opacity-0 elements through AX with no
-        // visibility flag. Its own AX hit-test only returns VISIBLE elements, so
-        // cross-check the target's center: a definitive hit whose frame does not
-        // contain that center means the element is invisible. Errors, nil and
-        // frameless results PASS (the hit-test is advisory and intermittently
-        // flakes). Mutations are unaffected: the click still redirects to the
-        // cached element.
-        var ghostKey: String?
-        if action == "show", let key = targetKey, let rect = frame, fresh,
-           !isVisibleNow(pid: s.pid, key: key, rect: rect,
-                         siblings: s.targets.filter { $0.key != key && $0.tier == .firstClass }
-                                             .map { $0.rect }) {
-            ghostKey = key
-            action = "none"
-            reason = "ghost-suppressed"
-            targetKey = nil
-            frame = nil
-        }
-        if let ghostKey {
-            // Rate-limited: one ghost line per target key per 5 s.
-            let now = CACurrentMediaTime()
-            if now - (lastGhostLog[ghostKey] ?? -Double.infinity) >= Self.ghostLogInterval {
-                lastGhostLog[ghostKey] = now
-                log(String(format: "OVERLAY_STATE gen=%llu action=none target=%@ pointer=(%.1f,%.1f) reason=ghost-suppressed",
-                           s.generation, ghostKey as NSString, pointer.x, pointer.y))
+        // SINGLE LEGITIMACY GATE (display only — the tap applies the same policy
+        // to its own destination). Fail-closed: only renderer-confirmed targets
+        // ring; mismatch/unknown suppress the ring and the click passes through.
+        var suppressedKey: String?
+        var suppressedVerdict: LegitimacyPolicy.Verdict?
+        if action == "show", let key = targetKey, let rect = frame,
+           let dest = destination, fresh {
+            let verdict = legitimacy?.validate(
+                pid: s.pid, generation: s.generation, key: key,
+                candidate: rect, destination: dest,
+                siblings: s.targets.filter { $0.key != key && $0.tier == .firstClass }
+                                    .map { $0.rect }) ?? .confirmed
+            if verdict != .confirmed {
+                suppressedKey = key
+                suppressedVerdict = verdict
+                action = "none"
+                reason = "legitimacy-\(verdict.rawValue)"
+                targetKey = nil
+                frame = nil
             }
-            // Force a fresh "show" line when the element becomes visible again.
-            lastSig = "\(s.generation)|none|ghost|\(ghostKey)"
+        }
+        if let suppressedKey {
+            let now = CACurrentMediaTime()
+            if now - (lastSuppressLog[suppressedKey] ?? -Double.infinity) >= Self.suppressLogInterval {
+                lastSuppressLog[suppressedKey] = now
+                log(String(format: "OVERLAY_STATE gen=%llu action=none target=%@ pointer=(%.1f,%.1f) reason=%@ legitimacy=%@",
+                           s.generation, suppressedKey as NSString, pointer.x, pointer.y,
+                           reason as NSString, (suppressedVerdict?.rawValue ?? "unknown") as NSString))
+            }
+            lastSig = "\(s.generation)|none|legitimacy|\(suppressedKey)"
             draw(action: action, frame: frame, pointer: pointer, mode: mode)
             return
         }
@@ -243,135 +238,6 @@ final class TargetingOverlay {
             }
         }
         draw(action: action, frame: frame, pointer: pointer, mode: mode)
-    }
-
-    /// Advisory visibility check via the app's own AX hit-test at the candidate
-    /// center. Returns false ONLY on a definitive mismatch. Errors/nil pass.
-    /// Called on the main actor; a 0.1 s messaging timeout bounds the cost.
-    ///
-    /// v2: containment alone is not enough. An INVISIBLE element inside a
-    /// visible container (Brave tab slots, hidden close buttons, "search tabs"
-    /// anchors) hit-tests to the visible strip, whose frame still contains the
-    /// candidate center. The renderer's answer is the ASPECT that matters:
-    /// - hit frame strictly INSIDE the candidate frame → a descendant was hit → real, show.
-    /// - candidate frame strictly INSIDE the hit frame → only an ancestor (bare
-    ///   container) responded → nothing actionable there → ghost, suppress.
-    /// - same/equal frames or partial overlap → the candidate itself or an
-    ///   unrelated sibling → fall back to v1 containment (show).
-    private func isVisibleNow(pid: pid_t, key: String, rect: CGRect,
-                              siblings: [CGRect]) -> Bool {
-        let now = CACurrentMediaTime()
-        // Cache key includes the verdict type's geometry (center) so a moved
-        // candidate never reuses a verdict computed for another rect.
-        let cacheKey = "\(key)|\(Int(rect.midX))|\(Int(rect.midY))"
-        if let cached = visibilityCache[cacheKey], now - cached.stamp < Self.visibilityTTL {
-            return cached.verdict == .visible
-        }
-        guard pid > 0, pid != getpid(), rect.width > 0, rect.height > 0 else { return true }
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.1)
-        var element: AXUIElement?
-        // Flaky rule: any error or nil element means "cannot judge" → pass.
-        guard AXUIElementCopyElementAtPosition(app, Float(center.x), Float(center.y),
-                                               &element) == .success,
-              let element else {
-            visibilityCache[cacheKey] = VisibilityVerdict(verdict: .visible, stamp: now)
-            return true
-        }
-        guard let hitFrame = axFrame(element) else {
-            visibilityCache[cacheKey] = VisibilityVerdict(verdict: .visible, stamp: now)
-            return true
-        }
-        let verdict: GhostVerdict
-        if !hitFrame.contains(center) {
-            // v1: the renderer placed something whose frame excludes the point.
-            verdict = .ghost
-        } else if Self.strictlyContains(hitFrame, rect) {
-            // Only an ancestor/container answered. That is a ghost ONLY when the
-            // container has no ACTIONABLE child at this point either: a tab's
-            // close ✕ hit-tests to the tab group (its close button is a child
-            // that covers the same point), so a genuinely clickable control must
-            // still ring. Empty strip slots / hidden anchors have no actionable
-            // descendant at the center and stay suppressed.
-            let sameFrameSibling = siblings.contains { sib in
-                abs(sib.minX - hitFrame.minX) <= 1 && abs(sib.minY - hitFrame.minY) <= 1 &&
-                abs(sib.width - hitFrame.width) <= 1 && abs(sib.height - hitFrame.height) <= 1
-            }
-            verdict = (sameFrameSibling || Self.hasActionableDescendant(hit: element, center: center))
-                ? .visible : .ghost
-        } else {
-            // Candidate itself, a descendant, or a sibling at the point: show.
-            verdict = .visible
-        }
-        visibilityCache[cacheKey] = VisibilityVerdict(verdict: verdict, stamp: now)
-        return verdict == .visible
-    }
-
-    /// `outer` fully encloses `inner` with at least `margin` on every side —
-    /// distinguishes an ancestor answer from an equal-frame self answer.
-    private static func strictlyContains(_ outer: CGRect, _ inner: CGRect,
-                                         margin: CGFloat = 0.5) -> Bool {
-        outer.minX <= inner.minX - margin && outer.maxX >= inner.maxX + margin &&
-        outer.minY <= inner.minY - margin && outer.maxY >= inner.maxY + margin
-    }
-
-    /// Roles that accept a click. Mirrors the resolver's first-class set; kept
-    /// local so the display path needs no shared state.
-    private static let actionableRoles: Set<String> = [
-        "AXButton", "AXMenuButton", "AXLink", "AXCheckBox", "AXRadioButton",
-        "AXMenuItem", "AXMenuBarItem", "AXPopUpButton", "AXComboBox", "AXTab",
-        "AXSegmentedControl", "AXSlider", "AXDisclosureTriangle",
-        "AXTextField", "AXSearchField", "AXScrollBar", "AXValueIndicator"
-    ]
-
-    /// True when `root` or one of its near descendants (≤3 levels) is a control
-    /// whose frame contains `center` — i.e. the renderer's container answer still
-    /// maps to a real clickable control at that point. Bounded so the 30 Hz path
-    /// stays cheap.
-    private static func hasActionableDescendant(hit: AXUIElement, center: CGPoint) -> Bool {
-        func roleOf(_ el: AXUIElement) -> String {
-            var v: CFTypeRef?
-            AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &v)
-            return v as? String ?? ""
-        }
-        func contains(_ el: AXUIElement) -> Bool {
-            var p: CFTypeRef?; var s: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &p) == .success,
-                  AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &s) == .success,
-                  let p, let s else { return false }
-            var o = CGPoint.zero; var sz = CGSize.zero
-            guard AXValueGetValue(p as! AXValue, .cgPoint, &o),
-                  AXValueGetValue(s as! AXValue, .cgSize, &sz) else { return false }
-            return CGRect(origin: o, size: sz).contains(center)
-        }
-        if actionableRoles.contains(roleOf(hit)), contains(hit) { return true }
-        func search(_ el: AXUIElement, _ depth: Int) -> Bool {
-            if depth > 3 { return false }
-            var ch: CFTypeRef?
-            guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &ch) == .success,
-                  let kids = ch as? [AXUIElement] else { return false }
-            for k in kids {
-                if actionableRoles.contains(roleOf(k)), contains(k) { return true }
-                if search(k, depth + 1) { return true }
-            }
-            return false
-        }
-        return search(hit, 1)
-    }
-
-    /// Frame of an AX element in global top-left coordinates.
-    private func axFrame(_ el: AXUIElement) -> CGRect? {
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let posRef, let sizeRef else { return nil }
-        var origin = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &origin),
-              AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) else { return nil }
-        return CGRect(origin: origin, size: size)
     }
 
     private func draw(action: String, frame: CGRect?, pointer: CGPoint, mode: String) {
