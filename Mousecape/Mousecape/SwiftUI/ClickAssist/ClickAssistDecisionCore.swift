@@ -214,11 +214,25 @@ enum DecisionCore {
             if c.tier == .firstClass { firstClass.append(scored) }
             else { secondClass.append(scored) }
         }
-        // First-class controls keep absolute priority. Only when NONE is in range
-        // does the nearest legitimate second-tier row/tile get assist — as a
-        // NEAR-MISS only (a direct hit on a second-tier container stays native
-        // passthrough, exactly as before).
-        let pool = firstClass.isEmpty ? secondClass.filter { $0.dist > 0 } : firstClass
+        // INVARIANT: the element the pointer is INSIDE always outranks anything
+        // merely nearby — otherwise hovering a row makes the indicator (and a
+        // near-miss click) land on its NEIGHBOURS. Second-tier rows/tiles
+        // therefore compete on direct hits too. First-class controls keep
+        // priority only as tie-break at equal distance, and a second-tier
+        // direct hit with NO first-class control inside it is the row itself
+        // (indicated, click stays native passthrough).
+        let pool: [ScoredCandidate]
+        if firstClass.contains(where: { $0.dist == 0 }) {
+            pool = firstClass
+        } else if let inside = secondClass.first(where: { $0.dist == 0 }) {
+            // Defer to a first-class control only when it sits INSIDE the row;
+            // a neighbouring first-class control must not steal the row.
+            let insideRect = inside.candidate.rect
+            let embedded = firstClass.contains { insideRect.contains($0.candidate.rect) }
+            pool = embedded ? firstClass : [inside]
+        } else {
+            pool = firstClass.isEmpty ? secondClass.filter { $0.dist > 0 } : firstClass
+        }
         // A container masquerading as a control (Brave exposes the whole tab
         // strip as an AXTab-sized element, and a strip-sized AXGroup as a tile)
         // encloses several real controls. It is never a target on its own: drop
