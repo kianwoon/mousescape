@@ -82,6 +82,20 @@ final class AccessibilityResolver: @unchecked Sendable {
     private static let pointerWindowMaxDepth = 24
     /// Default depth bound for the shared `walk` (rotation-style consumers).
     private static let walkMaxDepth = 12
+    /// Adaptive cadence. The walk is the dominant resolver cost (measured mean
+    /// 119 ms/pass on a 150 ms cadence). Moving pointer -> keep the fast cadence;
+    /// pointer still for longer than `idleMovementWindow` -> slow down and skip
+    /// the rotation slice. Any movement snaps back on the very next tick.
+    private static let fastCadence: TimeInterval = 0.15
+    private static let idleCadence: TimeInterval = 0.7
+    private static let idleMovementWindow: CFTimeInterval = 1.5
+    /// Movement smaller than this is treated as noise (sub-pixel/drift).
+    private static let pointerMoveEpsilon: CGFloat = 2.0
+    /// Queue-confined cadence state (resolver serial queue only).
+    private var lastCyclePointer: CGPoint?
+    private var lastMovementAt: CFTimeInterval = 0
+    private var lastWalkAt: CFTimeInterval = 0
+    private var cadenceIdle = false
     /// A published target survives this long without being re-seen. Large Chromium
     /// trees need several slices to complete one pass, so this must exceed a pass
     /// (typically <2 s at 600 nodes/150 ms). Trade-off: a control that truly
@@ -147,8 +161,11 @@ final class AccessibilityResolver: @unchecked Sendable {
             }
 
         let t = DispatchSource.makeTimerSource(queue: queue)
-        t.schedule(deadline: .now() + 0.05, repeating: 0.15, leeway: .milliseconds(40))
-        t.setEventHandler { [weak self] in self?.refresh(lastPointer: .zero) }
+        // The tick itself is cheap; `tick()` decides whether this beat is due. The
+        // effective cadence is fast (150 ms) while the pointer moves and idle
+        // (700 ms, rotation skipped) once it has been still for `idleMovementWindow`.
+        t.schedule(deadline: .now() + 0.05, repeating: Self.fastCadence, leeway: .milliseconds(40))
+        t.setEventHandler { [weak self] in self?.tick() }
         t.resume()
         timer = t
     }
@@ -213,6 +230,40 @@ final class AccessibilityResolver: @unchecked Sendable {
         coverageKeys.removeAll()
     }
 
+    /// Timer beat. Cheap on every tick; the expensive walk only runs when due.
+    /// Movement is detected by comparing the current pointer with the previous
+    /// beat's, so the first beat after movement runs the fast path immediately
+    /// (no added latency) — the idle interval is only ever entered after
+    /// `idleMovementWindow` of stillness.
+    private func tick() {
+        guard running, isRefreshAllowed else { return }
+        let now = CACurrentMediaTime()
+        let pointer = currentPointer()
+        let moved: Bool
+        if let previous = lastCyclePointer {
+            let dx = pointer.x - previous.x
+            let dy = pointer.y - previous.y
+            moved = (dx * dx + dy * dy) > (Self.pointerMoveEpsilon * Self.pointerMoveEpsilon)
+        } else {
+            moved = true   // first sample: behave as movement
+        }
+        lastCyclePointer = pointer
+        if moved { lastMovementAt = now }
+
+        let idle = !moved && (now - lastMovementAt) > Self.idleMovementWindow
+        if idle != cadenceIdle {
+            cadenceIdle = idle
+            log(String(format: "RESOLVER_CADENCE %@ interval_ms=%.0f reason=%@",
+                       idle ? "idle" : "fast",
+                       (idle ? Self.idleCadence : Self.fastCadence) * 1000,
+                       (idle ? "idle" : "movement") as NSString))
+        }
+        // Idle: slow cadence, and skip the rotation slice (pointer window only).
+        if idle, now - lastWalkAt < Self.idleCadence { return }
+        lastWalkAt = now
+        refresh(lastPointer: .zero, rotationAllowed: !idle)
+    }
+
     private var isRefreshAllowed: Bool {
         stateLock.lock(); defer { stateLock.unlock() }
         return enabled && !refreshSuspended
@@ -245,7 +296,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         CGEvent(source: nil)?.location ?? .zero
     }
 
-    private func refresh(lastPointer: CGPoint) {
+    /// `rotationAllowed` is false only on idle timer beats: the pointer window is
+    /// still walked, but the rotating global slice is skipped to cut idle CPU.
+    private func refresh(lastPointer: CGPoint, rotationAllowed: Bool = true) {
         guard running, isRefreshAllowed else { return }
 
         let t0 = CACurrentMediaTime()
@@ -361,7 +414,7 @@ final class AccessibilityResolver: @unchecked Sendable {
             roots.insert(pwin, at: 0)
         }
         if let menuBar { roots.append(menuBar) }
-        let rotationSkipped = budget <= 0 || CACurrentMediaTime() >= deadline
+        let rotationSkipped = !rotationAllowed || budget <= 0 || CACurrentMediaTime() >= deadline
         let sliceId = rotationSkipped ? -1
             : walkSlice(roots: roots, out: &out, budget: &budget, deadline: deadline,
                         screenUnion: screenUnion, appElement: appEl, pid: pid)
