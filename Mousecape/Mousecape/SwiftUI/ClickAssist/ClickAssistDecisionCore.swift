@@ -52,7 +52,11 @@ enum DecisionCore {
     /// math, not the filter.
     static let positionSensitiveRoles: Set<String> = [
         "AXSlider", "AXScrollBar", "AXValueIndicator",
-        "AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"
+        "AXTextField", "AXTextArea", "AXSearchField", "AXComboBox",
+        // Tabs and radio buttons carry position/drag semantics: a near-miss must
+        // edge-clamp to the clicked offset, never bullseye. Chromium exposes tabs
+        // as AXRadioButton (AxTab/AXTabGroup where a distinct role exists).
+        "AXRadioButton", "AXTab", "AXTabGroup"
     ]
 
     struct Candidate {

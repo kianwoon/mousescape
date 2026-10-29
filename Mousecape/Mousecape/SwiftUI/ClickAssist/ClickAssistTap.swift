@@ -30,6 +30,9 @@ final class AssistTap: @unchecked Sendable {
     private var source: CFRunLoopSource?
     private var latched: (delta: CGVector, target: String, snap: DecisionCore.Snap,
                           edgeCore: Bool)?
+    /// Set when a center-snapped down turned into a drag: the rest of that
+    /// gesture is passed through unmutated (no drag-to-snapped-center hijack).
+    private var unlatchedForDrag = false
     /// Set while the tap is intentionally disabled (P3 interruption gate): the system
     /// delivers tapDisabledByUserInput for a manual CGEvent.tapEnable(false), which
     /// must NOT auto-re-enable.
@@ -203,6 +206,7 @@ final class AssistTap: @unchecked Sendable {
 
         if isDown {
             latched = nil
+            unlatchedForDrag = false
 
             guard res.valid else {
                 emit("PASSTHROUGH", type: label, original: original, mutated: nil,
@@ -245,6 +249,23 @@ final class AssistTap: @unchecked Sendable {
                      extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue)\(marker)")
                 return Unmanaged.passUnretained(event)
             }
+        }
+
+        // Drag guard: a center snap is a CLICK assist. The moment that gesture
+        // drags, the user is moving/pressing something at their own coordinates —
+        // stop redirecting for the remainder (dragged events and the up stay
+        // native). Edge-snapped gestures (sliders) keep the latched translation.
+        if (isDrag || isUp), unlatchedForDrag {
+            if isUp { unlatchedForDrag = false }
+            return Unmanaged.passUnretained(event)
+        }
+        if isDrag, let l = latched, l.snap == .center {
+            latched = nil
+            unlatchedForDrag = true
+            emit("PASSTHROUGH", type: label, original: original, mutated: nil,
+                 reason: "unlatched-on-drag", res: res, started: started,
+                 extra: "gesture=unlatched-on-drag target=\(l.target)")
+            return Unmanaged.passUnretained(event)
         }
 
         // Drag / up: one latched translation for the whole gesture.
