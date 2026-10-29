@@ -218,9 +218,11 @@ final class AccessibilityResolver: @unchecked Sendable {
         } else {
             pid = frontPid
         }
+        // Name is derived from the CHOSEN pid only — never from `front`. A frontmost
+        // name next to a pointer-window pid is exactly the log lie this fixes
+        // (observed: app="Dock" pid=14258, app="Mousecape" pid=174 = WindowServer).
         let targetApp = NSRunningApplication(processIdentifier: pid)
-        let appName = targetApp?.localizedName ?? targetApp?.bundleIdentifier
-            ?? front.localizedName ?? front.bundleIdentifier ?? "pid:\(pid)"
+        let appName = targetApp?.localizedName ?? targetApp?.bundleIdentifier ?? "pid:\(pid)"
 
         // Structural self-RPC guard: a query to our own process must be serviced by
         // our own main thread, which can be inside AX notification handling. Never
@@ -430,12 +432,38 @@ final class AccessibilityResolver: @unchecked Sendable {
         return sliceId
     }
 
-    /// Owning pid of the topmost on-screen window containing `pointer`, in
-    /// front-to-back window-server order (the same order the user perceives).
-    /// Our own overlay panel is skipped: it is a click-through drawing surface
-    /// that follows the highlight, so treating it as the hovered window would
-    /// make every hover resolve to self. Self windows at normal layer are kept so
-    /// the self-RPC guard below still fires when the pointer is over our own GUI.
+    /// System surfaces that own full-surface layer-0 windows and therefore used to
+    /// win the front-to-back scan (observed: app="Dock" while the pointer was far
+    /// from the Dock; app="Mousecape" pid=174 = WindowServer). Matched by identity
+    /// (name + bundle id) as well as by activation policy, because pid-based checks
+    /// and layer alone cannot distinguish these from a real app window.
+    private static let systemOwnerNames: Set<String> = [
+        "WindowServer", "Window Server", "Dock", "Control Center",
+        "Notification Center", "SystemUIServer", "loginwindow"
+    ]
+    private static let systemOwnerBundleIDs: Set<String> = [
+        "com.apple.WindowServer", "com.apple.dock", "com.apple.controlcenter",
+        "com.apple.notificationcenterui", "com.apple.systemuiserver",
+        "com.apple.loginwindow"
+    ]
+
+    /// Owning pid of the topmost on-screen window containing `pointer` that is a
+    /// GENUINE application window, in front-to-back window-server order. Rejected
+    /// candidates do not end the scan: the next window down is tried (bounded by
+    /// the window list), so a WindowServer/Dock surface cannot mask the app beneath.
+    ///
+    /// Filter chain per entry, in order:
+    ///  1. layer == 0 only — menu bar extras, panels, overlays, the Dock and
+    ///     Control Center live above normal windows and are never app surfaces.
+    ///  2. non-empty bounds containing the pointer, and alpha > 0 (invisible
+    ///     windows must not capture the hover).
+    ///  3. our own non-GUI surfaces (non-zero layer) are skipped, so the overlay
+    ///     panel that follows the highlight never becomes the hovered window.
+    ///  4. the owner must be a regular or accessory NSRunningApplication (not a
+    ///     .prohibited system daemon), must not be a known system owner by name or
+    ///     bundle id, and must have a reachable AX application element.
+    /// Self windows at layer 0 are accepted here and caught by the self-RPC guard
+    /// in `refresh`, preserving the existing non-routable pass-through behaviour.
     private func pointerWindowOwnerPid(_ pointer: CGPoint) -> pid_t? {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                     kCGNullWindowID) as? [[String: Any]] else {
@@ -447,13 +475,43 @@ final class AccessibilityResolver: @unchecked Sendable {
             var rect = CGRect.zero
             guard CGRectMakeWithDictionaryRepresentation(bounds as CFDictionary, &rect),
                   rect.width > 0, rect.height > 0, rect.contains(pointer) else { continue }
+            let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+            guard layer == 0 else { continue }
+            if let alpha = (entry[kCGWindowAlpha as String] as? NSNumber)?.doubleValue, alpha <= 0 {
+                continue
+            }
             guard let pidNum = entry[kCGWindowOwnerPID as String] as? NSNumber else { continue }
             let owner = pid_t(truncating: pidNum)
-            let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
-            if owner == selfPid, layer != 0 { continue }   // our overlay panel
+            if owner == selfPid {
+                // Our own layer-0 GUI window is a legitimate hover target candidate;
+                // anything else of ours at layer 0 is still routed through the
+                // self-RPC guard rather than guessed at.
+                return owner
+            }
+            guard acceptableWindowOwner(owner) else { continue }
             return owner
         }
         return nil
+    }
+
+    /// Positive identity check for a window owner: a real, AX-reachable app. One
+    /// cheap attribute query per candidate (no tree walk), so the bounded fallback
+    /// over the window list stays cheap.
+    private func acceptableWindowOwner(_ pid: pid_t) -> Bool {
+        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
+        switch app.activationPolicy {
+        case .regular, .accessory: break
+        default: return false   // .prohibited: system daemons, WindowServer, loginwindow
+        }
+        let name = app.localizedName ?? ""
+        let bundle = app.bundleIdentifier ?? ""
+        if Self.systemOwnerNames.contains(name) || Self.systemOwnerBundleIDs.contains(bundle) {
+            return false
+        }
+        let appEl = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appEl, 0.2)
+        var windows: CFTypeRef?
+        return AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &windows) == .success
     }
 
     /// Window-server fallback for apps whose web content refuses AX hit-testing:
