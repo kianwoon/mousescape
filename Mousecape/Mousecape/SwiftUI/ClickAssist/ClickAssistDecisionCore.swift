@@ -38,11 +38,14 @@ enum DecisionCore {
     }
 
     /// Roles whose click POINT carries meaning. These are first-class controls
-    /// that must NOT be center-snapped. Scrollbar-ish roles are listed here even
-    /// though the resolver's role filter currently excludes them as containers —
-    /// the semantics belong with the routing math, not the filter.
+    /// that must NOT be center-snapped. Editable text keeps the caret at the
+    /// clicked offset, combo boxes open/settle at the clicked row. Scrollbar-ish
+    /// roles are listed here even though the resolver's role filter currently
+    /// excludes some as containers — the semantics belong with the routing
+    /// math, not the filter.
     static let positionSensitiveRoles: Set<String> = [
-        "AXSlider", "AXScrollBar", "AXValueIndicator"
+        "AXSlider", "AXScrollBar", "AXValueIndicator",
+        "AXTextField", "AXTextArea", "AXSearchField", "AXComboBox"
     ]
 
     struct Candidate {
