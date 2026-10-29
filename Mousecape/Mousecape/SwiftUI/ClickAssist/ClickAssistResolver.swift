@@ -72,9 +72,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var coverageKeys: Set<String> = []
     private static let maxFrontierNodes = 20_000
     private static let frontierCompactionThreshold = 1_024
-    /// Bounded spend for the pointer-window fallback probe (Chromium hit-testing).
-    /// Kept separate from the main budget so rotation always gets ≥ 480 nodes.
-    private static let seedWindowProbeBudget = 120
+    /// Dedicated per-cycle budget for the pointer-window priority walk. Taken out
+    /// of `nodeBudget`, so seed + pwin + rotation never exceed 600 nodes any cycle.
+    private static let pointerWindowBudget = 300
     /// A published target survives this long without being re-seen. Large Chromium
     /// trees need several slices to complete one pass, so this must exceed a pass
     /// (typically <2 s at 600 nodes/150 ms). Trade-off: a control that truly
@@ -325,29 +325,37 @@ final class AccessibilityResolver: @unchecked Sendable {
         let seedHit = seedAtPointer(appEl, pointer: pointer, out: &out, budget: &budget,
                                     deadline: deadline, screenUnion: screenUnion)
 
-        // Seed fallback: Chromium web content often refuses AX hit-testing. Ask the
-        // window server which window is under the pointer and spend a small bounded
-        // probe on that window's subtree so its controls are prioritised.
-        let seedWindow: AXUIElement? = seedHit ? nil
-            : windowUnderPointer(windows: windows, pointer: pointer)
-        var probeSpent = 0
-        if let seedWindow {
-            var probeBudget = Self.seedWindowProbeBudget
-            walk(seedWindow, depth: 0, out: &out, budget: &probeBudget, deadline: deadline,
+        // POINTER-WINDOW PRIORITY: Chromium web content often refuses AX hit-testing,
+        // and the rotating global walk reaches a deep video-controls subtree only
+        // every few cycles — so an already-seen control (e.g. the YouTube seek
+        // slider) expires before it is seen again. Walk the AX window under the
+        // pointer FIRST, every cycle, with its own budget, before any rotation.
+        let pwin: AXUIElement? = windowUnderPointer(windows: windows, pointer: pointer, ownerPid: pid)
+        let keysBeforePwin = Set(out.map { $0.key })
+        var pwinSpent = 0
+        if let pwin {
+            var pwinBudget = min(Self.pointerWindowBudget, budget)
+            walk(pwin, depth: 0, out: &out, budget: &pwinBudget, deadline: deadline,
                  screenUnion: screenUnion, appElement: appEl, pid: pid)
-            probeSpent = Self.seedWindowProbeBudget - probeBudget
+            pwinSpent = min(Self.pointerWindowBudget, budget) - pwinBudget
+            budget -= pwinSpent   // total work stays inside the shared node budget
         }
+        let pwinTargets = Set(out.map { $0.key }).subtracting(keysBeforePwin).count
 
         // Rotating BFS slice: resumes the persisted frontier so each cycle visits a
         // different part of the tree instead of re-walking the same 600-node prefix.
+        // If the pointer-window walk consumed the budget (or the deadline), the
+        // rotation is skipped this cycle so total work cannot exceed the bound.
         var roots = windows
-        if let seedWindow, let idx = roots.firstIndex(where: { CFEqual($0, seedWindow) }) {
+        if let pwin, let idx = roots.firstIndex(where: { CFEqual($0, pwin) }) {
             roots.remove(at: idx)
-            roots.insert(seedWindow, at: 0)
+            roots.insert(pwin, at: 0)
         }
         if let menuBar { roots.append(menuBar) }
-        let sliceId = walkSlice(roots: roots, out: &out, budget: &budget, deadline: deadline,
-                                screenUnion: screenUnion, appElement: appEl, pid: pid)
+        let rotationSkipped = budget <= 0 || CACurrentMediaTime() >= deadline
+        let sliceId = rotationSkipped ? -1
+            : walkSlice(roots: roots, out: &out, budget: &budget, deadline: deadline,
+                        screenUnion: screenUnion, appElement: appEl, pid: pid)
 
         // Budget/deadline exhaustion publishes the PARTIAL set (still valid); only
         // AX API failure means "unavailable". Report WHY: a deadline cut used to be
@@ -391,17 +399,18 @@ final class AccessibilityResolver: @unchecked Sendable {
 
         let near = out.filter { Self.boundaryDistance(pointer, $0.rect) <= 80 }.count
         let ms = (CACurrentMediaTime() - t0) * 1000
-        let visited = (Self.nodeBudget - budget) + probeSpent
+        let visited = Self.nodeBudget - budget
         let gen = nextGeneration()
         let snap = CacheSnapshot(generation: gen, targets: out, valid: true, reason: "fresh",
                                  stamp: CACurrentMediaTime(), resolverMs: ms, pointer: pointer,
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d rotationSkipped=%d",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
-                   trunc as NSString, sliceId, coverageKeys.count))
+                   trunc as NSString, sliceId, coverageKeys.count,
+                   pwinTargets, pwinSpent, rotationSkipped ? 1 : 0))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
@@ -579,14 +588,21 @@ final class AccessibilityResolver: @unchecked Sendable {
         return AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &windows) == .success
     }
 
-    /// Window-server fallback for apps whose web content refuses AX hit-testing:
-    /// find the on-screen window under the pointer and map it to its AX window.
-    private func windowUnderPointer(windows: [AXUIElement], pointer: CGPoint) -> AXUIElement? {
+    /// The AX window of `ownerPid` that corresponds to the window-server window
+    /// under the pointer. Owner-constrained so another app's surface (Dock, panels)
+    /// can never be matched to this app's AX window. Used both as the per-cycle
+    /// pointer-window priority entry point and for Chromium's unhelpful hit-testing.
+    private func windowUnderPointer(windows: [AXUIElement], pointer: CGPoint,
+                                    ownerPid: pid_t) -> AXUIElement? {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                     kCGNullWindowID) as? [[String: Any]] else {
             return nil
         }
         for entry in list {
+            guard let pidNum = entry[kCGWindowOwnerPID as String] as? NSNumber,
+                  pid_t(truncating: pidNum) == ownerPid else { continue }
+            let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
+            guard layer == 0 else { continue }
             guard let bounds = entry[kCGWindowBounds as String] as? [String: Any] else { continue }
             var rect = CGRect.zero
             guard CGRectMakeWithDictionaryRepresentation(bounds as CFDictionary, &rect),
