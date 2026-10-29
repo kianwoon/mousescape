@@ -285,8 +285,13 @@ final class TargetingOverlay {
             // v1: the renderer placed something whose frame excludes the point.
             verdict = .ghost
         } else if Self.strictlyContains(hitFrame, rect) {
-            // Only an ancestor/container answered: nothing actionable at the point.
-            verdict = .ghost
+            // Only an ancestor/container answered. That is a ghost ONLY when the
+            // container has no ACTIONABLE child at this point either: a tab's
+            // close ✕ hit-tests to the tab group (its close button is a child
+            // that covers the same point), so a genuinely clickable control must
+            // still ring. Empty strip slots / hidden anchors have no actionable
+            // descendant at the center and stay suppressed.
+            verdict = Self.hasActionableDescendant(hit: element, center: center) ? .visible : .ghost
         } else {
             // Candidate itself, a descendant, or a sibling at the point: show.
             verdict = .visible
@@ -301,6 +306,50 @@ final class TargetingOverlay {
                                          margin: CGFloat = 0.5) -> Bool {
         outer.minX <= inner.minX - margin && outer.maxX >= inner.maxX + margin &&
         outer.minY <= inner.minY - margin && outer.maxY >= inner.maxY + margin
+    }
+
+    /// Roles that accept a click. Mirrors the resolver's first-class set; kept
+    /// local so the display path needs no shared state.
+    private static let actionableRoles: Set<String> = [
+        "AXButton", "AXMenuButton", "AXLink", "AXCheckBox", "AXRadioButton",
+        "AXMenuItem", "AXMenuBarItem", "AXPopUpButton", "AXComboBox", "AXTab",
+        "AXSegmentedControl", "AXSlider", "AXDisclosureTriangle",
+        "AXTextField", "AXSearchField", "AXScrollBar", "AXValueIndicator"
+    ]
+
+    /// True when `root` or one of its near descendants (≤3 levels) is a control
+    /// whose frame contains `center` — i.e. the renderer's container answer still
+    /// maps to a real clickable control at that point. Bounded so the 30 Hz path
+    /// stays cheap.
+    private static func hasActionableDescendant(hit: AXUIElement, center: CGPoint) -> Bool {
+        func roleOf(_ el: AXUIElement) -> String {
+            var v: CFTypeRef?
+            AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &v)
+            return v as? String ?? ""
+        }
+        func contains(_ el: AXUIElement) -> Bool {
+            var p: CFTypeRef?; var s: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &p) == .success,
+                  AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &s) == .success,
+                  let p, let s else { return false }
+            var o = CGPoint.zero; var sz = CGSize.zero
+            guard AXValueGetValue(p as! AXValue, .cgPoint, &o),
+                  AXValueGetValue(s as! AXValue, .cgSize, &sz) else { return false }
+            return CGRect(origin: o, size: sz).contains(center)
+        }
+        if actionableRoles.contains(roleOf(hit)), contains(hit) { return true }
+        func search(_ el: AXUIElement, _ depth: Int) -> Bool {
+            if depth > 3 { return false }
+            var ch: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, kAXChildrenAttribute as CFString, &ch) == .success,
+                  let kids = ch as? [AXUIElement] else { return false }
+            for k in kids {
+                if actionableRoles.contains(roleOf(k)), contains(k) { return true }
+                if search(k, depth + 1) { return true }
+            }
+            return false
+        }
+        return search(hit, 1)
     }
 
     /// Frame of an AX element in global top-left coordinates.
