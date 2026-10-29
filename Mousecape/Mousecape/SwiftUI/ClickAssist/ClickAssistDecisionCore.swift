@@ -327,6 +327,9 @@ final class LegitimacyPolicy: @unchecked Sendable {
         if candidate.contains(hitFrame) { return .confirmed }
         // An equal-frame real control answered (Brave: tab group frame == tab).
         if siblings.contains(where: { sameFrame($0, hitFrame) }) { return .confirmed }
+        // Or the renderer answered with a control row/strip that HOLDS a real
+        // control at this point (Brave's tab strip group covering the tabs).
+        if siblings.contains(where: { hitFrame.contains($0) }) { return .confirmed }
         // Candidate is inside the hit but the hit is an unrelated container.
         return .mismatch
     }
