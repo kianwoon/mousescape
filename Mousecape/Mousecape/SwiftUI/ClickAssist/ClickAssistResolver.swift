@@ -552,7 +552,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         // every few cycles — so an already-seen control (e.g. the YouTube seek
         // slider) expires before it is seen again. Walk the AX window under the
         // pointer FIRST, every cycle, with its own budget, before any rotation.
-        let pwin: AXUIElement? = windowUnderPointer(windows: windows, pointer: pointer, ownerPid: pid)
+        let pwinResult = windowUnderPointer(windows: windows, pointer: pointer, ownerPid: pid)
+        let pwin: AXUIElement? = pwinResult.window
+        let pwinMode = pwinResult.mode
         let keysBeforePwin = Set(out.map { $0.key })
         var pwinSpent = 0
         var pwinStats = WalkStats()
@@ -638,7 +640,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d deduped=%d",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d deduped=%d pwinMode=%@",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -649,7 +651,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                    pwinStats.guidedFallback ? 1 : 0,
                    (pwinStats.guidedFallbackReason ?? "-") as NSString,
                    rotationSkipped ? 1 : 0, rowTooLarge,
-                   tileTooSmall, tileTooLarge, dedupedCount))
+                   tileTooSmall, tileTooLarge, dedupedCount, pwinMode as NSString))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
@@ -834,10 +836,11 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// can never be matched to this app's AX window. Used both as the per-cycle
     /// pointer-window priority entry point and for Chromium's unhelpful hit-testing.
     private func windowUnderPointer(windows: [AXUIElement], pointer: CGPoint,
-                                    ownerPid: pid_t) -> AXUIElement? {
+                                    ownerPid: pid_t) -> (window: AXUIElement?, mode: String) {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                     kCGNullWindowID) as? [[String: Any]] else {
-            return nil
+            // No CG list at all: AX frames are the only authority (see fallback).
+            return axWindowContainingPointer(windows, pointer: pointer)
         }
         for entry in list {
             guard let pidNum = entry[kCGWindowOwnerPID as String] as? NSNumber,
@@ -851,13 +854,32 @@ final class AccessibilityResolver: @unchecked Sendable {
             // AX frames use the same top-left global space as CGWindowBounds.
             if let exact = windows.first(where: { w in
                 frame(w).map { $0.equalTo(rect) } ?? false
-            }) { return exact }
+            }) { return (exact, "cg") }
             if let overlapping = windows.first(where: { w in
                 frame(w).map { $0.intersects(rect) } ?? false
-            }) { return overlapping }
-            return nil
+            }) { return (overlapping, "cg") }
+            return (nil, "none")
         }
-        return nil
+        // CG matched no layer-0 window for this pid under the pointer (observed in
+        // macOS fullscreen: Chromium's CGWindowList reports hollow strips while
+        // the AX content window still carries the full tree). AX frames are
+        // authoritative then: the containing window, smallest area when nested.
+        return axWindowContainingPointer(windows, pointer: pointer)
+    }
+
+    /// AX-containment fallback for `windowUnderPointer`: the smallest-area AX
+    /// window whose frame contains the pointer. Containment is the only guard —
+    /// hollow fullscreen strips have negative origins and do not contain it.
+    private func axWindowContainingPointer(_ windows: [AXUIElement],
+                                           pointer: CGPoint) -> (window: AXUIElement?, mode: String) {
+        var best: (window: AXUIElement, area: CGFloat)?
+        for w in windows {
+            guard let f = frame(w), f.contains(pointer) else { continue }
+            let area = f.width * f.height
+            if best == nil || area < best!.area { best = (w, area) }
+        }
+        if let best { return (best.window, "ax-contain") }
+        return (nil, "none")
     }
 
     /// Resolve the element under the pointer and walk its ancestry (child → parent).
