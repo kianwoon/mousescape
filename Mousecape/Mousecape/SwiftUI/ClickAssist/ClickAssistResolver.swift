@@ -82,6 +82,18 @@ final class AccessibilityResolver: @unchecked Sendable {
     private static let targetFreshnessWindow: CFTimeInterval = 10.0
     private static let nodeBudget = 600
     private static let seedAncestryDepth = 8
+    /// SOFT-invalidation coalescing window. Multiple AX-churn notifications inside
+    /// it collapse into a single walk; routing stays on the previous snapshot until
+    /// the tap's `DecisionCore.cacheMaxAge` (1 s) expires.
+    private static let softCoalesceInterval: TimeInterval = 0.1
+    /// Notification reasons treated as churn (soft). Everything else (focused
+    /// window change, window moved/resized, plus all non-AX hard events) stays hard.
+    private static let softNotificationReasons: Set<String> = [
+        "uielementdestroyed", "layoutchanged", "valuechanged"
+    ]
+    /// Queue-confined (resolver serial queue only): true while one coalesced
+    /// soft refresh is pending, so a notification storm schedules exactly one walk.
+    private var softRefreshScheduled = false
     /// Diagnostics only: rejected-role elements within this many points of the
     /// pointer are reported once per cycle (one dedicated log line). Caps keep the
     /// extra cost bounded — at most `rejectedScanCap` rejected nodes are measured
@@ -159,6 +171,30 @@ final class AccessibilityResolver: @unchecked Sendable {
         queue.async { [weak self] in self?.resetRotation() }
         queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.refresh(lastPointer: .zero)
+        }
+    }
+
+    /// SOFT invalidation: AX churn (element destroyed / layout changed / value
+    /// changed) must NOT publish a non-routable snapshot. The last snapshot keeps
+    /// routing until the tap's 1 s max age expires, and at most ONE coalesced
+    /// refresh is scheduled per `softCoalesceInterval`. Hard discontinuities
+    /// (app/space change, self-app, disable, permission loss) still go through
+    /// `invalidate` above and fail closed exactly as before.
+    private func softInvalidate(reason: String) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let coalesced = self.softRefreshScheduled
+            self.log("RESOLVER_SOFT_INVALIDATE reason=\(reason) action=refresh-only coalesced=\(coalesced ? 1 : 0)")
+            guard !coalesced else { return }
+            self.softRefreshScheduled = true
+            self.queue.asyncAfter(deadline: .now() + Self.softCoalesceInterval) { [weak self] in
+                guard let self else { return }
+                self.softRefreshScheduled = false
+                // Same walk as any other refresh: union, rotation, bounded budget.
+                // Any hard condition detected inside it (pid change, lost trust,
+                // self-app) still publishes non-routable / hard-invalidates.
+                self.refresh(lastPointer: .zero)
+            }
         }
     }
 
@@ -700,7 +736,13 @@ final class AccessibilityResolver: @unchecked Sendable {
             .replacingOccurrences(of: "Notification", with: "")
             .lowercased()
         log("RESOLVER_EVENT ax=\(short)")
-        invalidate(reason: short)
+        // Element churn is soft: keep the published snapshot routable and coalesce
+        // a refresh. Focus/window-geometry changes remain hard (fail closed).
+        if Self.softNotificationReasons.contains(short) {
+            softInvalidate(reason: short)
+        } else {
+            invalidate(reason: short)
+        }
     }
 
     // MARK: - AX helpers
