@@ -214,11 +214,13 @@ enum DecisionCore {
             if c.tier == .firstClass { firstClass.append(scored) }
             else { secondClass.append(scored) }
         }
-        // First-class controls keep absolute priority. Only when NONE is in range
-        // does the nearest legitimate second-tier row/tile get assist — as a
-        // NEAR-MISS only (a direct hit on a second-tier container stays native
-        // passthrough, exactly as before).
-        let pool = firstClass.isEmpty ? secondClass.filter { $0.dist > 0 } : firstClass
+        // INVARIANT: winner/primary is the NEAREST confirmed candidate by boundary
+        // distance, regardless of tier (ties -> smaller area). Tier no longer
+        // grants priority — it only decides snap mode and the direct-hit rule.
+        // ONE carve-out: a second-tier DIRECT hit (dist == 0) is never a target —
+        // a list row must not swallow its embedded first-class control (and with
+        // no first-class nearby it is excluded too: direct hits stay native).
+        let pool = firstClass + secondClass.filter { $0.dist > 0 }
         // A container masquerading as a control (Brave exposes the whole tab
         // strip as an AXTab-sized element, and a strip-sized AXGroup as a tile)
         // encloses several real controls. It is never a target on its own: drop
