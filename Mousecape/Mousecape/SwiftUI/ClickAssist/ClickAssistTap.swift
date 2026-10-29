@@ -155,6 +155,19 @@ final class AssistTap: @unchecked Sendable {
         }
     }
 
+    /// Diagnostics helper for the no-candidate branch only: the nearest
+    /// `limit` eligible candidates with boundary distance, sorted ascending.
+    /// Pure — reads the existing candidate array, allocates nothing else.
+    private static func nearestCandidates(_ candidates: [Candidate], to point: CGPoint,
+                                          limit: Int = 3) -> String {
+        let listed = candidates
+            .map { (key: $0.key, dist: DecisionCore.boundaryDistance(point, $0.rect)) }
+            .sorted { $0.dist < $1.dist }
+            .prefix(limit)
+            .map { "\($0.key):\(String(format: "%.1f", $0.dist))" }
+        return listed.isEmpty ? "-" : listed.joined(separator: ",")
+    }
+
     private func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if type == .tapDisabledByUserInput, manuallyDisabled {
@@ -201,9 +214,14 @@ final class AssistTap: @unchecked Sendable {
                      reason: "direct-hit", res: res, started: started, extra: extra)
                 return Unmanaged.passUnretained(event)
             case .noCandidate:
+                // Diagnostics only: how far was the CLOSEST eligible control? The
+                // candidate set is the already-filtered snapshot, so a short list
+                // here means either genuine distance (a) or a filtered-out role (c).
+                // Computed strictly inside this branch — no cost on any other path.
+                let nearest = AssistTap.nearestCandidates(res.candidates, to: original)
                 emit("PASSTHROUGH", type: label, original: original, mutated: nil,
                      reason: "no-candidate-in-radius", res: res, started: started,
-                     extra: "tol=\(tolerance) targets=\(res.candidates.count)")
+                     extra: "tol=\(tolerance) targets=\(res.candidates.count) nearest3=[\(nearest)]")
                 return Unmanaged.passUnretained(event)
             case .ambiguous(let scored, let tie):
                 let listed = scored.prefix(3)

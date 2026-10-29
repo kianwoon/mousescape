@@ -82,6 +82,17 @@ final class AccessibilityResolver: @unchecked Sendable {
     private static let targetFreshnessWindow: CFTimeInterval = 10.0
     private static let nodeBudget = 600
     private static let seedAncestryDepth = 8
+    /// Diagnostics only: rejected-role elements within this many points of the
+    /// pointer are reported once per cycle (one dedicated log line). Caps keep the
+    /// extra cost bounded — at most `rejectedScanCap` rejected nodes are measured
+    /// (2 AX reads each, same as an eligible node) and at most `rejectedNearCap`
+    /// are retained. Nothing survives the cycle.
+    private static let rejectedNearRadius: CGFloat = 48
+    private static let rejectedNearCap = 5
+    private static let rejectedScanCap = 120
+    private var cyclePointer = CGPoint.zero
+    private var rejectedNear: [(role: String, label: String, rect: CGRect, dist: CGFloat)] = []
+    private var rejectedScanned = 0
 
     init(cache: CacheStore, log: @escaping (String) -> Void) {
         self.cache = cache
@@ -253,6 +264,13 @@ final class AccessibilityResolver: @unchecked Sendable {
         truncatedByDeadline = false
         let screenUnion = Self.screenUnionAX()
 
+        // Diagnostics scratch for THIS cycle only (cleared next refresh): elements
+        // the role filter rejected that sit near the pointer. Bounded by
+        // rejectedScanCap examined nodes and rejectedNearCap retained entries.
+        cyclePointer = pointer
+        rejectedNear.removeAll()
+        rejectedScanned = 0
+
         // Reset union + rotation when the frontmost app changes: never carry one
         // app's targets, keys or frontier into another app's snapshot.
         if unionPid != pid {
@@ -348,6 +366,17 @@ final class AccessibilityResolver: @unchecked Sendable {
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count))
+
+        // Diagnostics only: why a hovered control never became a candidate. Separate
+        // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
+        if !rejectedNear.isEmpty {
+            let items = rejectedNear
+                .map { "\($0.role)@\(ScreenSpace.fmt($0.rect.origin)):\(Int($0.rect.width))x\(Int($0.rect.height)):d=\(String(format: "%.1f", $0.dist)):label=\"\($0.label)\"" }
+                .joined(separator: " | ")
+            log(String(format: "RESOLVER_REJECTED_NEAR gen=%llu pointer=%@ radius=%.0f scanned=%d count=%d items=[%@]",
+                       gen, ScreenSpace.fmt(pointer) as NSString, Self.rejectedNearRadius,
+                       rejectedScanned, rejectedNear.count, items as NSString))
+        }
 
         let rects = out.map { "\($0.key):\(ScreenSpace.fmt($0.rect.origin)):\(Int($0.rect.width))x\(Int($0.rect.height))" }
         if rects != lastRects {
@@ -561,11 +590,31 @@ final class AccessibilityResolver: @unchecked Sendable {
         return found
     }
 
+    /// Records one role-filter rejection if it sits within `rejectedNearRadius` of
+    /// the pointer. Diagnostics only: never affects `out`, the union, or routing.
+    /// Cost ceiling: `rejectedScanCap` frame reads per cycle, `rejectedNearCap`
+    /// retained entries; the label read happens only for in-radius elements.
+    private func noteRejectedNearPointer(_ el: AXUIElement, role: String) {
+        guard rejectedNear.count < Self.rejectedNearCap,
+              rejectedScanned < Self.rejectedScanCap else { return }
+        rejectedScanned += 1
+        guard let rect = frame(el), rect.width > 0, rect.height > 0 else { return }
+        let dist = Self.boundaryDistance(cyclePointer, rect)
+        guard dist <= Self.rejectedNearRadius else { return }
+        let label = stringAttr(el, kAXTitleAttribute)
+            ?? stringAttr(el, kAXDescriptionAttribute) ?? "-"
+        rejectedNear.append((role: role, label: label, rect: rect, dist: dist))
+    }
+
     /// Extract one element as a candidate if its role/geometry qualifies.
     @discardableResult
     private func collect(_ el: AXUIElement, out: inout [CachedTarget],
                          screenUnion: CGRect) -> Bool {
-        guard let role = stringAttr(el, kAXRoleAttribute), Self.eligibleRoles.contains(role) else {
+        guard let role = stringAttr(el, kAXRoleAttribute) else { return false }
+        guard Self.eligibleRoles.contains(role) else {
+            // Diagnostics only: remember near-pointer elements the role filter drops
+            // (e.g. a <div> web button exposed as AXGroup). Bounded and per-cycle.
+            noteRejectedNearPointer(el, role: role)
             return false
         }
         // Secure text fields are never redirect candidates: a near miss must
