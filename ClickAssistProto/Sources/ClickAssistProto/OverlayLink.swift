@@ -453,7 +453,7 @@ final class HelperOverlay {
             p.acceptsMouseMovedEvents = false
             p.hidesOnDeactivate = false
             p.becomesKeyOnlyIfNeeded = true
-            p.level = .statusBar
+            p.level = OverlayPanel.targetWindowLevel
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             p.isReleasedWhenClosed = false
             let v = OverlayView(frame: NSRect(origin: .zero, size: cocoa.size))

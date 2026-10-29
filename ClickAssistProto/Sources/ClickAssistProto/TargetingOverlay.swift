@@ -5,6 +5,9 @@ import CoreGraphics
 /// Borderless transparent panel that can NEVER become key/main and NEVER receives
 /// mouse events (window-server level `ignoresMouseEvents`). Pure drawing surface.
 final class OverlayPanel: NSPanel {
+    /// Above open dropdown menus (`.popUpMenu` = 101); +1 keeps the ring on top.
+    /// Click-through is unaffected — `ignoresMouseEvents` routes events, not level.
+    static let targetWindowLevel = NSWindow.Level(rawValue: NSWindow.Level.popUpMenu.rawValue + 1)
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 }
@@ -161,7 +164,7 @@ final class TargetingOverlay {
             p.acceptsMouseMovedEvents = false
             p.hidesOnDeactivate = false
             p.becomesKeyOnlyIfNeeded = true
-            p.level = .statusBar
+            p.level = OverlayPanel.targetWindowLevel
             p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             p.isReleasedWhenClosed = false
             let v = OverlayView(frame: NSRect(origin: .zero, size: cocoa.size))
