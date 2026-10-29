@@ -971,6 +971,13 @@ final class AccessibilityResolver: @unchecked Sendable {
             let areaA = targets[a].rect.width * targets[a].rect.height
             let areaB = targets[b].rect.width * targets[b].rect.height
             if areaA != areaB { return areaA < areaB }
+            // Equal frame: a genuine control role wins over the wrapper container
+            // (Brave exposes a tab as AXRadioButton plus an equal-frame keyless
+            // AXGroup; the group used to win the key tie and demote the tab to
+            // second class, so tabs/close buttons never ringed as controls).
+            let tierA = targets[a].tier == .firstClass ? 0 : 1
+            let tierB = targets[b].tier == .firstClass ? 0 : 1
+            if tierA != tierB { return tierA < tierB }
             return targets[a].key < targets[b].key
         }
         var keepIndices: [Int] = []
