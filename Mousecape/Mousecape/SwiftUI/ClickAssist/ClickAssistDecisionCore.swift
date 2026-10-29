@@ -215,7 +215,16 @@ enum DecisionCore {
             else { secondClass.append(scored) }
         }
         let pool = firstClass.isEmpty ? secondClass : firstClass
-        let ordered = pool.sorted { a, b in
+        // A container masquerading as a control (Brave exposes the whole tab
+        // strip as an AXTab-sized element) contains several real controls. It is
+        // never a target on its own: drop any candidate that encloses 2+ others.
+        let filtered = pool.filter { candidate in
+            pool.filter { other in
+                other.candidate.key != candidate.candidate.key
+                    && candidate.candidate.rect.contains(other.candidate.rect)
+            }.count < 2
+        }
+        let ordered = filtered.sorted { a, b in
             if a.dist != b.dist { return a.dist < b.dist }
             let areaA = a.candidate.rect.width * a.candidate.rect.height
             let areaB = b.candidate.rect.width * b.candidate.rect.height
