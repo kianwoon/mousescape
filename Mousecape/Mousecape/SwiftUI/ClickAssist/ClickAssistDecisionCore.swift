@@ -11,6 +11,13 @@ enum DecisionCore {
     static let tieEpsilon: CGFloat = 2.0
     /// A cache snapshot older than this is treated as stale even if still marked valid.
     static let cacheMaxAge: CFTimeInterval = 1.0
+    /// Fraction of each half-dimension treated as a control's "live core". A
+    /// DIRECT hit inside this core is left untouched; outside it (but still
+    /// inside the AX rect) a position-agnostic control is re-aimed at the
+    /// bullseye. 0.4 = the inner 40% of each half-axis — Chromium's tab close X
+    /// exposes 28×28 but only registers near the glyph, so a click 13 pt off
+    /// center inside the rect is a dead zone and must be redirected.
+    static let coreRadiusFraction: CGFloat = 0.4
 
     /// Admission tier. FIRST-CLASS is a genuine control role; SECOND-CLASS is a
     /// container admitted only by the tile/row size envelope (AXImage/AXGroup
@@ -71,7 +78,7 @@ enum DecisionCore {
         case noCandidate
         case ambiguous(scored: [(candidate: Candidate, dist: CGFloat)], tie: CGFloat)
         case redirect(candidate: Candidate, corrected: CGPoint, boundaryDist: CGFloat,
-                      snap: Snap)
+                      snap: Snap, edgeCore: Bool)
     }
 
     static func route(point: CGPoint, candidates: [Candidate], tolerance: CGFloat,
@@ -102,6 +109,14 @@ enum DecisionCore {
 
     private static func directHit(_ hit: Candidate, point: CGPoint,
                                   candidates: [Candidate]) -> Decision {
+        // A position-agnostic first-class control whose AX rect is larger than
+        // its real hit region: direct hits outside the live core are re-aimed
+        // at the bullseye. Inside the core, and for every position-sensitive
+        // role / second-class container, native passthrough is unchanged.
+        if snapMode(for: hit) == .center, !isWithinCenterCore(point, rect: hit.rect) {
+            return .redirect(candidate: hit, corrected: centerPoint(into: hit.rect),
+                             boundaryDist: 0, snap: .center, edgeCore: true)
+        }
         let others = candidates
             .filter { $0.key != hit.key }
             .map { (key: $0.key, dist: boundaryDistance(point, $0.rect)) }
@@ -135,7 +150,7 @@ enum DecisionCore {
             ? centerPoint(into: best.0.rect)
             : clampPoint(point, into: best.0.rect, inset: best.0.inset)
         return .redirect(candidate: best.0, corrected: corrected,
-                         boundaryDist: best.1, snap: snap)
+                         boundaryDist: best.1, snap: snap, edgeCore: false)
     }
 
     /// Center-snap only first-class, position-agnostic controls. Second-class
@@ -154,6 +169,16 @@ enum DecisionCore {
         let inset = max(2, min(rect.width, rect.height) * 0.1)
         let r = rect.insetBy(dx: inset, dy: inset)
         return CGPoint(x: r.midX, y: r.midY)
+    }
+
+    /// True when `point` is within `coreRadiusFraction` of the rect's
+    /// half-dimension on BOTH axes — the control's known-live inner region.
+    static func isWithinCenterCore(_ point: CGPoint, rect: CGRect) -> Bool {
+        guard rect.width > 0, rect.height > 0 else { return true }
+        let dx = abs(point.x - rect.midX)
+        let dy = abs(point.y - rect.midY)
+        return dx <= rect.width * 0.5 * coreRadiusFraction
+            && dy <= rect.height * 0.5 * coreRadiusFraction
     }
 
     static func clampPoint(_ p: CGPoint, into rect: CGRect, inset: CGFloat) -> CGPoint {

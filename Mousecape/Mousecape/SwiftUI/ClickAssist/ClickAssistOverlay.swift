@@ -165,7 +165,7 @@ final class TargetingOverlay {
                                                                inset: $0.inset, tier: $0.tier,
                                                                role: $0.role) }
             switch DecisionCore.route(point: pointer, candidates: cands, tolerance: tolerance) {
-            case .redirect(let c, _, _, _):
+            case .redirect(let c, _, _, _, _):
                 action = "show"; targetKey = c.key; frame = c.rect; reason = "redirect"
             case .directHit(let c, _):
                 if c.tier == .secondClass {
