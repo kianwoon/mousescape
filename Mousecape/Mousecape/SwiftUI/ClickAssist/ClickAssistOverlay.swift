@@ -101,8 +101,12 @@ final class TargetingOverlay {
     /// Ghost-ring suppression: per-target visibility verdict from the app's own
     /// AX hit-test, cached briefly so the 30 Hz repaint does not issue an AX call
     /// every tick (≈ one hit-test per 0.5 s per target key).
+    private enum GhostVerdict {
+        case visible
+        case ghost
+    }
     private struct VisibilityVerdict {
-        let visible: Bool
+        let verdict: GhostVerdict
         let stamp: CFTimeInterval
     }
     private var visibilityCache: [String: VisibilityVerdict] = [:]
@@ -240,13 +244,25 @@ final class TargetingOverlay {
     }
 
     /// Advisory visibility check via the app's own AX hit-test at the candidate
-    /// center. Returns false ONLY on a definitive mismatch (an element was
-    /// returned and its frame excludes the queried center). Errors/nil pass.
+    /// center. Returns false ONLY on a definitive mismatch. Errors/nil pass.
     /// Called on the main actor; a 0.1 s messaging timeout bounds the cost.
+    ///
+    /// v2: containment alone is not enough. An INVISIBLE element inside a
+    /// visible container (Brave tab slots, hidden close buttons, "search tabs"
+    /// anchors) hit-tests to the visible strip, whose frame still contains the
+    /// candidate center. The renderer's answer is the ASPECT that matters:
+    /// - hit frame strictly INSIDE the candidate frame → a descendant was hit → real, show.
+    /// - candidate frame strictly INSIDE the hit frame → only an ancestor (bare
+    ///   container) responded → nothing actionable there → ghost, suppress.
+    /// - same/equal frames or partial overlap → the candidate itself or an
+    ///   unrelated sibling → fall back to v1 containment (show).
     private func isVisibleNow(pid: pid_t, key: String, rect: CGRect) -> Bool {
         let now = CACurrentMediaTime()
-        if let cached = visibilityCache[key], now - cached.stamp < Self.visibilityTTL {
-            return cached.visible
+        // Cache key includes the verdict type's geometry (center) so a moved
+        // candidate never reuses a verdict computed for another rect.
+        let cacheKey = "\(key)|\(Int(rect.midX))|\(Int(rect.midY))"
+        if let cached = visibilityCache[cacheKey], now - cached.stamp < Self.visibilityTTL {
+            return cached.verdict == .visible
         }
         guard pid > 0, pid != getpid(), rect.width > 0, rect.height > 0 else { return true }
         let center = CGPoint(x: rect.midX, y: rect.midY)
@@ -257,16 +273,34 @@ final class TargetingOverlay {
         guard AXUIElementCopyElementAtPosition(app, Float(center.x), Float(center.y),
                                                &element) == .success,
               let element else {
-            visibilityCache[key] = VisibilityVerdict(visible: true, stamp: now)
+            visibilityCache[cacheKey] = VisibilityVerdict(verdict: .visible, stamp: now)
             return true
         }
         guard let hitFrame = axFrame(element) else {
-            visibilityCache[key] = VisibilityVerdict(visible: true, stamp: now)
+            visibilityCache[cacheKey] = VisibilityVerdict(verdict: .visible, stamp: now)
             return true
         }
-        let visible = hitFrame.contains(center)
-        visibilityCache[key] = VisibilityVerdict(visible: visible, stamp: now)
-        return visible
+        let verdict: GhostVerdict
+        if !hitFrame.contains(center) {
+            // v1: the renderer placed something whose frame excludes the point.
+            verdict = .ghost
+        } else if Self.strictlyContains(hitFrame, rect) {
+            // Only an ancestor/container answered: nothing actionable at the point.
+            verdict = .ghost
+        } else {
+            // Candidate itself, a descendant, or a sibling at the point: show.
+            verdict = .visible
+        }
+        visibilityCache[cacheKey] = VisibilityVerdict(verdict: verdict, stamp: now)
+        return verdict == .visible
+    }
+
+    /// `outer` fully encloses `inner` with at least `margin` on every side —
+    /// distinguishes an ancestor answer from an equal-frame self answer.
+    private static func strictlyContains(_ outer: CGRect, _ inner: CGRect,
+                                         margin: CGFloat = 0.5) -> Bool {
+        outer.minX <= inner.minX - margin && outer.maxX >= inner.maxX + margin &&
+        outer.minY <= inner.minY - margin && outer.maxY >= inner.maxY + margin
     }
 
     /// Frame of an AX element in global top-left coordinates.
