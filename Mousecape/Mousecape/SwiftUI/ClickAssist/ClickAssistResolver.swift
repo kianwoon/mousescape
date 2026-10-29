@@ -1039,9 +1039,13 @@ final class AccessibilityResolver: @unchecked Sendable {
                 if pitch <= 0 || pitch > 4 * row[i].rect.width { aligned = false; break }
             }
             guard aligned else { continue }
-            // Real tabs present: do not synthesize.
+            // Real tabs present: do not synthesize. Only tab-BODY-sized
+            // first-class elements count — a close-only strip's 16×16 ✕ buttons
+            // are first-class too and must not veto synthesis.
             let firstClassInside = targets.filter {
-                $0.tier == .firstClass && cr.contains(CGPoint(x: $0.rect.midX, y: $0.rect.midY))
+                $0.tier == .firstClass
+                    && $0.rect.width >= 60
+                    && cr.contains(CGPoint(x: $0.rect.midX, y: $0.rect.midY))
             }
             guard firstClassInside.count < 2 else { continue }
             groups.append(Group(buttons: row, container: container))
