@@ -139,10 +139,11 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// it collapse into a single walk; routing stays on the previous snapshot until
     /// the tap's `DecisionCore.cacheMaxAge` (1 s) expires.
     private static let softCoalesceInterval: TimeInterval = 0.1
-    /// Notification reasons treated as churn (soft). Everything else (focused
-    /// window change, window moved/resized, plus all non-AX hard events) stays hard.
+    /// Notification reasons treated as churn (soft). Everything else (window
+    /// moved/resized, space change, plus all non-AX hard events) stays hard.
+    /// Identity/activation churn moves no rects, so the last snapshot stays routable.
     private static let softNotificationReasons: Set<String> = [
-        "uielementdestroyed", "layoutchanged", "valuechanged"
+        "uielementdestroyed", "layoutchanged", "valuechanged", "focusedwindowchanged"
     ]
     /// Queue-confined (resolver serial queue only): true while one coalesced
     /// soft refresh is pending, so a notification storm schedules exactly one walk.
@@ -183,13 +184,13 @@ final class AccessibilityResolver: @unchecked Sendable {
                                                object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.log("RESOLVER_EVENT app-activated")
-            self.invalidate(reason: "app-switch")
+            self.softInvalidate(reason: "app-switch")
         }
         NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification,
                                                object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.log("RESOLVER_EVENT app-resigned-active")
-            self.invalidate(reason: "app-resign-active")
+            self.softInvalidate(reason: "app-resign-active")
         }
         // Gate 4: a Space switch invalidates immediately. The frontmost app does not
         // change, so only this notification can distinguish a Space move from a click.
@@ -240,10 +241,11 @@ final class AccessibilityResolver: @unchecked Sendable {
     }
 
     /// SOFT invalidation: AX churn (element destroyed / layout changed / value
-    /// changed) must NOT publish a non-routable snapshot. The last snapshot keeps
-    /// routing until the tap's 1 s max age expires, and at most ONE coalesced
-    /// refresh is scheduled per `softCoalesceInterval`. Hard discontinuities
-    /// (app/space change, self-app, disable, permission loss) still go through
+    /// changed) and identity churn (app activation/resign, focused window change)
+    /// must NOT publish a non-routable snapshot. The last snapshot keeps routing
+    /// until the tap's 1 s max age expires, and at most ONE coalesced refresh is
+    /// scheduled per `softCoalesceInterval`. Hard discontinuities (space change,
+    /// window move/resize, self-app, disable, permission loss) still go through
     /// `invalidate` above and fail closed exactly as before.
     private func softInvalidate(reason: String) {
         queue.async { [weak self] in
@@ -387,7 +389,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         // window), so the union/rotation reset path is identical for both causes.
         if lastResolvedPid != 0, pid != lastResolvedPid {
             log("RESOLVER_EVENT app-switch-polled prev=\(lastResolvedPid) new=\(pid) front=\(frontPid) pointerWindow=\(pointerPid.map { String($0) } ?? "-")")
-            invalidate(reason: "app-switch")
+            // Activation/pointer-pid churn moves no rects: keep the prior snapshot
+            // routable and let this same refresh publish the re-targeted union.
+            softInvalidate(reason: "app-switch")
         }
         lastResolvedPid = pid
 
