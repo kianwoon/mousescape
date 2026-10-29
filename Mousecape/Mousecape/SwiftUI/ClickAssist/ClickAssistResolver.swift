@@ -75,11 +75,17 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Dedicated per-cycle budget for the pointer-window priority walk. Taken out
     /// of `nodeBudget`, so seed + pwin + rotation never exceed 600 nodes any cycle.
     private static let pointerWindowBudget = 300
-    /// Depth bound for the pointer-window walk. Deep nested web/player trees
-    /// (YouTube controls sit below several AXGroup/WebArea levels) need more than
-    /// the rotation walk's 12-level frontier guard. Still bounded, and the node
-    /// budget + deadline dominate: this only widens the shape, not the cost.
+    /// Depth bound for the pointer-window SUBTREE walk (children of the guided
+    /// descent's deepest node). Deep nested web/player trees (YouTube controls sit
+    /// below several AXGroup/WebArea levels) need more than the rotation walk's
+    /// 12-level frontier guard. Expressed RELATIVE to the guided endpoint, so the
+    /// total width of the walk is unchanged while the endpoint may be much deeper.
     private static let pointerWindowMaxDepth = 24
+    /// Depth bound for the POINTER-GUIDED DESCENT itself. Guided descent costs ~1
+    /// node per level (it reads children only to choose the single containing one),
+    /// so depth is far cheaper than breadth: 48 levels ≈ 48 nodes out of the 300-node
+    /// pointer-window budget, and the deadline still stops it first if AX stalls.
+    private static let pointerWindowGuidedMaxDepth = 48
     /// Default depth bound for the shared `walk` (rotation-style consumers).
     private static let walkMaxDepth = 12
     /// Adaptive cadence. The walk is the dominant resolver cost (measured mean
@@ -398,7 +404,8 @@ final class AccessibilityResolver: @unchecked Sendable {
             var pwinBudget = min(Self.pointerWindowBudget, budget)
             walkGuided(pwin, pointer: pointer, out: &out, budget: &pwinBudget, deadline: deadline,
                        screenUnion: screenUnion, appElement: appEl, pid: pid,
-                       maxDepth: Self.pointerWindowMaxDepth, stats: &pwinStats)
+                       maxDepth: Self.pointerWindowGuidedMaxDepth,
+                       subtreeDepth: Self.pointerWindowMaxDepth, stats: &pwinStats)
             pwinSpent = min(Self.pointerWindowBudget, budget) - pwinBudget
             budget -= pwinSpent   // total work stays inside the shared node budget
         }
@@ -468,12 +475,13 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
                    pwinTargets, pwinSpent, pwinStats.maxDepth,
-                   pwinStats.depthCapped ? 1 : 0, pwinStats.guidedLevel,
+                   pwinStats.depthCapped ? 1 : 0, pwinStats.guidedBound,
+                   pwinStats.guidedLevel,
                    pwinStats.guidedSteps, pwinStats.guidedHits,
                    pwinStats.guidedFallback ? 1 : 0,
                    (pwinStats.guidedFallbackReason ?? "-") as NSString,
@@ -775,6 +783,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         /// no containing child, budget, or deadline) and fell back to a plain walk.
         var guidedFallback = false
         var guidedFallbackReason: String?
+        /// Descent bound in force this cycle, published so a cap hit is legible
+        /// as `pwinDepthCapped=1 pwinGuidedBound=<value>`.
+        var guidedBound = 0
     }
 
     /// POINTER-GUIDED DESCENT + bounded subtree walk for the pointer window.
@@ -788,22 +799,24 @@ final class AccessibilityResolver: @unchecked Sendable {
     ///
     ///  1. From the pointer window's element, descend one level at a time into the
     ///     child whose AX frame CONTAINS the pointer (smallest containing child
-    ///     wins), collecting eligible targets along the path, bounded by `maxDepth`.
+    ///     wins), collecting eligible targets along the path, bounded by the guided
+    ///     depth bound (`pointerWindowGuidedMaxDepth` = 48: ~1 node per level).
     ///  2. No child contains the pointer (or the node is a leaf / budget or
     ///     deadline is exhausted) -> stop and fall back to today's bounded walk at
     ///     that node; the reason is recorded for the publish log.
     ///  3. From the deepest node reached, walk its children with the remaining
-    ///     pointer-window budget so siblings/controls at that depth are collected.
+    ///     pointer-window budget, still limited to `subtreeDepth` levels below it.
     ///
     /// Total cost stays inside the caller's node budget and deadline; the global
     /// rotation slice, role filter, decision maths and tolerance are untouched.
     private func walkGuided(_ root: AXUIElement, pointer: CGPoint, out: inout [CachedTarget],
                             budget: inout Int, deadline: CFTimeInterval, screenUnion: CGRect,
-                            appElement: AXUIElement, pid: pid_t, maxDepth: Int,
+                            appElement: AXUIElement, pid: pid_t, maxDepth: Int, subtreeDepth: Int,
                             stats: inout WalkStats) {
         var current = root
         var depth = 0
         var cappedByDepth = false
+        stats.guidedBound = maxDepth
 
         // 1) Guided descent: at each level choose the smallest child containing the pointer.
         while budget > 0 {
@@ -857,13 +870,14 @@ final class AccessibilityResolver: @unchecked Sendable {
         stats.guidedLevel = depth
         stats.guidedFallback = !cappedByDepth
 
-        // 2) Bounded subtree walk from the deepest node, absolute depth still bounded.
+        // 2) Bounded subtree walk from the deepest node, unchanged width: the same
+        // `subtreeDepth` levels of children, now relative to the deeper endpoint.
         guard budget > 0, CACurrentMediaTime() < deadline else { return }
         if let raw = attr(current, kAXChildrenAttribute), let kids = axArray(raw) {
             for k in kids {
                 walk(k, depth: depth + 1, out: &out, budget: &budget, deadline: deadline,
                      screenUnion: screenUnion, appElement: appElement, pid: pid,
-                     maxDepth: maxDepth, stats: &stats)
+                     maxDepth: depth + subtreeDepth, stats: &stats)
             }
         }
     }
