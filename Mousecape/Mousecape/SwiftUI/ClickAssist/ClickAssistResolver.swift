@@ -396,9 +396,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         var pwinStats = WalkStats()
         if let pwin {
             var pwinBudget = min(Self.pointerWindowBudget, budget)
-            walk(pwin, depth: 0, out: &out, budget: &pwinBudget, deadline: deadline,
-                 screenUnion: screenUnion, appElement: appEl, pid: pid,
-                 maxDepth: Self.pointerWindowMaxDepth, stats: &pwinStats)
+            walkGuided(pwin, pointer: pointer, out: &out, budget: &pwinBudget, deadline: deadline,
+                       screenUnion: screenUnion, appElement: appEl, pid: pid,
+                       maxDepth: Self.pointerWindowMaxDepth, stats: &pwinStats)
             pwinSpent = min(Self.pointerWindowBudget, budget) - pwinBudget
             budget -= pwinSpent   // total work stays inside the shared node budget
         }
@@ -468,12 +468,16 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  appName: appName, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d rotationSkipped=%d",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
                    pwinTargets, pwinSpent, pwinStats.maxDepth,
-                   pwinStats.depthCapped ? 1 : 0, rotationSkipped ? 1 : 0))
+                   pwinStats.depthCapped ? 1 : 0, pwinStats.guidedLevel,
+                   pwinStats.guidedSteps, pwinStats.guidedHits,
+                   pwinStats.guidedFallback ? 1 : 0,
+                   (pwinStats.guidedFallbackReason ?? "-") as NSString,
+                   rotationSkipped ? 1 : 0))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
@@ -761,6 +765,107 @@ final class AccessibilityResolver: @unchecked Sendable {
     private struct WalkStats {
         var maxDepth = 0
         var depthCapped = false
+        /// Deepest level the pointer-guided descent reached (0 = root only).
+        var guidedLevel = 0
+        /// Levels examined during the descent (bounded by budget/deadline/depth).
+        var guidedSteps = 0
+        /// Levels where a containing child was found and the descent advanced.
+        var guidedHits = 0
+        /// True when the descent stopped without hitting the depth bound (leaf,
+        /// no containing child, budget, or deadline) and fell back to a plain walk.
+        var guidedFallback = false
+        var guidedFallbackReason: String?
+    }
+
+    /// POINTER-GUIDED DESCENT + bounded subtree walk for the pointer window.
+    ///
+    /// A blind depth-first walk on a wide Chromium tree spends the whole 300-node
+    /// pointer-window budget on sibling fan-out before it reaches the deep control
+    /// (observed on WhatsApp Web: `pwinNodes=300`, `pwinDepthCapped=1`, only 17
+    /// targets, while the real control sat under nested `AXGroup` containers).
+    /// AX hit-testing (`AXUIElementCopyElementAtPosition`) is unreliable there, so
+    /// the pointer itself drives the choice instead:
+    ///
+    ///  1. From the pointer window's element, descend one level at a time into the
+    ///     child whose AX frame CONTAINS the pointer (smallest containing child
+    ///     wins), collecting eligible targets along the path, bounded by `maxDepth`.
+    ///  2. No child contains the pointer (or the node is a leaf / budget or
+    ///     deadline is exhausted) -> stop and fall back to today's bounded walk at
+    ///     that node; the reason is recorded for the publish log.
+    ///  3. From the deepest node reached, walk its children with the remaining
+    ///     pointer-window budget so siblings/controls at that depth are collected.
+    ///
+    /// Total cost stays inside the caller's node budget and deadline; the global
+    /// rotation slice, role filter, decision maths and tolerance are untouched.
+    private func walkGuided(_ root: AXUIElement, pointer: CGPoint, out: inout [CachedTarget],
+                            budget: inout Int, deadline: CFTimeInterval, screenUnion: CGRect,
+                            appElement: AXUIElement, pid: pid_t, maxDepth: Int,
+                            stats: inout WalkStats) {
+        var current = root
+        var depth = 0
+        var cappedByDepth = false
+
+        // 1) Guided descent: at each level choose the smallest child containing the pointer.
+        while budget > 0 {
+            guard CACurrentMediaTime() < deadline else {
+                truncatedByDeadline = true
+                stats.guidedFallbackReason = "deadline"
+                break
+            }
+            budget -= 1
+            stats.guidedSteps += 1
+            stats.maxDepth = max(stats.maxDepth, depth)
+            collect(current, out: &out, screenUnion: screenUnion)
+
+            // Stop before reading children when the node budget is already spent.
+            guard budget > 0 else {
+                stats.guidedFallbackReason = "budget"
+                break
+            }
+            guard depth < maxDepth else {
+                cappedByDepth = true
+                stats.depthCapped = true
+                break
+            }
+            guard let raw = attr(current, kAXChildrenAttribute), let kids = axArray(raw) else {
+                stats.guidedFallbackReason = (depth == 0) ? "root-leaf" : "leaf"
+                break
+            }
+            // Smallest containing child: an AXGroup wrapper and its real control can
+            // both contain the pointer; the tightest frame is the inner control.
+            var best: AXUIElement?
+            var bestArea = CGFloat.greatestFiniteMagnitude
+            for kid in kids {
+                guard let r = frame(kid), r.width > 0, r.height > 0, r.contains(pointer) else { continue }
+                let area = r.width * r.height
+                if area < bestArea {
+                    bestArea = area
+                    best = kid
+                }
+            }
+            guard let next = best else {
+                stats.guidedFallbackReason = "no-containing-child"
+                break
+            }
+            stats.guidedHits += 1
+            current = next
+            depth += 1
+        }
+        if budget <= 0, stats.guidedFallbackReason == nil {
+            stats.guidedFallbackReason = "budget"
+        }
+        stats.guidedLevel = depth
+        stats.guidedFallback = !cappedByDepth
+
+        // 2) Bounded subtree walk from the deepest node, absolute depth still bounded.
+        guard budget > 0, CACurrentMediaTime() < deadline else { return }
+        if let raw = attr(current, kAXChildrenAttribute), let kids = axArray(raw) {
+            for k in kids {
+                walk(k, depth: depth + 1, out: &out, budget: &budget, deadline: deadline,
+                     screenUnion: screenUnion, appElement: appElement, pid: pid,
+                     maxDepth: maxDepth, stats: &stats)
+            }
+        }
     }
 
     /// Depth-first walk used by the pointer-window priority pass. `maxDepth` is a
