@@ -208,7 +208,9 @@ final class TargetingOverlay {
         // cached element.
         var ghostKey: String?
         if action == "show", let key = targetKey, let rect = frame, fresh,
-           !isVisibleNow(pid: s.pid, key: key, rect: rect) {
+           !isVisibleNow(pid: s.pid, key: key, rect: rect,
+                         siblings: s.targets.filter { $0.key != key && $0.tier == .firstClass }
+                                             .map { $0.rect }) {
             ghostKey = key
             action = "none"
             reason = "ghost-suppressed"
@@ -256,7 +258,8 @@ final class TargetingOverlay {
     ///   container) responded → nothing actionable there → ghost, suppress.
     /// - same/equal frames or partial overlap → the candidate itself or an
     ///   unrelated sibling → fall back to v1 containment (show).
-    private func isVisibleNow(pid: pid_t, key: String, rect: CGRect) -> Bool {
+    private func isVisibleNow(pid: pid_t, key: String, rect: CGRect,
+                              siblings: [CGRect]) -> Bool {
         let now = CACurrentMediaTime()
         // Cache key includes the verdict type's geometry (center) so a moved
         // candidate never reuses a verdict computed for another rect.
@@ -291,7 +294,12 @@ final class TargetingOverlay {
             // that covers the same point), so a genuinely clickable control must
             // still ring. Empty strip slots / hidden anchors have no actionable
             // descendant at the center and stay suppressed.
-            verdict = Self.hasActionableDescendant(hit: element, center: center) ? .visible : .ghost
+            let sameFrameSibling = siblings.contains { sib in
+                abs(sib.minX - hitFrame.minX) <= 1 && abs(sib.minY - hitFrame.minY) <= 1 &&
+                abs(sib.width - hitFrame.width) <= 1 && abs(sib.height - hitFrame.height) <= 1
+            }
+            verdict = (sameFrameSibling || Self.hasActionableDescendant(hit: element, center: center))
+                ? .visible : .ghost
         } else {
             // Candidate itself, a descendant, or a sibling at the point: show.
             verdict = .visible
