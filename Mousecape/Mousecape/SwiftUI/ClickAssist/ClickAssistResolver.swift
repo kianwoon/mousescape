@@ -887,13 +887,24 @@ final class AccessibilityResolver: @unchecked Sendable {
             guard CGRectMakeWithDictionaryRepresentation(bounds as CFDictionary, &rect),
                   rect.contains(pointer) else { continue }
             // AX frames use the same top-left global space as CGWindowBounds.
+            // A match must be usable: in macOS fullscreen Chromium lists hollow
+            // 40pt strips as layer-0 windows containing the pointer, which would
+            // starve the pointer-window walk. Accept only a window whose AX frame
+            // contains the pointer and that actually carries children; anything
+            // else falls through to the AX-containment search below.
             if let exact = windows.first(where: { w in
                 frame(w).map { $0.equalTo(rect) } ?? false
-            }) { return (exact, "cg") }
+            }), let f = frame(exact), f.contains(pointer),
+               let kidsE = attr(exact, kAXChildrenAttribute).flatMap(axArray), !kidsE.isEmpty {
+                return (exact, "cg")
+            }
             if let overlapping = windows.first(where: { w in
                 frame(w).map { $0.intersects(rect) } ?? false
-            }) { return (overlapping, "cg") }
-            return (nil, "none")
+            }), let f = frame(overlapping), f.contains(pointer),
+               let kidsO = attr(overlapping, kAXChildrenAttribute).flatMap(axArray), !kidsO.isEmpty {
+                return (overlapping, "cg")
+            }
+            return axWindowContainingPointer(windows, pointer: pointer)
         }
         // CG matched no layer-0 window for this pid under the pointer (observed in
         // macOS fullscreen: Chromium's CGWindowList reports hollow strips while
@@ -1123,6 +1134,12 @@ final class AccessibilityResolver: @unchecked Sendable {
                             stats: inout WalkStats) {
         var current = root
         var depth = 0
+        // The deepest node whose children were scanned. When the descent dies
+        // because NO child contains the pointer (video players: the hovered
+        // control lives in a SIBLING branch — the video element is a leaf), the
+        // sibling branches are walked here so the controls are reachable without
+        // waiting for the rotation slice.
+        var lastParentWithKids: AXUIElement?
         var cappedByDepth = false
         stats.guidedBound = maxDepth
 
@@ -1152,6 +1169,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                 stats.guidedFallbackReason = (depth == 0) ? "root-leaf" : "leaf"
                 break
             }
+            lastParentWithKids = current
             // Smallest containing child: an AXGroup wrapper and its real control can
             // both contain the pointer; the tightest frame is the inner control.
             var best: AXUIElement?
@@ -1178,7 +1196,23 @@ final class AccessibilityResolver: @unchecked Sendable {
         stats.guidedLevel = depth
         stats.guidedFallback = !cappedByDepth
 
-        // 2) Bounded subtree walk from the deepest node, unchanged width: the same
+        // 2) Sibling-branch rescue: the guided path ended at a level where no
+        // child contained the pointer (or at a leaf). Walk the deepest scanned
+        // parent's children so a sibling branch (player controls next to the
+        // video element) is explored. Budget-bounded; the deadline still rules.
+        if stats.guidedFallbackReason == "no-containing-child" || stats.guidedFallbackReason == "leaf",
+           let parent = lastParentWithKids, budget > 0, CACurrentMediaTime() < deadline,
+           let rawP = attr(parent, kAXChildrenAttribute), let siblings = axArray(rawP) {
+            var rescue = min(budget, 160)
+            for k in siblings where rescue > 0 {
+                walk(k, depth: depth + 1, out: &out, budget: &rescue, deadline: deadline,
+                     screenUnion: screenUnion, appElement: appElement, pid: pid,
+                     maxDepth: depth + subtreeDepth, stats: &stats)
+            }
+            budget -= min(budget, 160) - rescue
+        }
+
+        // 3) Bounded subtree walk from the deepest node, unchanged width: the same
         // `subtreeDepth` levels of children, now relative to the deeper endpoint.
         guard budget > 0, CACurrentMediaTime() < deadline else { return }
         if let raw = attr(current, kAXChildrenAttribute), let kids = axArray(raw) {
