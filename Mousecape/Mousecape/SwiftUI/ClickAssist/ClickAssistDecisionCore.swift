@@ -206,20 +206,26 @@ enum DecisionCore {
     static func displayCandidates(point: CGPoint, candidates: [Candidate],
                                   tolerance: CGFloat, limit: Int = 3) -> [ScoredCandidate] {
         var firstClass: [ScoredCandidate] = []
-        for c in candidates where c.tier == .firstClass {
+        var secondClass: [ScoredCandidate] = []
+        for c in candidates {
             let d = boundaryDistance(point, c.rect)
             guard d <= tolerance else { continue }
-            firstClass.append(ScoredCandidate(candidate: c, dist: d))
+            let scored = ScoredCandidate(candidate: c, dist: d)
+            if c.tier == .firstClass { firstClass.append(scored) }
+            else { secondClass.append(scored) }
         }
-        // Indication is for real controls only: a second-class tile/container is
-        // never a target (the old overlay behaviour), so empty strip space stays
-        // silent even when Chromium exposes a strip-sized AXGroup there.
-        let pool = firstClass
+        // First-class controls keep absolute priority. Only when NONE is in range
+        // does the nearest legitimate second-tier row/tile get assist — as a
+        // NEAR-MISS only (a direct hit on a second-tier container stays native
+        // passthrough, exactly as before).
+        let pool = firstClass.isEmpty ? secondClass.filter { $0.dist > 0 } : firstClass
         // A container masquerading as a control (Brave exposes the whole tab
-        // strip as an AXTab-sized element) contains several real controls. It is
-        // never a target on its own: drop any candidate that encloses 2+ others.
+        // strip as an AXTab-sized element, and a strip-sized AXGroup as a tile)
+        // encloses several real controls. It is never a target on its own: drop
+        // any candidate that encloses 2+ others, comparing against BOTH tiers.
+        let allScored = firstClass + secondClass
         let filtered = pool.filter { candidate in
-            pool.filter { other in
+            allScored.filter { other in
                 other.candidate.key != candidate.candidate.key
                     && candidate.candidate.rect.contains(other.candidate.rect)
             }.count < 2

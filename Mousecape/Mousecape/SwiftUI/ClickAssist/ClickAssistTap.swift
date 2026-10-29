@@ -296,7 +296,7 @@ final class AssistTap: @unchecked Sendable {
                 latched = (delta, best.key, snap, false)
                 emit("MUTATE", type: label, original: original, mutated: corrected,
                      reason: "redirect", res: res, started: started,
-                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", winner.0.dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue) legitimacy=confirmed cands=\(confirmed.count) winner=1")
+                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", winner.0.dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(confirmed.count) winner=1")
                 return Unmanaged.passUnretained(event)
             }
         }

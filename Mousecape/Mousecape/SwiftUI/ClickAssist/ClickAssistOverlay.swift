@@ -174,8 +174,8 @@ final class TargetingOverlay {
         let pointer = CGEvent(source: nil)?.location ?? .zero
         var action = "none"
         var reason = s.valid ? String(format: "stale:age(%.0fms)", ageMs) : s.reason
-        var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool)?
-        var secondary: (key: String, rect: CGRect)?
+        var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool, tier: Int)?
+        var secondary: (key: String, rect: CGRect, tier: Int)?
         var confirmedCount = 0
         var suppressed: (key: String, verdict: LegitimacyPolicy.Verdict)?
         if fresh {
@@ -208,11 +208,13 @@ final class TargetingOverlay {
             confirmedCount = confirmed.count
             if let winner = confirmed.first {
                 primary = (winner.0.candidate.key, winner.0.candidate.rect, winner.1,
-                           winner.0.dist, winner.0.dist == 0)
+                           winner.0.dist, winner.0.dist == 0,
+                           winner.0.candidate.tier == .firstClass ? 1 : 2)
                 action = "show"
                 reason = winner.0.dist == 0 ? "direct-hit" : "redirect"
                 if confirmed.count > 1 {
-                    secondary = (confirmed[1].0.candidate.key, confirmed[1].0.candidate.rect)
+                    secondary = (confirmed[1].0.candidate.key, confirmed[1].0.candidate.rect,
+                                 confirmed[1].0.candidate.tier == .firstClass ? 1 : 2)
                 }
             } else if let suppressed {
                 reason = "legitimacy-\(suppressed.verdict.rawValue)"
@@ -237,16 +239,16 @@ final class TargetingOverlay {
         if sig != lastSig {
             lastSig = sig
             if action == "show", let primary {
-                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed cands=%d winner=1",
+                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed tier=%d cands=%d winner=1",
                            s.generation, primary.key as NSString, primary.rect.origin.x, primary.rect.origin.y,
                            primary.rect.width, primary.rect.height, tolerance, pointer.x, pointer.y,
                            reason as NSString, (primary.direct ? "direct-hit" : "redirect") as NSString,
-                           confirmedCount))
+                           primary.tier, confirmedCount))
                 if let secondary {
-                    log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=secondary mode=secondary legitimacy=confirmed cands=%d winner=2",
+                    log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=secondary mode=secondary legitimacy=confirmed tier=%d cands=%d winner=2",
                                s.generation, secondary.key as NSString, secondary.rect.origin.x, secondary.rect.origin.y,
                                secondary.rect.width, secondary.rect.height, tolerance, pointer.x, pointer.y,
-                               confirmedCount))
+                               secondary.tier, confirmedCount))
                 }
             } else {
                 log(String(format: "OVERLAY_STATE gen=%llu action=none pointer=(%.1f,%.1f) reason=%@",
