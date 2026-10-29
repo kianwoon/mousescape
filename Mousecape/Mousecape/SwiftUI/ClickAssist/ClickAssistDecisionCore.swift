@@ -374,11 +374,17 @@ final class LegitimacyPolicy: @unchecked Sendable {
               let element, let hitFrame = axFrame(element) else { return .unknown }
         // The renderer's answer must cover the destination at all.
         guard hitFrame.contains(destination) else { return .mismatch }
-        // Confirmation must prove THE CHOSEN TARGET, never a sibling: either the
-        // renderer's answer sits inside the candidate's own rect, or it IS the
-        // candidate's own surface (frame-equal within 1 pt).
+        // Confirmation must prove THE CHOSEN TARGET. Two accepted answers:
+        // 1. the renderer's answer sits inside the candidate's own rect, or IS
+        //    the candidate's own surface (frame-equal within 1 pt);
+        // 2. the renderer answered a REAL first-class control (frame-equal to a
+        //    first-class candidate) that CONTAINS this candidate — Chromium
+        //    answers a tab's inner ✕ with the tab's own frame. Scoped to that
+        //    containment; an unrelated container still fails.
         if candidate.contains(hitFrame) { return .confirmed }
         if sameFrame(candidate, hitFrame) { return .confirmed }
+        if hitFrame.contains(candidate),
+           siblings.contains(where: { sameFrame($0, hitFrame) }) { return .confirmed }
         return .mismatch
     }
 
