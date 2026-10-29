@@ -20,6 +20,7 @@ final class OverlayPanel: NSPanel {
 /// tolerance ring OUTSIDE the AX frame (dashed), and the real-cursor marker.
 final class OverlayView: NSView {
     var cgFrame = CGRect.zero            // AX frame, global display coords
+    var cgSecondaryFrame: CGRect?        // second confirmed target, subdued ring
     var cgPanelTopLeft = CGPoint.zero    // panel's top-left in global display coords
     var cgPointer = CGPoint.zero         // real cursor position
     var tolerance: CGFloat = 12
@@ -51,6 +52,14 @@ final class OverlayView: NSView {
         NSColor.systemOrange.setStroke()
         ringPath.setLineDash([6, 4], count: 2, phase: 0)
         ringPath.stroke()
+        // Secondary target: thinner, dimmed green — never obscures the primary.
+        if let sec = cgSecondaryFrame {
+            let sf = CGRect(origin: local(sec.origin), size: sec.size)
+            let secPath = NSBezierPath(rect: sf)
+            secPath.lineWidth = 1
+            NSColor.systemGreen.withAlphaComponent(0.45).setStroke()
+            secPath.stroke()
+        }
         // AX frame: solid.
         let f = CGRect(origin: local(cgFrame.origin), size: cgFrame.size)
         let framePath = NSBezierPath(rect: f)
@@ -94,6 +103,7 @@ final class TargetingOverlay {
 
     private var lastDrawnAction = ""
     private var lastDrawnFrame: CGRect?
+    private var lastDrawnSecondary: CGRect?
     private var lastDrawnPointer = CGPoint(x: CGFloat.greatestFiniteMagnitude,
                                            y: CGFloat.greatestFiniteMagnitude)
     private var lastDrawnMode = ""
@@ -164,95 +174,100 @@ final class TargetingOverlay {
         let pointer = CGEvent(source: nil)?.location ?? .zero
         var action = "none"
         var reason = s.valid ? String(format: "stale:age(%.0fms)", ageMs) : s.reason
-        var targetKey: String?
-        var frame: CGRect?
-        var mode = "redirect"
-        var destination: CGPoint?
+        var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool)?
+        var secondary: (key: String, rect: CGRect)?
+        var confirmedCount = 0
+        var suppressed: (key: String, verdict: LegitimacyPolicy.Verdict)?
         if fresh {
             let cands = s.targets.map { DecisionCore.Candidate(key: $0.key, rect: $0.rect,
                                                                inset: $0.inset, tier: $0.tier,
                                                                role: $0.role) }
-            switch DecisionCore.route(point: pointer, candidates: cands, tolerance: tolerance) {
-            case .redirect(let c, let corrected, _, _, _):
-                action = "show"; targetKey = c.key; frame = c.rect; reason = "redirect"
-                destination = corrected
-            case .directHit(let c, _):
-                if c.tier == .secondClass {
-                    // A second-class container under the pointer is NOT a
-                    // guaranteed target: render no highlight (neutral preview
-                    // only; the router may still rescue a first-class near-miss).
-                    reason = "second-class-direct-hit"
-                } else {
-                    action = "show"; targetKey = c.key; frame = c.rect; reason = "direct-hit"; mode = "direct-hit"
-                    destination = pointer
+            // Up to three nearest in-tolerance first-class candidates, validated
+            // at their own destination points (fail-closed). Every confirmed one
+            // is indicated; the nearest wins the click.
+            let scored = DecisionCore.displayCandidates(point: pointer, candidates: cands,
+                                                        tolerance: tolerance, limit: 3)
+            var confirmed: [(DecisionCore.ScoredCandidate, CGPoint)] = []
+            for choice in scored {
+                let snap = DecisionCore.snapMode(for: choice.candidate)
+                let dest = snap == .center
+                    ? DecisionCore.centerPoint(into: choice.candidate.rect)
+                    : DecisionCore.clampPoint(pointer, into: choice.candidate.rect,
+                                              inset: choice.candidate.inset)
+                let verdict = legitimacy?.validate(
+                    pid: s.pid, generation: s.generation, key: choice.candidate.key,
+                    candidate: choice.candidate.rect, destination: dest,
+                    siblings: cands.filter { $0.key != choice.candidate.key && $0.tier == .firstClass }
+                                   .map { $0.rect }) ?? .confirmed
+                if verdict == .confirmed {
+                    confirmed.append((choice, dest))
+                } else if suppressed == nil {
+                    suppressed = (choice.candidate.key, verdict)
                 }
-            case .ambiguous:
-                reason = "ambiguous"
-            case .noCandidate:
+            }
+            confirmedCount = confirmed.count
+            if let winner = confirmed.first {
+                primary = (winner.0.candidate.key, winner.0.candidate.rect, winner.1,
+                           winner.0.dist, winner.0.dist == 0)
+                action = "show"
+                reason = winner.0.dist == 0 ? "direct-hit" : "redirect"
+                if confirmed.count > 1 {
+                    secondary = (confirmed[1].0.candidate.key, confirmed[1].0.candidate.rect)
+                }
+            } else if let suppressed {
+                reason = "legitimacy-\(suppressed.verdict.rawValue)"
+            } else {
                 reason = "no-candidate-in-radius"
             }
         }
-        // SINGLE LEGITIMACY GATE (display only — the tap applies the same policy
-        // to its own destination). Fail-closed: only renderer-confirmed targets
-        // ring; mismatch/unknown suppress the ring and the click passes through.
-        var suppressedKey: String?
-        var suppressedVerdict: LegitimacyPolicy.Verdict?
-        var shownVerdict: LegitimacyPolicy.Verdict = .confirmed
-        if action == "show", let key = targetKey, let rect = frame,
-           let dest = destination, fresh {
-            let verdict = legitimacy?.validate(
-                pid: s.pid, generation: s.generation, key: key,
-                candidate: rect, destination: dest,
-                siblings: s.targets.filter { $0.key != key && $0.tier == .firstClass }
-                                    .map { $0.rect }) ?? .confirmed
-            shownVerdict = verdict
-            if verdict != .confirmed {
-                suppressedKey = key
-                suppressedVerdict = verdict
-                action = "none"
-                reason = "legitimacy-\(verdict.rawValue)"
-                targetKey = nil
-                frame = nil
-            }
-        }
-        if let suppressedKey {
+        // Fail-closed suppression log (rate-limited, additive format).
+        if action == "none", let suppressed {
             let now = CACurrentMediaTime()
-            if now - (lastSuppressLog[suppressedKey] ?? -Double.infinity) >= Self.suppressLogInterval {
-                lastSuppressLog[suppressedKey] = now
+            if now - (lastSuppressLog[suppressed.key] ?? -Double.infinity) >= Self.suppressLogInterval {
+                lastSuppressLog[suppressed.key] = now
                 log(String(format: "OVERLAY_STATE gen=%llu action=none target=%@ pointer=(%.1f,%.1f) reason=%@ legitimacy=%@",
-                           s.generation, suppressedKey as NSString, pointer.x, pointer.y,
-                           reason as NSString, (suppressedVerdict?.rawValue ?? "unknown") as NSString))
+                           s.generation, suppressed.key as NSString, pointer.x, pointer.y,
+                           reason as NSString, suppressed.verdict.rawValue as NSString))
             }
-            lastSig = "\(s.generation)|none|legitimacy|\(suppressedKey)"
-            draw(action: action, frame: frame, pointer: pointer, mode: mode)
+            lastSig = "\(s.generation)|none|legitimacy|\(suppressed.key)"
+            draw(action: action, frame: nil, secondary: nil, pointer: pointer, mode: "redirect")
             return
         }
-        let sig = "\(s.generation)|\(action)|\(targetKey ?? "-")|\(reason)"
+        let sig = "\(s.generation)|\(action)|\(primary?.key ?? "-")|\(secondary?.key ?? "-")|\(confirmedCount)|\(reason)"
         if sig != lastSig {
             lastSig = sig
-            if action == "show", let targetKey, let frame {
-                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=%@",
-                           s.generation, targetKey as NSString, frame.origin.x, frame.origin.y, frame.width, frame.height,
-                           tolerance, pointer.x, pointer.y, reason as NSString, mode as NSString,
-                           shownVerdict.rawValue as NSString))
+            if action == "show", let primary {
+                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed cands=%d winner=1",
+                           s.generation, primary.key as NSString, primary.rect.origin.x, primary.rect.origin.y,
+                           primary.rect.width, primary.rect.height, tolerance, pointer.x, pointer.y,
+                           reason as NSString, (primary.direct ? "direct-hit" : "redirect") as NSString,
+                           confirmedCount))
+                if let secondary {
+                    log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=secondary mode=secondary legitimacy=confirmed cands=%d winner=2",
+                               s.generation, secondary.key as NSString, secondary.rect.origin.x, secondary.rect.origin.y,
+                               secondary.rect.width, secondary.rect.height, tolerance, pointer.x, pointer.y,
+                               confirmedCount))
+                }
             } else {
                 log(String(format: "OVERLAY_STATE gen=%llu action=none pointer=(%.1f,%.1f) reason=%@",
                            s.generation, pointer.x, pointer.y, reason as NSString))
             }
         }
-        draw(action: action, frame: frame, pointer: pointer, mode: mode)
+        draw(action: action, frame: primary?.rect, secondary: secondary?.rect,
+             pointer: pointer, mode: primary?.direct == true ? "direct-hit" : "redirect")
     }
 
-    private func draw(action: String, frame: CGRect?, pointer: CGPoint, mode: String) {
+    private func draw(action: String, frame: CGRect?, secondary: CGRect?, pointer: CGPoint, mode: String) {
         // Skip redundant redraws: state transitions always paint; pointer moves
         // only matter while a highlight is shown. This keeps the 30 Hz sampling
         // nearly free when the ring is static or blank.
         let stateChanged = action != lastDrawnAction || frame != lastDrawnFrame
-            || mode != lastDrawnMode || tolerance != lastDrawnTolerance
+            || secondary != lastDrawnSecondary || mode != lastDrawnMode || tolerance != lastDrawnTolerance
         let pointerChanged = pointer != lastDrawnPointer
         guard stateChanged || (action == "show" && pointerChanged) else { return }
         lastDrawnAction = action
         lastDrawnFrame = frame
+        lastDrawnSecondary = secondary
         lastDrawnMode = mode
         lastDrawnPointer = pointer
         lastDrawnTolerance = tolerance
@@ -266,7 +281,8 @@ final class TargetingOverlay {
             return
         }
         let margin = tolerance + 14
-        let cgPanel = frame.insetBy(dx: -margin, dy: -margin)
+        var cgPanel = frame.insetBy(dx: -margin, dy: -margin)
+        if let secondary { cgPanel = cgPanel.union(secondary.insetBy(dx: -margin, dy: -margin)) }
         let cocoa = NSRect(x: cgPanel.minX, y: ScreenSpace.mainHeight - cgPanel.maxY,
                            width: cgPanel.width, height: cgPanel.height)
         if panel == nil {
@@ -290,6 +306,7 @@ final class TargetingOverlay {
         guard let panel, let view else { return }
         if panel.frame != cocoa { panel.setFrame(cocoa, display: false) }   // AX-churn guard
         view.cgFrame = frame
+        view.cgSecondaryFrame = secondary
         view.cgPanelTopLeft = CGPoint(x: cgPanel.minX, y: cgPanel.minY)
         view.cgPointer = pointer
         view.tolerance = tolerance

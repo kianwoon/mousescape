@@ -193,6 +193,38 @@ enum DecisionCore {
                        y: min(max(p.y, r.minY), r.maxY))
     }
 
+    /// A candidate plus its boundary distance, for multi-target indication.
+    struct ScoredCandidate: Sendable {
+        let candidate: Candidate
+        let dist: CGFloat
+    }
+
+    /// All in-tolerance candidates for indication, nearest first, tie-break
+    /// smaller area. First-class only when any first-class is in range (a
+    /// container never competes with a control); `limit` bounds validation work.
+    /// The winner of a click is always element 0.
+    static func displayCandidates(point: CGPoint, candidates: [Candidate],
+                                  tolerance: CGFloat, limit: Int = 3) -> [ScoredCandidate] {
+        var firstClass: [ScoredCandidate] = []
+        var secondClass: [ScoredCandidate] = []
+        for c in candidates {
+            let d = boundaryDistance(point, c.rect)
+            guard d <= tolerance else { continue }
+            let scored = ScoredCandidate(candidate: c, dist: d)
+            if c.tier == .firstClass { firstClass.append(scored) }
+            else { secondClass.append(scored) }
+        }
+        let pool = firstClass.isEmpty ? secondClass : firstClass
+        let ordered = pool.sorted { a, b in
+            if a.dist != b.dist { return a.dist < b.dist }
+            let areaA = a.candidate.rect.width * a.candidate.rect.height
+            let areaB = b.candidate.rect.width * b.candidate.rect.height
+            if areaA != areaB { return areaA < areaB }
+            return a.candidate.key < b.candidate.key
+        }
+        return Array(ordered.prefix(limit))
+    }
+
     static func boundaryDistance(_ p: CGPoint, _ r: CGRect) -> CGFloat {
         if r.contains(p) { return 0 }
         let dx = max(r.minX - p.x, 0, p.x - r.maxX)

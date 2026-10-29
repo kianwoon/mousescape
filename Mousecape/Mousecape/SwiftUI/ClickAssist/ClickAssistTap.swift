@@ -257,23 +257,46 @@ final class AssistTap: @unchecked Sendable {
                      reason: "ambiguous", res: res, started: started,
                      extra: "cands=[\(listed)] tie=\(String(format: "%.1f", tie)) tol=\(tolerance)")
                 return Unmanaged.passUnretained(event)
-            case .redirect(let best, let corrected, let dist, let snap, let edgeCore):
-                // Fail-closed: only a renderer-confirmed destination may move the
-                // click. mismatch/unknown pass through untouched.
-                let verdict = legitimacyVerdict(for: best, destination: corrected, res: res)
-                guard verdict == .confirmed else {
+            case .redirect:
+                // Multi-target, fail-closed: validate up to three nearest
+                // candidates at their own destinations; every confirmed one is a
+                // legitimate target, and the nearest wins the click. mismatch and
+                // unknown never become the winner and never move the event.
+                let scored = DecisionCore.displayCandidates(point: original,
+                                                            candidates: res.candidates,
+                                                            tolerance: tolerance, limit: 3)
+                var confirmed: [(DecisionCore.ScoredCandidate, CGPoint, DecisionCore.Snap, Bool)] = []
+                var firstFailure: (String, LegitimacyPolicy.Verdict)?
+                for choice in scored {
+                    let snap = DecisionCore.snapMode(for: choice.candidate)
+                    let dest = snap == .center
+                        ? DecisionCore.centerPoint(into: choice.candidate.rect)
+                        : DecisionCore.clampPoint(original, into: choice.candidate.rect,
+                                                  inset: choice.candidate.inset)
+                    let verdict = legitimacyVerdict(for: choice.candidate,
+                                                    destination: dest, res: res)
+                    if verdict == .confirmed {
+                        confirmed.append((choice, dest, snap, false))
+                    } else if firstFailure == nil {
+                        firstFailure = (choice.candidate.key, verdict)
+                    }
+                }
+                guard let winner = confirmed.first else {
+                    let failure = firstFailure ?? ("-", .unknown)
                     emit("PASSTHROUGH", type: label, original: original, mutated: nil,
-                         reason: "legitimacy-\(verdict.rawValue)", res: res, started: started,
-                         extra: "legitimacy=\(verdict.rawValue) target=\(best.key) dist=\(String(format: "%.1f", dist))")
+                         reason: "legitimacy-\(failure.1.rawValue)", res: res, started: started,
+                         extra: "legitimacy=\(failure.1.rawValue) target=\(failure.0) cands=0 winner=0")
                     return Unmanaged.passUnretained(event)
                 }
+                let best = winner.0.candidate
+                let corrected = winner.1
+                let snap = winner.2
                 let delta = CGVector(dx: corrected.x - original.x, dy: corrected.y - original.y)
                 event.location = corrected
-                latched = (delta, best.key, snap, edgeCore)
-                let marker = edgeCore ? " edgecore=1" : ""
+                latched = (delta, best.key, snap, false)
                 emit("MUTATE", type: label, original: original, mutated: corrected,
-                     reason: edgeCore ? "direct-hit" : "redirect", res: res, started: started,
-                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue)\(marker) legitimacy=confirmed")
+                     reason: "redirect", res: res, started: started,
+                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", winner.0.dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue) legitimacy=confirmed cands=\(confirmed.count) winner=1")
                 return Unmanaged.passUnretained(event)
             }
         }
