@@ -161,6 +161,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// (typically <2 s at 600 nodes/150 ms). Trade-off: a control that truly
     /// disappeared can linger in the union for up to this window before expiring.
     private static let targetFreshnessWindow: CFTimeInterval = 10.0
+    /// Pids we already probed for complete renderer accessibility (once per pid;
+    /// Electron honors AXManualAccessibility, Chrome honors AXEnhancedUserInterface).
+    private var manualA11yProbed: Set<pid_t> = []
     /// Targets within this radius of the pointer never expire (see the union merge).
     private static let pointerHoldRadius: CGFloat = 48
     private static let nodeBudget = 600
@@ -503,6 +506,20 @@ final class AccessibilityResolver: @unchecked Sendable {
         let appEl = AXUIElementCreateApplication(pid)
         AXUIElementSetMessagingTimeout(appEl, 0.2)
         ensureObserver(pid: pid, appElement: appEl)
+        // First-encounter probe (once per pid): Chromium/Electron builds only a
+        // PARTIAL renderer tree unless forced. Setting AXManualAccessibility
+        // (Electron) / AXEnhancedUserInterface (Chrome) asks the app for the
+        // COMPLETE tree — tab bodies, generic clickable divs (AXGroup+AXPress) —
+        // which the partial tree omits entirely. Electron rebuilds ~2 s later.
+        // Unsupported attributes are ignored by non-Chromium apps (harmless).
+        if !manualA11yProbed.contains(pid), pid > 0 {
+            manualA11yProbed.insert(pid)
+            let probe = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(probe, 0.2)
+            AXUIElementSetAttributeValue(probe, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+            AXUIElementSetAttributeValue(probe, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
+            log("RESOLVER_EVENT manual-a11y pid=\(pid) requested=AXManualAccessibility+AXEnhancedUserInterface")
+        }
 
         var out: [CachedTarget] = []
         var budget = Self.nodeBudget
@@ -1077,10 +1094,24 @@ final class AccessibilityResolver: @unchecked Sendable {
     @discardableResult
     private func collect(_ el: AXUIElement, out: inout [CachedTarget],
                          screenUnion: CGRect) -> Bool {
-        guard let role = stringAttr(el, kAXRoleAttribute) else { return false }
-        let isRowLike = Self.rowLikeRoles.contains(role)
-        let isTileLike = Self.tileLikeRoles.contains(role)
-        guard Self.eligibleRoles.contains(role) || isRowLike || isTileLike else {
+        guard var role = stringAttr(el, kAXRoleAttribute) else { return false }
+        var isRowLike = Self.rowLikeRoles.contains(role)
+        var isTileLike = Self.tileLikeRoles.contains(role)
+        // Capability admission: a generic AXGroup that supports AXPress is a real
+        // button — a flattened DIV with a JS click handler. Chromium exposes these
+        // only once the complete renderer tree is enabled (AXManualAccessibility),
+        // and the old role whitelist discarded exactly these controls. Admit as
+        // first-class: capability (AXPress), not role, is what makes it clickable.
+        var isPressGroup = false
+        if role == "AXGroup", !Self.eligibleRoles.contains(role),
+           let actions = attr(el, "AXActionNames") as? [String],
+           actions.contains("AXPress") {
+            isPressGroup = true
+            role = "AXPressGroup"
+            isRowLike = false
+            isTileLike = false
+        }
+        guard Self.eligibleRoles.contains(role) || isRowLike || isTileLike || isPressGroup else {
             // Diagnostics only: remember near-pointer elements the role filter drops
             // (e.g. a <div> web button exposed as AXGroup). Bounded and per-cycle.
             noteRejectedNearPointer(el, role: role)
@@ -1141,7 +1172,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         let label = title ?? stringAttr(el, kAXDescriptionAttribute) ?? role
         // Tier is decided ONCE here: a genuine control role is first-class; a
         // candidate admitted only by the row/tile envelope is second-class.
-        let tier: DecisionCore.Tier = Self.eligibleRoles.contains(role) ? .firstClass : .secondClass
+        let tier: DecisionCore.Tier = (Self.eligibleRoles.contains(role) || isPressGroup) ? .firstClass : .secondClass
         out.append(CachedTarget(key: key, role: role, label: label, rect: rect, inset: 2, tier: tier))
         return true
     }
