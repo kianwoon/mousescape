@@ -573,3 +573,13 @@ enum FrameContinuity {
         return delta(a, b) >= limit || overlapFraction(a, b) < 0.5
     }
 }
+
+/// One gesture's translation, latched exactly once at the DOWN. `let` fields make
+/// mid-gesture recomputation impossible: drags and the up apply this value
+/// verbatim regardless of snapshot, target or resolver changes.
+struct GestureLatch: Sendable {
+    let delta: CGVector
+    let target: String
+    let snap: DecisionCore.Snap
+    let edgeCore: Bool
+}

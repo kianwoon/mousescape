@@ -30,8 +30,7 @@ enum TargetSource: Sendable {
 final class AssistTap: @unchecked Sendable {
     private(set) var tap: CFMachPort?
     private var source: CFRunLoopSource?
-    private var latched: (delta: CGVector, target: String, snap: DecisionCore.Snap,
-                          edgeCore: Bool)?
+    private var latched: GestureLatch?
     /// Set when a center-snapped down turned into a drag: the rest of that
     /// gesture is passed through unmutated (no drag-to-snapped-center hijack).
     private var unlatchedForDrag = false
@@ -268,14 +267,44 @@ final class AssistTap: @unchecked Sendable {
         return listed.isEmpty ? "-" : listed.joined(separator: ",")
     }
 
+    /// Ownership: while an AXPress token is set the tap owns the gesture end-to-end,
+    /// so a mid-gesture downgrade to passthrough must never hand the receiver an up
+    /// with no down. Returns true when the event was consumed. An unexpected new
+    /// down clears the token (the only non-up clear besides interruption).
+    private func consumeAXPressOwned(isDown: Bool, isDrag: Bool, isUp: Bool,
+                                     label: String, original: CGPoint, observed: String,
+                                     started: CFTimeInterval) -> Bool {
+        guard pressGestureToken != nil else { return false }
+        if isUp {
+            pressGestureToken = nil
+            emit("PASSTHROUGH", type: label, original: original, mutated: nil,
+                 reason: "axpress-swallow-up", res: resolution(), started: started,
+                 extra: observed + " mode=axpress consumed=up owner=retained")
+            return true
+        }
+        if isDrag { return true }
+        pressGestureToken = nil   // unexpected new down
+        return false
+    }
+
     private func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            // A gesture interrupted by tap disablement can never be repaired: all
+            // its state must die so no stale translation, swallowed up, or
+            // duplicate activation survives. With the state cleared, the tap stays
+            // in native passthrough until a fresh down arrives.
+            let reason = type == .tapDisabledByTimeout ? "timeout" : "user-input"
+            latched = nil
+            unlatchedForDrag = false
+            pressGestureToken = nil
+            gestureUnsupported = false
+            log("TAP_INTERRUPTED reason=\(reason) state=cleared")
             if type == .tapDisabledByUserInput, manuallyDisabled {
                 log("TAP_STAYSDISABLED reason=manual-p3-interruption")
                 return Unmanaged.passUnretained(event)
             }
             if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
-            log("TAP_REENABLED reason=\(type == .tapDisabledByTimeout ? "timeout" : "user-input")")
+            log("TAP_REENABLED reason=\(reason)")
             return Unmanaged.passUnretained(event)
         }
 
@@ -297,8 +326,11 @@ final class AssistTap: @unchecked Sendable {
         // and secure input is the system-wide signal for it. Evaluated per event
         // (cheap), never polled.
         if IsSecureEventInputEnabled() {
+            if consumeAXPressOwned(isDown: isDown, isDrag: isDrag, isUp: isUp,
+                                   label: label, original: original, observed: observed,
+                                   started: started) { return nil }
             if isDown { gestureUnsupported = true }
-            if isUp { gestureUnsupported = false; pressGestureToken = nil }
+            if isUp { gestureUnsupported = false }
             emit("PASSTHROUGH", type: label, original: original, mutated: nil,
                  reason: "secure-input", res: resolution(), started: started,
                  extra: observed)
@@ -310,11 +342,17 @@ final class AssistTap: @unchecked Sendable {
         // or multi-click semantics, so assisting them risks a wrong activation;
         // they must stay native. A gesture that began unsupported stays
         // unsupported end-to-end (its drags and up pass through too).
+        // KNOWN LIMITATION (unguaranteed by design): if the FIRST click of a
+        // double-click was assisted it landed at a different point, so the
+        // receiver may not recognise the pair; clickState > 1 stays native.
         let supported = button == 0 && gestureFlags.isEmpty && clicks <= 1
         let continuedUnsupported = gestureUnsupported && !isDown
         if !supported || continuedUnsupported {
+            if consumeAXPressOwned(isDown: isDown, isDrag: isDrag, isUp: isUp,
+                                   label: label, original: original, observed: observed,
+                                   started: started) { return nil }
             if isDown { gestureUnsupported = true }
-            if isUp { gestureUnsupported = false; pressGestureToken = nil }
+            if isUp { gestureUnsupported = false }
             emit("PASSTHROUGH", type: label, original: original, mutated: nil,
                  reason: "gesture-unsupported", res: resolution(), started: started,
                  extra: observed + (continuedUnsupported ? " continuity=1" : ""))
@@ -352,10 +390,8 @@ final class AssistTap: @unchecked Sendable {
             unlatchedForDrag = false
 
             guard res.valid else {
-                // A gesture may never span a snapshot invalidation (an app switch
-                // mid-AXPress): drop the delayed AXPress token with the snapshot,
-                // otherwise it would swallow the next up in the new app.
-                pressGestureToken = nil
+                // An AXPress token never outlives its gesture; a new down already
+                // cleared it above, so no token can swallow the next up in a new app.
                 emit("PASSTHROUGH", type: label, original: original, mutated: nil,
                      reason: res.reason, res: res, started: started, extra: "validity=invalid")
                 return Unmanaged.passUnretained(event)
@@ -540,7 +576,8 @@ final class AssistTap: @unchecked Sendable {
 
                 let delta = CGVector(dx: corrected.x - original.x, dy: corrected.y - original.y)
                 event.location = corrected
-                latched = (delta, best.key, snap, false)
+                latched = GestureLatch(delta: delta, target: best.key, snap: snap,
+                                       edgeCore: false)
                 emit("MUTATE", type: label, original: original, mutated: corrected,
                      reason: "redirect", res: res, started: started,
                      extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", winner.0.dist)) target=\(best.key) mode=return-modified-event mode=synthetic snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(confirmed.count) winner=1")
