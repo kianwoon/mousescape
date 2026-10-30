@@ -27,6 +27,186 @@ final class ClickAssistCoreTests: XCTestCase {
         DecisionCore.Candidate(key: key, rect: r, inset: 2, tier: tier, role: role)
     }
 
+    func testPageFurnitureNeedsAnExplicitPressAction() {
+        for role in ["AXGroup", "AXImage", "AXCell", "AXRow", "AXStaticText"] {
+            XCTAssertFalse(GeometryPolicy.isActionable(role: role, hasPressAction: false))
+            XCTAssertTrue(GeometryPolicy.isActionable(role: role, hasPressAction: true))
+        }
+        for role in ["AXButton", "AXLink", "AXSlider", "AXTextField", "AXPressGroup"] {
+            XCTAssertTrue(GeometryPolicy.isActionable(role: role, hasPressAction: false))
+        }
+    }
+
+    func testBraveTabGroupProxyRequiresTheLiveTabFrame() {
+        let tab = rect(4937, 164, 248, 40)
+        XCTAssertTrue(GeometryPolicy.isTabHitProxy(ancestorRole: "AXRadioButton",
+            hitRole: "AXGroup", ancestorFrame: tab, hitFrame: tab))
+        XCTAssertFalse(GeometryPolicy.isTabHitProxy(ancestorRole: "AXGroup",
+            hitRole: "AXGroup", ancestorFrame: tab, hitFrame: tab))
+        XCTAssertFalse(GeometryPolicy.isTabHitProxy(ancestorRole: "AXRadioButton",
+            hitRole: "AXGroup", ancestorFrame: tab, hitFrame: tab.offsetBy(dx: 10, dy: 0)))
+    }
+
+    func testTabCloseCanBeConfirmedByItsActualChromeAncestor() {
+        func confirms(role: String = "AXButton", enabled: Bool = true,
+                      press: Bool = true, ancestor: Bool = true,
+                      chrome: Bool = true, web: Bool = false) -> Bool {
+            GeometryPolicy.confirmsChromeDescendant(candidateRole: role, enabled: enabled,
+                hasPress: press, hitIsAncestor: ancestor, hasChrome: chrome, hasWebArea: web)
+        }
+        XCTAssertTrue(confirms())
+        XCTAssertFalse(confirms(role: "AXGroup"))
+        XCTAssertFalse(confirms(enabled: false))
+        XCTAssertFalse(confirms(press: false))
+        XCTAssertFalse(confirms(ancestor: false))
+        XCTAssertFalse(confirms(chrome: false))
+        XCTAssertFalse(confirms(web: true))
+    }
+
+    func testToleranceControlsBothRingAndClickBoundary() {
+        let target = cand("button", rect(100, 100, 28, 28))
+        for tolerance: CGFloat in [8, 12, 16] {
+            let edge = CGPoint(x: 128 + tolerance, y: 114)
+            let beyond = CGPoint(x: edge.x + 0.01, y: edge.y)
+            guard case .redirect = DecisionCore.route(point: edge, candidates: [target],
+                                                      tolerance: tolerance) else {
+                return XCTFail("Click at tolerance boundary must be assisted: \(tolerance)")
+            }
+            guard case .noCandidate = DecisionCore.route(point: beyond, candidates: [target],
+                                                         tolerance: tolerance) else {
+                return XCTFail("Click outside tolerance must pass through: \(tolerance)")
+            }
+            XCTAssertEqual(DecisionCore.displayCandidates(point: edge, candidates: [target],
+                tolerance: tolerance).count, 1)
+            XCTAssertTrue(DecisionCore.displayCandidates(point: beyond, candidates: [target],
+                tolerance: tolerance).isEmpty)
+        }
+    }
+
+    func testVideoPlayerCanConfirmOnlyItsLiveAdjustableSlider() {
+        func confirms(role: String = "AXSlider", enabled: Bool = true,
+                      adjustable: Bool = true, frameMatches: Bool = true,
+                      ancestor: Bool = true) -> Bool {
+            GeometryPolicy.confirmsSliderContainer(candidateRole: role, enabled: enabled,
+                adjustable: adjustable, frameMatches: frameMatches, hitIsAncestor: ancestor)
+        }
+        XCTAssertTrue(confirms())
+        XCTAssertFalse(confirms(role: "AXGroup"))
+        XCTAssertFalse(confirms(enabled: false))
+        XCTAssertFalse(confirms(adjustable: false))
+        XCTAssertFalse(confirms(frameMatches: false))
+        XCTAssertFalse(confirms(ancestor: false))
+    }
+
+    func testFullscreenSliderCanExtendBeyondLetterboxedPlayer() {
+        let slider = rect(21, 2070, 7638, 6)
+        let player = rect(1946, 30, 3787, 2130)
+        XCTAssertFalse(player.contains(slider))
+        XCTAssertTrue(GeometryPolicy.sliderHitCoversDestination(candidate: slider, hit: player,
+            destination: CGPoint(x: 2366, y: 2072)))
+        XCTAssertFalse(GeometryPolicy.sliderHitCoversDestination(candidate: slider, hit: player,
+            destination: CGPoint(x: 100, y: 2072)))
+        XCTAssertFalse(GeometryPolicy.sliderHitCoversDestination(candidate: slider, hit: player,
+            destination: CGPoint(x: 2366, y: 1900)))
+    }
+
+    /// All supported control families must survive the same admission and
+    /// selection gates; tightening page-furniture rules must not remove them.
+    func testSupportedControlFamiliesKeepTheirRingsAndClickTargets() {
+        let centerRoles = ["AXButton", "AXLink", "AXCheckBox", "AXMenuButton",
+            "AXMenuItem", "AXMenuBarItem", "AXPopUpButton", "AXSegmentedControl",
+            "AXDisclosureTriangle"]
+        let edgeRoles = ["AXRadioButton", "AXTab", "AXComboBox", "AXTextField",
+            "AXSearchField", "AXSlider"]
+        for role in centerRoles + edgeRoles {
+            let frame = rect(100, 100, 100, 30)
+            XCTAssertTrue(GeometryPolicy.isActionable(role: role, hasPressAction: false), role)
+            XCTAssertTrue(classify(role, frame).accepted, role)
+            let target = cand(role, frame, role: role)
+            let point = CGPoint(x: 210, y: 115)
+            let displayed = DecisionCore.displayCandidates(point: point, candidates: [target],
+                                                            tolerance: 16)
+            XCTAssertEqual(displayed.first?.candidate.key, role)
+            guard case .redirect(let clicked, let destination, _, let snap, _) =
+                DecisionCore.route(point: point, candidates: [target], tolerance: 16) else {
+                XCTFail("Missing assisted click for \(role)")
+                continue
+            }
+            XCTAssertEqual(clicked.key, displayed.first?.candidate.key)
+            XCTAssertTrue(frame.contains(destination), role)
+            XCTAssertEqual(snap, edgeRoles.contains(role) ? .edge : .center, role)
+        }
+    }
+
+    func testDecorativeAndDocumentRolesStaySilentWithoutActions() {
+        for role in ["AXGroup", "AXImage", "AXRow", "AXCell", "AXListItem",
+                     "AXStaticText", "AXWebArea", "AXScrollArea", "AXWindow"] {
+            XCTAssertFalse(GeometryPolicy.isActionable(role: role, hasPressAction: false), role)
+        }
+    }
+
+    func testFreshTabCloseAndVideoSlidersDoNotWaitForGlobalDiscovery() {
+        let close = cand("Close", rect(5152, 170, 28, 28))
+        let tab = cand("Tab", rect(4937, 164, 248, 40), role: "AXRadioButton")
+        XCTAssertFalse(DecisionCore.needsGlobalDiscovery(point: CGPoint(x: 5166, y: 184),
+            freshCandidates: [tab, close], tolerance: 16))
+        for frame in [rect(4830, 1664, 2510, 7), rect(21, 2070, 7638, 6)] {
+            let slider = cand("Seek", frame, role: "AXSlider")
+            XCTAssertFalse(DecisionCore.needsGlobalDiscovery(
+                point: CGPoint(x: frame.midX, y: frame.minY - 12),
+                freshCandidates: [slider], tolerance: 16))
+        }
+    }
+
+    func testMissingOutOfRangeOrAmbiguousLocalTargetsStillGetDiscovery() {
+        let point = CGPoint(x: 100, y: 100)
+        XCTAssertTrue(DecisionCore.needsGlobalDiscovery(point: point,
+            freshCandidates: [], tolerance: 16))
+        XCTAssertTrue(DecisionCore.needsGlobalDiscovery(point: point,
+            freshCandidates: [cand("far", rect(200, 100, 20, 20))], tolerance: 16))
+        let left = cand("left", rect(70, 90, 20, 20))
+        let right = cand("right", rect(110, 90, 20, 20))
+        XCTAssertTrue(DecisionCore.needsGlobalDiscovery(point: point,
+            freshCandidates: [left, right], tolerance: 16))
+    }
+
+    func testGlobalDiscoveryResumesEvenWhenOnlyAParentWasFoundLocally() {
+        let tab = cand("Tab", rect(100, 100, 248, 40), role: "AXRadioButton")
+        let point = CGPoint(x: 330, y: 120)
+        XCTAssertFalse(DecisionCore.needsGlobalDiscovery(point: point,
+            freshCandidates: [tab], tolerance: 16, consecutiveLocalSkips: 3))
+        XCTAssertTrue(DecisionCore.needsGlobalDiscovery(point: point,
+            freshCandidates: [tab], tolerance: 16, consecutiveLocalSkips: 4))
+    }
+
+    func testMovedCachedSliderMustNotStealTheNewVideosEvidenceSlot() {
+        let oldFrame = rect(4644, 1721, 2510, 7)
+        let newFrame = rect(4869, 1738, 2510, 7)
+        let point = CGPoint(x: 5464, y: 1723.4)
+        let old = cand("old", oldFrame, role: "AXSlider")
+        let current = cand("current", newFrame, role: "AXSlider")
+        // The stale rectangle wins at distance zero, although it is no longer
+        // the actual control. This reproduces the captured live failure.
+        if case .winner(let winner, _) = DecisionCore.resolve(point: point,
+            candidates: [old, current], tolerance: 16) {
+            XCTAssertEqual(winner.candidate.key, "old")
+        } else { XCTFail("Missing stale-winner reproduction") }
+        XCTAssertTrue(FrameContinuity.needsGeometryRefresh(cached: oldFrame, live: newFrame))
+        let refreshed = DecisionCore.displayCandidates(point: point,
+            candidates: [current], tolerance: 16)
+        XCTAssertEqual(refreshed.first?.candidate.key, "current")
+        XCTAssertEqual(refreshed.first!.dist, 14.6, accuracy: 0.01)
+    }
+
+    func testUnchangedControlsStayCachedButGoneGeometryDoesNot() {
+        for frame in [rect(5152,170,28,28), rect(4830,1664,2510,7), rect(21,2070,7638,6)] {
+            XCTAssertFalse(FrameContinuity.needsGeometryRefresh(cached: frame, live: frame))
+            XCTAssertTrue(FrameContinuity.needsGeometryRefresh(cached: frame, live: nil))
+            XCTAssertTrue(FrameContinuity.needsGeometryRefresh(cached: frame,
+                live: frame.offsetBy(dx: 0, dy: 20)))
+        }
+    }
+
     // MARK: - A. geometry / zoom
 
     /// Guarded failure: the fullscreen video seek bar (7638x7) was rejected by a

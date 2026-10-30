@@ -239,6 +239,19 @@ enum DecisionCore {
         return .winner(winner, alternates: Array(targets.dropFirst().prefix(4)))
     }
 
+    /// Fresh pointer-area targets can be published without waiting for global
+    /// discovery. Ambiguous/empty results still need the rotating tree walk.
+    /// Call only with candidates collected in THIS cycle, never the cached union.
+    static func needsGlobalDiscovery(point: CGPoint, freshCandidates: [Candidate],
+                                      tolerance: CGFloat, consecutiveLocalSkips: Int = 0) -> Bool {
+        // Bound deferral so an incompletely discovered parent cannot hide an
+        // undiscovered child forever (e.g. a tab whose close button was missed).
+        if consecutiveLocalSkips >= 4 { return true }
+        if case .winner = resolve(point: point, candidates: freshCandidates,
+                                  tolerance: tolerance) { return false }
+        return true
+    }
+
     /// Click semantics layered on the shared resolution. Passthrough decisions
     /// (direct hits) are reported as such so the caller leaves the event alone.
     static func route(point: CGPoint, candidates: [Candidate], tolerance: CGFloat,
@@ -410,6 +423,14 @@ enum DecisionCore {
 /// Identity continuity for a control seen twice (cached rect vs a fresh AX rect).
 /// Pure geometry, shared by the live tap and the headless suite.
 enum FrameContinuity {
+    /// A cached target must be recollected when its live AX geometry changes.
+    /// This is stricter than delivery drift tolerance: stale geometry must not
+    /// win selection ahead of the control at its new position.
+    static func needsGeometryRefresh(cached: CGRect, live: CGRect?) -> Bool {
+        guard let live, GeometryPolicy.isValidFrame(live) else { return true }
+        return delta(cached, live) > 1
+    }
+
     /// Largest per-edge movement between two frames (pt).
     static func delta(_ a: CGRect, _ b: CGRect) -> CGFloat {
         max(max(abs(a.minX - b.minX), abs(a.maxX - b.maxX)),

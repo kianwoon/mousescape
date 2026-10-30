@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Click Assist control audit</title>
+<style>body{font:20px system-ui;margin:40px;background:#f7f8fb;color:#16233c}main{display:grid;grid-template-columns:repeat(3,300px);gap:36px}.tile{box-sizing:border-box;min-height:100px;padding:20px;border:1px solid #bbc5d5;border-radius:8px;background:white}button,input,select,a,[role=button]{font:inherit}button,a,[role=button]{display:inline-block;padding:16px}input[type=text]{width:220px;padding:10px}input[type=range]{width:240px}#furniture,#image{width:240px;height:100px}#empty{height:100px}#covered{position:relative}#cover{position:absolute;inset:0;background:#e4e8ef;padding:18px}#result{margin-top:30px}</style>
+<h1>Click Assist control audit</h1><p>Local test controls. No network requests or submissions.</p>
+<main>
+<section class=tile><button aria-label="Audit button" onclick="result.textContent='Button activated'">Audit button</button></section>
+<section class=tile><a href="#audit-link" aria-label="Audit link">Audit link</a></section>
+<section class=tile><label><input type=checkbox aria-label="Audit checkbox">Audit checkbox</label></section>
+<section class=tile><label><input type=radio name=audit aria-label="Audit radio">Audit radio</label></section>
+<section class=tile><select aria-label="Audit select"><option>First choice</option><option>Second choice</option></select></section>
+<section class=tile><input type=text aria-label="Audit text field" placeholder="Audit text field"></section>
+<section class=tile><input type=range aria-label="Audit slider" min=0 max=100 value=50></section>
+<section class=tile><div role=button tabindex=0 aria-label="Audit custom button" onclick="result.textContent='Custom button activated'">Audit custom button</div></section>
+<section class=tile><button disabled aria-label="Audit disabled button">Disabled button</button></section>
+<section class=tile><div id=furniture title="Named decorative group" aria-label="Audit decorative group">Named decorative group</div></section>
+<section class=tile><img id=image alt="Audit decorative image" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='240' height='100'%3E%3Crect width='240' height='100' fill='%23d4ddec'/%3E%3C/svg%3E"></section>
+<section class=tile><div id=empty aria-label="Audit empty area"></div></section>
+<section class=tile id=covered><button aria-label="Audit covered button">Covered button</button><div id=cover aria-label="Audit covering surface">Non-clickable cover</div></section>
+</main><p id=result>Ready</p>

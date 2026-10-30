@@ -208,7 +208,7 @@ final class TargetingOverlay {
                         : ageMs)
                 let verdict: ClickAssistVerdict = evidence == .fresh
                     ? choice.candidate.verdict : .unknown
-                if verdict == .confirmed || verdict == .confirmedWeak {
+                if verdict == .confirmed {
                     confirmed.append((choice, dest, verdict))
                 } else if suppressed == nil {
                     suppressed = (choice.candidate.key, verdict)

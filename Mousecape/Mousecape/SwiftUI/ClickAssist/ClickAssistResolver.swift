@@ -36,7 +36,7 @@ final class AXElementTable: @unchecked Sendable {
 /// snapshot into CacheStore. The tap only ever reads that snapshot.
 ///
 /// Refresh triggers (throttled):
-///  * periodic 150 ms tick (timer, leeway 40 ms)
+///  * periodic 50 ms tick (timer, leeway 5 ms)
 ///  * AX notifications: window moved / resized / destroyed / focused window changed
 ///  * app activation / deactivation (NSWorkspace, NSApplication)
 /// Any of those publishes an INVALID snapshot first (fail-open) and then refreshes.
@@ -64,6 +64,16 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Two candidates whose frames overlap this completely are the SAME control
     /// exposed twice (e.g. AXImage + its AXGroup wrapper); the smaller area wins.
     private static let duplicateIoUThreshold: CGFloat = 0.85
+
+    /// Same anyHost preference contract as the agent; the XPC target deliberately
+    /// does not compile the app's UI configuration/status implementation.
+    private var selectionTolerance: CGFloat {
+        let raw = CFPreferencesCopyValue("MCClickAssistTolerancePoints" as CFString,
+                                          "com.sdmj76.Mousecape" as CFString,
+                                          kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
+        let value = (raw as? NSNumber)?.doubleValue ?? 12
+        return CGFloat(value.isFinite ? min(max(value, 8), 16) : 12)
+    }
 
     private let cache: CacheStore
     private let log: (String) -> Void
@@ -141,6 +151,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var frontier: [(element: AXUIElement, depth: Int)] = []
     private var frontierHead = 0
     private var sliceIndex = 0
+    private var consecutiveLocalRotationSkips = 0
     private var coverageKeys: Set<String> = []
     private static let maxFrontierNodes = 20_000
     private static let frontierCompactionThreshold = 1_024
@@ -164,7 +175,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// 119 ms/pass on a 150 ms cadence). Moving pointer -> keep the fast cadence;
     /// pointer still for longer than `idleMovementWindow` -> slow down and skip
     /// the rotation slice. Any movement snaps back on the very next tick.
-    private static let fastCadence: TimeInterval = 0.1
+    private static let fastCadence: TimeInterval = 0.05
     private static let idleCadence: TimeInterval = 0.4
     private static let idleMovementWindow: CFTimeInterval = 1.5
     /// Movement smaller than this is treated as noise (sub-pixel/drift).
@@ -289,9 +300,9 @@ final class AccessibilityResolver: @unchecked Sendable {
 
         let t = DispatchSource.makeTimerSource(queue: queue)
         // The tick itself is cheap; `tick()` decides whether this beat is due. The
-        // effective cadence is fast (150 ms) while the pointer moves and idle
-        // (700 ms, rotation skipped) once it has been still for `idleMovementWindow`.
-        t.schedule(deadline: .now() + 0.05, repeating: Self.fastCadence, leeway: .milliseconds(40))
+        // effective cadence is fast (50 ms) while the pointer moves and idle
+        // (400 ms, rotation skipped) once it has been still for `idleMovementWindow`.
+        t.schedule(deadline: .now() + 0.05, repeating: Self.fastCadence, leeway: .milliseconds(5))
         t.setEventHandler { [weak self] in self?.tick() }
         t.resume()
         timer = t
@@ -699,7 +710,23 @@ final class AccessibilityResolver: @unchecked Sendable {
         }
         if let menuBar { roots.append(menuBar) }
         if let openMenu { roots.append(openMenu) }
-        let rotationSkipped = !rotationAllowed || budget <= 0 || CACurrentMediaTime() >= rotationDeadline
+        // A fresh local winner should reach validation/publication immediately.
+        // The rotating frontier is retained and resumes whenever local discovery
+        // needs help; cached/stale union entries cannot suppress that discovery.
+        let freshLocalCandidates = out.map {
+            DecisionCore.Candidate(key: $0.key, rect: $0.rect, inset: $0.inset,
+                                   tier: $0.tier, role: $0.role, label: $0.label)
+        }
+        let needsDiscovery = DecisionCore.needsGlobalDiscovery(point: pointer,
+            freshCandidates: freshLocalCandidates, tolerance: selectionTolerance,
+            consecutiveLocalSkips: consecutiveLocalRotationSkips)
+        let rotationSkipped = !rotationAllowed || !needsDiscovery
+            || budget <= 0 || CACurrentMediaTime() >= rotationDeadline
+        if !needsDiscovery && rotationAllowed {
+            consecutiveLocalRotationSkips += 1
+        } else if !rotationSkipped {
+            consecutiveLocalRotationSkips = 0
+        }
         let sliceId = rotationSkipped ? -1
             : walkSlice(roots: roots, out: &out, budget: &budget, deadline: rotationDeadline,
                         screenUnion: screenUnion, appElement: appEl, pid: pid)
@@ -751,6 +778,27 @@ final class AccessibilityResolver: @unchecked Sendable {
             // Legitimacy validation still re-checks the renderer before any ring
             // or redirect, so a stale rect cannot become a wrong action.
             let heldByPointer = Self.boundaryDistance(pointer, previous.rect) <= Self.pointerHoldRadius
+            if heldByPointer {
+                let element = elementRefs[previous.key]
+                let liveFrame = element.flatMap { frame($0) }
+                if FrameContinuity.needsGeometryRefresh(cached: previous.rect, live: liveFrame) {
+                    // Chromium reuses elements while a new video/window layout
+                    // moves their frame. Replace the old key/rect BEFORE choosing
+                    // evidence, rather than validating the obsolete winner forever.
+                    lastSeen.removeValue(forKey: previous.key)
+                    droppedExpired += 1
+                    var refreshed: [CachedTarget] = []
+                    if let element { collect(element, out: &refreshed, screenUnion: screenUnion) }
+                    for target in refreshed where byKey[target.key] == nil {
+                        byKey[target.key] = target
+                        order.append(target.key)
+                        lastSeen[target.key] = now
+                        coverageKeys.insert(target.key)
+                    }
+                    log("RESOLVER_GEOMETRY_REFRESH old=\(previous.key) new=\(refreshed.first?.key ?? "removed")")
+                    continue
+                }
+            }
             if let seen = lastSeen[previous.key],
                now - seen <= Self.targetFreshnessWindow || heldByPointer {
                 byKey[previous.key] = previous
@@ -787,23 +835,21 @@ final class AccessibilityResolver: @unchecked Sendable {
         // target (see `collect`); only the legitimacy hit-test is capped here.
         let evidenceStart = CACurrentMediaTime()
         if let legitimacy {
-            // The single evidence slot MUST belong to the candidate the router
-            // would pick, otherwise the ring shows `legitimacy-unknown` for a
-            // target that merely lost a tie. Measured regression: a tab close and
-            // a page link both sat at distance 0, the link won a distance-only
-            // sort, and the close button lost its ring. Same comparator as
-            // DecisionCore.resolve: distance, then smaller area, then stable order.
-            let nearest = out.indices
-                .sorted { lhs, rhs in
-                    let dl = Self.boundaryDistance(pointer, out[lhs].rect)
-                    let dr = Self.boundaryDistance(pointer, out[rhs].rect)
-                    if dl != dr { return dl < dr }
-                    let al = out[lhs].rect.width * out[lhs].rect.height
-                    let ar = out[rhs].rect.width * out[rhs].rect.height
-                    if al != ar { return al < ar }
-                    return lhs < rhs
-                }
-                .prefix(ClickAssistEvidence.maxEvidenceCandidatesPerCycle)
+            // Validate exactly the winner chosen by the overlay and tap, including
+            // tier and wrapper rules. Never spend the evidence slot off-radius.
+            let candidates = out.map {
+                DecisionCore.Candidate(key: $0.key, rect: $0.rect, inset: $0.inset,
+                                       tier: $0.tier, role: $0.role, label: $0.label)
+            }
+            let nearest: [Int]
+            if case .winner(let winner, _) = DecisionCore.resolve(
+                point: pointer, candidates: candidates,
+                tolerance: selectionTolerance),
+               let index = out.firstIndex(where: { $0.key == winner.candidate.key }) {
+                nearest = [index]
+            } else {
+                nearest = []
+            }
             let siblings = out.filter { $0.tier == .firstClass }.map(\.rect)
             for idx in nearest {
                 let target = out[idx]
@@ -817,7 +863,8 @@ final class AccessibilityResolver: @unchecked Sendable {
                 out[idx].verdict = legitimacy.validate(
                     pid: pid, generation: gen, key: target.key, candidate: target.rect,
                     candidateRole: target.role, destination: destination,
-                    siblings: siblings.filter { $0 != target.rect })
+                    siblings: siblings.filter { $0 != target.rect }, candidateElement: el,
+                    diagnostic: { if gen % 20 == 0 { self.log($0) } })
                 out[idx].chromeEligible = chromeEligible(el, role: target.role)
                 out[idx].evidenceGeneration = gen
                 out[idx].collectedAt = CACurrentMediaTime()
@@ -1288,18 +1335,23 @@ final class AccessibilityResolver: @unchecked Sendable {
     private func collect(_ el: AXUIElement, out: inout [CachedTarget],
                          screenUnion: CGRect) -> Bool {
         guard let role = stringAttr(el, kAXRoleAttribute) else { return false }
-        // Capability (AXPress), read once — this is row 5 of the policy table.
-        var hasPressAction = false
-        if role == "AXGroup", !GeometryPolicy.eligibleRoles.contains(role),
-           let actions = attr(el, "AXActionNames") as? [String] {
-            hasPressAction = actions.contains("AXPress")
-        }
         // Role family first, so a role reject is diagnosed even without a frame.
         guard GeometryPolicy.isCandidateRole(role) else {
             record(.role)
             noteRejectedNearPointer(el, role: role)
             return false
         }
+        // Action names are an AX API, not an attribute. A title or tile-sized
+        // rectangle alone must never turn a structural web element into a target.
+        var hasPressAction = false
+        if !GeometryPolicy.isActionable(role: role, hasPressAction: false) {
+            var actions: CFArray?
+            if AXUIElementCopyActionNames(el, &actions) == .success {
+                hasPressAction = (actions as? [String])?.contains("AXPress") == true
+            }
+        }
+        guard GeometryPolicy.isActionable(role: role, hasPressAction: hasPressAction),
+              (attr(el, kAXEnabledAttribute) as? Bool) != false else { return false }
         // Secure text fields are never redirect candidates: a near miss must
         // pass through instead of being clamped into a password control.
         let subrole = stringAttr(el, kAXSubroleAttribute)
@@ -1328,7 +1380,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         }
         guard let cls = verdict.candidateClass, rect.intersects(screenUnion) else { return false }
         // A press group is published as a group, not as a container role.
-        let admittedRole = cls == .pressGroup ? "AXPressGroup" : role
+        let admittedRole = hasPressAction && !GeometryPolicy.isActionable(role: role, hasPressAction: false)
+            ? "AXPressGroup" : role
         let ident = stringAttr(el, kAXIdentifierAttribute)
         let title = stringAttr(el, kAXTitleAttribute)
         // IDENTITY: a label alone is not an identity. "Close" names every tab

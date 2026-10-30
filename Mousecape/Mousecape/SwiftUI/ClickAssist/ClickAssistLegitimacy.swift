@@ -20,13 +20,6 @@ final class LegitimacyPolicy: @unchecked Sendable {
     private static let ttl: CFTimeInterval = 0.5
     private let lock = NSLock()
 
-    /// Roles that ARE an actionable control on their own. Only these may be
-    /// confirmed by sitting inside an answered surface (see evaluate step 3).
-    private static let directControlRoles: Set<String> = [
-        "AXButton", "AXCheckBox", "AXRadioButton", "AXSlider", "AXPopUpButton",
-        "AXMenuButton", "AXLink", "AXComboBox", "AXSearchField", "AXIncrementor"
-    ]
-
     /// Approximate frame equality used for "the renderer answered with this exact
     /// control surface" (Brave's tab group vs the tab's AXRadioButton).
     private static func sameFrame(_ a: CGRect, _ b: CGRect, eps: CGFloat = 1) -> Bool {
@@ -54,7 +47,8 @@ final class LegitimacyPolicy: @unchecked Sendable {
     /// first-class candidate frames in the same snapshot (identity proxy).
     func validate(pid: pid_t, generation: UInt64, key: String,
                   candidate: CGRect, candidateRole: String, destination: CGPoint,
-                  siblings: [CGRect]) -> ClickAssistVerdict {
+                  siblings: [CGRect], candidateElement: AXUIElement,
+                  diagnostic: (String) -> Void) -> ClickAssistVerdict {
         // Non-finite geometry (AX can answer NaN/±inf frames — observed crash:
         // Int(destination.x) trapping on the main thread) is never testimony.
         // Reject before any arithmetic; fail closed and stay quiet.
@@ -76,7 +70,8 @@ final class LegitimacyPolicy: @unchecked Sendable {
 
         let verdict = Self.evaluate(pid: pid, candidate: candidate,
                                     candidateRole: candidateRole,
-                                    destination: destination, siblings: siblings)
+                                    destination: destination, siblings: siblings,
+                                    candidateElement: candidateElement, diagnostic: diagnostic)
         lock.lock()
         cache[cacheKey] = Entry(verdict: verdict, generation: generation, stamp: now)
         lock.unlock()
@@ -84,83 +79,123 @@ final class LegitimacyPolicy: @unchecked Sendable {
     }
 
     private static func evaluate(pid: pid_t, candidate: CGRect, candidateRole: String,
-                                 destination: CGPoint, siblings: [CGRect]) -> ClickAssistVerdict {
-        guard pid > 0, pid != getpid() else { return .unknown }
+                                 destination: CGPoint, siblings: [CGRect], candidateElement: AXUIElement,
+                  diagnostic: (String) -> Void) -> ClickAssistVerdict {
+        guard pid > 0, pid != getpid(),
+              GeometryPolicy.isActionable(role: candidateRole, hasPressAction: false)
+        else { return .unknown }
         let app = AXUIElementCreateApplication(pid)
-        // Timeout budget is RING LATENCY, not tap safety: this runs inside the
-        // resolve cycle, so a long timeout delays every publish. 0.1 s + one retry
-        // is enough to ride out a transient Chromium failure; a genuine "no answer"
-        // is covered by the geometric fallback below instead of by waiting longer
-        // (measured: 0.35 s pushed cycles to p95 240 ms and the ring felt slow).
-        AXUIElementSetMessagingTimeout(app, 0.1)
+        AXUIElementSetMessagingTimeout(app, 0.05)
         var element: AXUIElement?
-        var hitResult = AXUIElementCopyElementAtPosition(app, Float(destination.x), Float(destination.y), &element)
-        if hitResult != .success || element == nil {
-            // One retry: Chromium occasionally fails the first query under load.
-            usleep(15_000)
-            hitResult = AXUIElementCopyElementAtPosition(app, Float(destination.x), Float(destination.y), &element)
+        // One bounded query. A failed or incoherent answer is not confirmation;
+        // the next resolver beat can try again without delaying this publish.
+        let hitResult = AXUIElementCopyElementAtPosition(app, Float(destination.x),
+                                                         Float(destination.y), &element)
+        let answeredFrame = element.flatMap { axFrame($0) }
+        if candidateRole == "AXSlider" {
+            diagnostic("SLIDER_HIT result=\(hitResult.rawValue) destination=\(destination) candidate=\(candidate) live=\(String(describing: axFrame(candidateElement))) hit=\(String(describing: answeredFrame)) role=\(element.map { role(of: $0) } ?? "-")")
         }
-        guard hitResult == .success, let element, let hitFrame = axFrame(element) else {
-            // No testimony at all. A first-class control whose OWN rect contains
-            // the destination still stands on its geometry — the same rule already
-            // applied when the hit-test answers incoherently (below). Anonymous
-            // groups get nothing: they have no role evidence.
-            if candidate.contains(destination), directControlRoles.contains(candidateRole) {
-                return .confirmedWeak
-            }
-            return .unknown
-        }
-        // The renderer's answer must cover the destination to mean anything.
-        // In macOS fullscreen Chromium answers out of a broken coordinate space
-        // (measured: the menu bar for a point at the bottom of the screen, or a
-        // different window's element). Such an answer is incoherent — it cannot
-        // testify about this point either way — so it is discarded and a real
-        // control whose own rect holds the destination stands on its geometry.
-        if !hitFrame.contains(destination) {
-            if candidate.contains(destination),
-               directControlRoles.contains(candidateRole) { return .confirmedWeak }
-            return .unknown
-        }
-        // AXEnabled veto: a DISABLED control is never a legitimate click target.
-        // (Cheap; true supplies no visibility evidence — see Codex audit.)
-        if let enabled = attr(element, kAXEnabledAttribute) as? Bool, enabled == false {
+        guard hitResult == .success, let element, let hitFrame = answeredFrame,
+              hitFrame.contains(destination) else { return .unknown }
+        if let enabled = attr(element, kAXEnabledAttribute) as? Bool, !enabled {
             return .mismatch
         }
-        // Confirmation must prove THE CHOSEN TARGET. Two accepted answers:
-        // 1. the renderer's answer sits inside the candidate's own rect, or IS
-        //    the candidate's own surface (frame-equal within 1 pt);
-        // 2. the renderer answered a REAL first-class control (frame-equal to a
-        //    first-class candidate) that CONTAINS this candidate — Chromium
-        //    answers a tab's inner ✕ with the tab's own frame. Scoped to that
-        //    containment; an unrelated container still fails.
-        // Strong evidence requires the answered surface to BE something: a named
-        // control, a press-capable control, or a direct-control role. An
-        // anonymous group answering for itself may be nothing but a dead div —
-        // that self-answer is only WEAK evidence (dim ring, still assisted).
-        let hitNamed = !(attr(element, kAXTitleAttribute) as? String ?? "").isEmpty
-            || !(attr(element, kAXDescriptionAttribute) as? String ?? "").isEmpty
-        let hitPress = (attr(element, "AXActionNames") as? [String])?.contains("AXPress") ?? false
-        let hitControl = Self.directControlRoles.contains(candidateRole)
-        let strong = hitNamed || hitPress || hitControl
-        if candidate.contains(hitFrame) { return strong ? .confirmed : .confirmedWeak }
-        if sameFrame(candidate, hitFrame) { return strong ? .confirmed : .confirmedWeak }
+        if candidateRole == "AXButton" || candidateRole == "AXSlider" {
+            diagnostic("LEGITIMACY_HIT candidateRole=\(candidateRole) liveFrame=\(String(describing: axFrame(candidateElement))) candidate=\(candidate) hitRole=\(role(of: element)) hit=\(hitFrame) title=\(attr(element, kAXTitleAttribute) ?? "-" as CFString)")
+        }
+        // An actionable candidate must be the answered surface, or contain the
+        // answered child (e.g. a button's text). A surrounding page/video group
+        // cannot confirm a hidden control simply because its rectangle fits.
+        if sameFrame(candidate, hitFrame) || candidate.contains(hitFrame) {
+            return .confirmed
+        }
+        // Browser chrome can answer an inner close button with its parent tab.
+        // Require that parent to itself be an actionable sibling control.
+        var actions: CFArray?
+        let hasPress = AXUIElementCopyActionNames(element, &actions) == .success
+            && (actions as? [String])?.contains("AXPress") == true
         if hitFrame.contains(candidate),
-           siblings.contains(where: { sameFrame($0, hitFrame) }) { return .confirmed }
-        // 3. The renderer answered a surface that CONTAINS a real control placed
-        //    inside it (Chromium answers web video players with the player group
-        //    for their seek bar). Only direct-control roles qualify — a generic
-        //    container or anonymous group can never be confirmed this way.
-        if hitFrame.contains(candidate),
-           Self.directControlRoles.contains(candidateRole) { return .confirmedWeak }
-        // 4. A CONTAINER answer cannot veto a real control that covers the point.
-        //    Web players answer with the video/overlay group at points where the
-        //    seek bar is fully clickable (measured in fullscreen: menu bar or a
-        //    background window's group). Only an answer that IS a control may
-        //    block; a structural answer is treated as uninformative.
-        let hitRole = Self.role(of: element)
-        if candidate.contains(destination),
-           Self.directControlRoles.contains(candidateRole),
-           !Self.directControlRoles.contains(hitRole) { return .confirmedWeak }
+           GeometryPolicy.isActionable(role: role(of: element), hasPressAction: hasPress),
+           siblings.contains(where: { sameFrame($0, hitFrame) }) {
+            return .confirmed
+        }
+        // Video players can answer for their live seek slider. Require both
+        // actual slider capability and an exact live ancestor, never containment
+        // alone (which would also admit unrelated overlays and page furniture).
+        if candidateRole == "AXSlider",
+           GeometryPolicy.sliderHitCoversDestination(candidate: candidate, hit: hitFrame,
+                                                      destination: destination) {
+            var sliderActions: CFArray?
+            _ = AXUIElementCopyActionNames(candidateElement, &sliderActions)
+            let actions = sliderActions as? [String] ?? []
+            var valueSettable = DarwinBoolean(false)
+            let canSetValue = AXUIElementIsAttributeSettable(candidateElement,
+                kAXValueAttribute as CFString, &valueSettable) == .success && valueSettable.boolValue
+            let adjustable = canSetValue || (actions.contains("AXIncrement") && actions.contains("AXDecrement"))
+            var node: AXUIElement? = candidateElement
+            var hitIsAncestor = false
+            for _ in 0..<24 {
+                guard let current = node else { break }
+                let currentRole = role(of: current)
+                // Stop at the web document: a whole page/window cannot vouch
+                // for a slider that a different surface covers.
+                if currentRole == "AXWebArea" || currentRole == "AXWindow" { break }
+                if CFEqual(current, element) || (currentRole == "AXGroup"
+                    && role(of: element) == "AXGroup"
+                    && axFrame(current).map { sameFrame($0, hitFrame) } == true) {
+                    hitIsAncestor = true
+                    break
+                }
+                guard let parent = attr(current, kAXParentAttribute),
+                      CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+                node = (parent as! AXUIElement)
+            }
+            let liveFrameMatches = axFrame(candidateElement).map { sameFrame($0, candidate) } == true
+            let enabled = (attr(candidateElement, kAXEnabledAttribute) as? Bool) != false
+                && (attr(candidateElement, "AXHidden") as? Bool) != true
+            diagnostic("SLIDER_CONTAINER adjustable=\(adjustable) frameMatches=\(liveFrameMatches) enabled=\(enabled) ancestor=\(hitIsAncestor)")
+            if GeometryPolicy.confirmsSliderContainer(candidateRole: candidateRole,
+                enabled: enabled, adjustable: adjustable, frameMatches: liveFrameMatches,
+                hitIsAncestor: hitIsAncestor) { return .confirmed }
+        }
+        // Confirm the actual close button's live relationship to the tab hit,
+        // even when the tab group itself has no control role or press action.
+        if candidateRole == "AXButton", hitFrame.contains(candidate),
+           let liveFrame = axFrame(candidateElement), sameFrame(candidate, liveFrame) {
+            var candidateActions: CFArray?
+            let candidatePress = AXUIElementCopyActionNames(candidateElement, &candidateActions) == .success
+                && (candidateActions as? [String])?.contains("AXPress") == true
+            var node: AXUIElement? = candidateElement
+            var hitIsAncestor = false
+            var hasChrome = false
+            var hasWebArea = false
+            for _ in 0..<32 {
+                guard let current = node else { break }
+                let currentRole = role(of: current)
+                hasWebArea = hasWebArea || currentRole == "AXWebArea"
+                hasChrome = hasChrome || currentRole == "AXTabGroup" || currentRole == "AXToolbar"
+                // Chromium returns a separate AXGroup proxy for the tab's
+                // AXRadioButton. Match only that live tab ancestor's frame;
+                // generic groups and unrelated enclosing surfaces do not qualify.
+                let tabProxy = axFrame(current).map {
+                    GeometryPolicy.isTabHitProxy(ancestorRole: currentRole,
+                        hitRole: role(of: element), ancestorFrame: $0, hitFrame: hitFrame)
+                } == true
+                hitIsAncestor = hitIsAncestor || CFEqual(current, element) || tabProxy
+                if currentRole == "AXWindow" || hasWebArea { break }
+                guard let parent = attr(current, kAXParentAttribute),
+                      CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+                node = (parent as! AXUIElement)
+            }
+            diagnostic("LEGITIMACY_CHROME press=\(candidatePress) ancestor=\(hitIsAncestor) chrome=\(hasChrome) web=\(hasWebArea)")
+            if GeometryPolicy.confirmsChromeDescendant(
+                candidateRole: candidateRole,
+                enabled: (attr(candidateElement, kAXEnabledAttribute) as? Bool) != false,
+                hasPress: candidatePress, hitIsAncestor: hitIsAncestor,
+                hasChrome: hasChrome, hasWebArea: hasWebArea) {
+                return .confirmed
+            }
+        }
         return .mismatch
     }
 

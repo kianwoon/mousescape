@@ -45,6 +45,40 @@ struct GeometryVerdict {
 ///                                                              / .tileTooWide
 /// 9. otherwise                                        -> .role
 enum GeometryPolicy {
+    /// Names and rectangles do not prove that page furniture can be clicked.
+    static func isActionable(role: String, hasPressAction: Bool) -> Bool {
+        directRoles.contains(role) || admittedTrackRoles.contains(role)
+            || role == "AXPressGroup" || hasPressAction
+    }
+
+    /// Full-screen sliders may extend across letterboxing beyond their player's
+    /// reported AX frame. Confirmation concerns the intended click point.
+    static func sliderHitCoversDestination(candidate: CGRect, hit: CGRect,
+                                           destination: CGPoint) -> Bool {
+        candidate.contains(destination) && hit.contains(destination)
+    }
+
+    static func confirmsSliderContainer(candidateRole: String, enabled: Bool,
+                                         adjustable: Bool, frameMatches: Bool,
+                                         hitIsAncestor: Bool) -> Bool {
+        candidateRole == "AXSlider" && enabled && adjustable && frameMatches && hitIsAncestor
+    }
+
+    static func isTabHitProxy(ancestorRole: String, hitRole: String,
+                              ancestorFrame: CGRect, hitFrame: CGRect) -> Bool {
+        (ancestorRole == "AXRadioButton" || ancestorRole == "AXTab")
+            && hitRole == "AXGroup" && FrameContinuity.delta(ancestorFrame, hitFrame) <= 1
+    }
+
+    /// Chromium may hit-test a tab's group instead of its close button. This
+    /// exception requires live ancestry and press capability, never frame alone.
+    static func confirmsChromeDescendant(candidateRole: String, enabled: Bool,
+                                          hasPress: Bool, hitIsAncestor: Bool,
+                                          hasChrome: Bool, hasWebArea: Bool) -> Bool {
+        candidateRole == "AXButton" && enabled && hasPress && hitIsAncestor
+            && hasChrome && !hasWebArea
+    }
+
     // Row 3 — direct control roles (track roles are excluded: row 4 owns them).
     static let eligibleRoles: Set<String> = [
         "AXButton", "AXMenuButton", "AXLink",
