@@ -1149,16 +1149,22 @@ final class AccessibilityResolver: @unchecked Sendable {
         // A value control's track is legitimately screen-wide in fullscreen video
         // (observed: 7405×10 "progress bar" AXSlider spanning the display), so the
         // page-container size cap must not apply to these thin track roles.
-        let isWideTrack = role == "AXSlider" || role == "AXScrollBar" || role == "AXValueIndicator"
+        let isWideTrackRole = role == "AXSlider" || role == "AXScrollBar" || role == "AXValueIndicator"
         guard let rect = frame(el), rect.width >= 4, rect.height >= 4,
-              isWideTrack || (rect.width < 4000 && rect.height < 2000),
               rect.intersects(screenUnion) else {
             return false
         }
-        // USER INVARIANT (final): too big = wrong for sure. Applies to EVERY
-        // admitted path — role whitelist, row/tile envelope, capability admission —
-        // so no oversized wrapper can ever reach the ring.
-        if !isWideTrack, rect.width * rect.height > Self.maxControlArea
+        // A track is legitimately THIN and may span the screen (fullscreen seek
+        // bar: observed 7638×7). A "slider" that is 2289×963 is NOT a track — it
+        // is a mis-exposed player container and falls to the invariant below.
+        let isThinTrack = isWideTrackRole && min(rect.width, rect.height) <= 60
+        if !isThinTrack, !isWideTrackRole, rect.width >= 4000 || rect.height >= 2000 {
+            return false
+        }
+        // USER INVARIANT (final): too big = wrong for sure. Thin tracks exempt;
+        // EVERYTHING else — role whitelist, row/tile envelope, capability
+        // admission, mis-exposed wide-role containers — is bounded.
+        if !isThinTrack, rect.width * rect.height > Self.maxControlArea
             || rect.height > Self.maxControlHeight {
             oversized += 1
             noteRejectedNearPointer(el, role: role)

@@ -141,20 +141,30 @@ enum DecisionCore {
                 pool = fc
             } else {
                 // The pointer sits inside a second-tier element. TWO kinds:
-                // - STRUCTURAL WRAPPER: encloses first-class controls (a chip-bar
-                //   DIV, a player bar, a tab strip). It has no click semantics of
-                //   its own — never self-indicate; only its embedded controls do.
-                // - ACTIONABLE ROW/TILE: encloses no controls (MyHome's AXCell
-                //   sidebar rows). Clicking it means something — self-indicate.
+                // - GROUPING WRAPPER: encloses other candidates (a chip-bar DIV
+                //   wrapping chips, a player bar wrapping the seek slider). It has
+                //   no click semantics of its own — never self-indicate; only the
+                //   embedded controls (when within tolerance) are targets.
+                // - ACTIONABLE LEAF: encloses nothing (MyHome's AXCell sidebar
+                //   rows). Clicking it means something — self-indicate.
                 let container = containing.sorted { area($0.0) < area($1.0) }.first!.0
-                let wrapsControls = candidates.contains {
-                    $0.tier == .firstClass && container.rect.contains($0.rect)
-                        && $0.rect != container.rect
-                }
+                // INTERSECT-based grouping: a container visually holding controls
+                // (player bar over its slider/mute) often has a slightly offset
+                // frame, so strict containment misses them. Intersection matches
+                // what the user sees.
                 let inside = filtered
-                    .filter { $0.0.tier == .firstClass && container.rect.contains($0.0.rect) }
+                    .filter { $0.0.tier == .firstClass && container.rect.intersects($0.0.rect) }
                     .sorted { $0.1 < $1.1 }
-                pool = wrapsControls ? inside : (inside.isEmpty ? [(container, 0)] : inside)
+                let enclosesAny = candidates.contains {
+                    $0.key != container.key && container.rect.intersects($0.rect)
+                }
+                if !inside.isEmpty {
+                    pool = inside
+                } else if enclosesAny {
+                    pool = []   // dead zone inside a wrapper: fail-closed silence
+                } else {
+                    pool = [(container, 0)]
+                }
             }
         } else {
             let fc = filtered.filter { $0.0.tier == .firstClass }.sorted { $0.1 < $1.1 }
@@ -298,13 +308,42 @@ enum DecisionCore {
     /// The winner of a click is always element 0.
     /// Thin view over `resolve()` so the ring and the click can never pick
     /// different winners. Order is the resolution order; the first is the winner.
+    ///
+    /// USER RULE (final arbiter): no shown ring may contain or be contained by
+    /// another shown ring — outer grouping wrappers (rect contains another
+    /// cached candidate) are dropped, AND inner secondaries (non-winner rects
+    /// inside the winner) are suppressed, with the winner always kept.
     static func displayCandidates(point: CGPoint, candidates: [Candidate],
                                   tolerance: CGFloat, limit: Int = 3) -> [ScoredCandidate] {
         switch resolve(point: point, candidates: candidates, tolerance: tolerance) {
         case .winner(let winner, let alternates):
-            return ([winner] + alternates).prefix(limit).map {
+            let scored = ([winner] + alternates).prefix(limit).map {
                 ScoredCandidate(candidate: $0.candidate, dist: $0.dist)
             }
+            // Nesting test is margin-tolerant: the outer must contain the inner
+            // expanded by 8pt — Chromium frames are frequently offset by 1-2pt
+            // (menu containers vs their buttons), which defeats strict contains.
+            let nestMargin: CGFloat = 8
+            let winnerExpanded = scored.first.map {
+                $0.candidate.rect.insetBy(dx: -nestMargin, dy: -nestMargin)
+            }
+            let kept = scored.enumerated().filter { entry in
+                let cand = entry.element
+                // Inner secondaries: a non-winner whose rect sits inside the
+                // winner's rect is an alternate/stale ring — never show both.
+                if entry.offset > 0, let winnerExpanded,
+                   winnerExpanded.contains(cand.candidate.rect) {
+                    return false
+                }
+                let expanded = cand.candidate.rect.insetBy(dx: -nestMargin, dy: -nestMargin)
+                return !candidates.contains { other in
+                    other.key != cand.candidate.key
+                        && expanded.contains(other.rect)
+                }
+            }.map(\.element)
+            // Safety: if everything nested (a lone wrapper with no inner control
+            // cached), keep the winner so a real control never goes unindicated.
+            return kept.isEmpty ? Array(scored.prefix(1)) : Array(kept.prefix(limit))
         case .ambiguous, .none:
             return []
         }
@@ -454,8 +493,17 @@ final class LegitimacyPolicy: @unchecked Sendable {
         //    first-class candidate) that CONTAINS this candidate — Chromium
         //    answers a tab's inner ✕ with the tab's own frame. Scoped to that
         //    containment; an unrelated container still fails.
-        if candidate.contains(hitFrame) { return .confirmed }               // strong
-        if sameFrame(candidate, hitFrame) { return .confirmed }             // strong
+        // Strong evidence requires the answered surface to BE something: a named
+        // control, a press-capable control, or a direct-control role. An
+        // anonymous group answering for itself may be nothing but a dead div —
+        // that self-answer is only WEAK evidence (dim ring, still assisted).
+        let hitNamed = !(attr(element, kAXTitleAttribute) as? String ?? "").isEmpty
+            || !(attr(element, kAXDescriptionAttribute) as? String ?? "").isEmpty
+        let hitPress = (attr(element, "AXActionNames") as? [String])?.contains("AXPress") ?? false
+        let hitControl = Self.directControlRoles.contains(candidateRole)
+        let strong = hitNamed || hitPress || hitControl
+        if candidate.contains(hitFrame) { return strong ? .confirmed : .confirmedWeak }
+        if sameFrame(candidate, hitFrame) { return strong ? .confirmed : .confirmedWeak }
         if hitFrame.contains(candidate),
            siblings.contains(where: { sameFrame($0, hitFrame) }) { return .confirmed }
         // 3. The renderer answered a surface that CONTAINS a real control placed
