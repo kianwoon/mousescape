@@ -312,6 +312,10 @@ final class AssistTap: @unchecked Sendable {
             unlatchedForDrag = false
 
             guard res.valid else {
+                // A gesture may never span a snapshot invalidation (an app switch
+                // mid-AXPress): drop the delayed AXPress token with the snapshot,
+                // otherwise it would swallow the next up in the new app.
+                pressGestureToken = nil
                 emit("PASSTHROUGH", type: label, original: original, mutated: nil,
                      reason: res.reason, res: res, started: started, extra: "validity=invalid")
                 return Unmanaged.passUnretained(event)

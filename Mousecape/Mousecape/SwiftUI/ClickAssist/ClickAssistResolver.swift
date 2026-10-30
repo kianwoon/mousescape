@@ -156,6 +156,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var cyclePointer = CGPoint.zero
     private var rejectedNear: [(role: String, label: String, rect: CGRect, dist: CGFloat)] = []
     private var rejectedScanned = 0
+    /// Per-cycle display bounds in AX/CG points, handed to `GeometryPolicy`
+    /// so every class is bounded by the displays it actually intersects.
+    private var cycleDisplayBounds: [CGRect] = []
     /// Diagnostics only: row-like elements (AXCell/AXRow/AXListItem) rejected by the
     /// row-size guard this cycle. Reset per refresh; published as `rowTooLarge=`.
     private var rowTooLarge = 0
@@ -512,7 +515,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         var budget = Self.nodeBudget
         let deadline = t0 + 0.25
         truncatedByDeadline = false
-        let screenUnion = Self.screenUnionAX()
+        cycleDisplayBounds = Self.displayBoundsAX()
+        let screenUnion = cycleDisplayBounds.reduce(CGRect.null) { $0.union($1) }
 
         // Diagnostics scratch for THIS cycle only (cleared next refresh): elements
         // the role filter rejected that sit near the pointer. Bounded by
@@ -1130,7 +1134,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         }
         guard let rect = frame(el) else { return false }
         let verdict = GeometryPolicy.classify(role: role, hasPressAction: hasPressAction,
-                                              rect: rect)
+                                              rect: rect,
+                                              displayBounds: cycleDisplayBounds)
         if let rejection = verdict.rejection {
             record(rejection)
             // The two silent buckets stay silent (today: no note, no counter).
@@ -1402,12 +1407,10 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Union of all displays expressed in AX/CG global coordinates. Keeps stale or
     /// off-screen AX frames (closed menus, unmapped windows) out of the cache and makes
     /// secondary displays with negative or offset origins first-class.
-    private static func screenUnionAX() -> CGRect {
-        var union = CGRect.zero
-        for s in NSScreen.screens {
-            union = union.union(ScreenSpace.cgRect(fromCocoaScreen: s.frame))
-        }
-        return union
+    /// Every display as an AX/CG-space rect (a list, not a union: the geometry
+    /// policy needs to know WHICH displays a rect lands on).
+    private static func displayBoundsAX() -> [CGRect] {
+        NSScreen.screens.map { ScreenSpace.cgRect(fromCocoaScreen: $0.frame) }
     }
 
     private static func boundaryDistance(_ p: CGPoint, _ r: CGRect) -> CGFloat {
