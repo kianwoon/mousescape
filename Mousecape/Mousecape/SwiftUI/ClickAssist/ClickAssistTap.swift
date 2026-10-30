@@ -543,8 +543,11 @@ final class AssistTap: @unchecked Sendable {
     private static func axPressEligible(_ el: AXUIElement, role: String) -> Bool {
         guard role == "AXButton" else { return false }
         AXUIElementSetMessagingTimeout(el, 0.05)
-        guard let actions = axAttribute(el, "AXActionNames") as? [String],
-              actions.contains("AXPress") else { return false }
+        // Chromium chrome buttons advertise an EMPTY AXActionNames (measured:
+        // the tab ✕ exposes actions=[]) yet honor AXPress when performed —
+        // verified: AXPress on the ✕ closes the tab. The action-list check is
+        // therefore omitted; eligibility rests on role + structural ancestry +
+        // enabled below (AXPress failure is handled fail-closed at delivery).
         if let enabled = axAttribute(el, kAXEnabledAttribute) as? Bool, !enabled { return false }
         return chromeAncestry(el)
     }
