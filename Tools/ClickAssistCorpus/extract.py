@@ -164,6 +164,9 @@ def ring_metrics(rings):
         "shown_weak": sum(1 for r in shows if r["weak"] == "1"),
         "shown_named": sum(1 for r in shows if r["named"] == "1"),
         "shown_by_app": dict(Counter(r["app"] for r in shows).most_common(10)),
+        "shown_weak_rate": round(sum(1 for r in shows if r["weak"] == "1") / len(shows), 4) if shows else None,
+        "weak_by_mode": dict(Counter("%s:%s" % (r["mode"], "weak" if r["weak"] == "1" else "strong")
+                                     for r in shows).most_common(8)),
         "adjudicated_intended_known": sum(1 for r in rings if r["adjudicated_intended"] != "unknown"),
     }
 
@@ -185,6 +188,8 @@ def metrics(episodes):
             return None
         idx = max(0, min(len(ages) - 1, int(round(p / 100.0 * len(ages))) - 1))
         return round(ages[idx], 1)
+    labelled = [e for e in episodes if e["harmful"] != "unknown"]
+    harmful = [e for e in labelled if e["harmful"] is True]
     return {
         "episodes": total,
         "assisted": len(assisted),
@@ -196,6 +201,9 @@ def metrics(episodes):
         "evidence_age_ms": {"n": len(ages), "p50": pct(50), "p95": pct(95),
                             "max": round(ages[-1], 1) if ages else None},
         "by_app": dict(Counter(e["app"] for e in episodes).most_common(10)),
+        "labelled": len(labelled),
+        "harmful": len(harmful),
+        "harmful_per_1000": round(len(harmful) * 1000.0 / len(labelled), 2) if labelled else None,
         "adjudicated": {
             "intended_target_known": sum(1 for e in episodes if e["intended_target"] != "unknown"),
             "harmful_known": sum(1 for e in episodes if e["harmful"] != "unknown"),
@@ -207,6 +215,10 @@ def metrics(episodes):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--log", default=os.path.expanduser("~/Library/Logs/Mousecape/ClickAssistAgent.log"))
+    ap.add_argument("--labels", default=None,
+                    help="JSONL of human adjudications keyed by episode 'started'")
+    ap.add_argument("--emit-fixtures", default=None,
+                    help="write replay fixtures (redacted) to this path")
     ap.add_argument("--include-rotated", action="store_true",
                     help="also read ClickAssistAgent.N.log (older sessions)")
     ap.add_argument("--out", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "out"))
@@ -236,8 +248,37 @@ def main():
     with open(os.path.join(args.out, "ring_episodes.jsonl"), "w") as fh:
         for r in rings:
             fh.write(json.dumps(r, default=str) + "\n")
+    if args.labels and os.path.exists(args.labels):
+        labels = {}
+        with open(args.labels) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                labels[row["started"]] = row
+        for e in episodes:
+            row = labels.get(e["started"])
+            if row:
+                for f in ("intended_target", "harmful", "ambiguous"):
+                    if f in row:
+                        e[f] = row[f]
+        print("labels merged: %d" % sum(1 for e in episodes if e["started"] in labels))
+
     report = metrics(episodes)
     report["ring_episodes"] = ring_metrics(rings)
+    if args.emit_fixtures:
+        fx_dir = os.path.dirname(args.emit_fixtures)
+        if fx_dir:
+            os.makedirs(fx_dir, exist_ok=True)
+        with open(args.emit_fixtures, "w") as fh:
+            for r in rings:
+                if r["action"] != "show" or not r["frame"] or not r["pointer"]:
+                    continue
+                fh.write(json.dumps({"frame": r["frame"], "pointer": r["pointer"],
+                                     "mode": r["mode"], "reason": r["reason"],
+                                     "weak": r["weak"]}, default=str) + "\n")
+        print("fixtures: %s" % args.emit_fixtures)
     report["source_log"] = args.log
     report["events_parsed"] = len(events)
     with open(os.path.join(args.out, "report.json"), "w") as fh:
