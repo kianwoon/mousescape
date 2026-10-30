@@ -119,6 +119,17 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
 
     // MARK: XPC surface
 
+    func configure(_ json: Data, reply: @escaping (Bool) -> Void) {
+        let obj = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any] ?? [:]
+        let agentPid = (obj["agentPid"] as? NSNumber)?.int32Value ?? 0
+        let ids = (obj["overlayWindowIDs"] as? [NSNumber])?.map { $0.intValue } ?? []
+        var pids = Set<pid_t>()
+        if agentPid > 0 { pids.insert(agentPid) }
+        resolver.setExclusions(pids: pids, windowIDs: Set(ids))
+        svcLog("CONFIGURED excludedPids=\(pids) overlayWindows=\(ids.count)")
+        reply(true)
+    }
+
     func ping(reply: @escaping (String) -> Void) {
         reply("pong")
     }

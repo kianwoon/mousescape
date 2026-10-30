@@ -41,6 +41,23 @@ final class AXElementTable: @unchecked Sendable {
 ///  * app activation / deactivation (NSWorkspace, NSApplication)
 /// Any of those publishes an INVALID snapshot first (fail-open) and then refreshes.
 final class AccessibilityResolver: @unchecked Sendable {
+    /// Processes whose windows must never be treated as the pointer's window.
+    /// When the resolver runs inside an XPC service, `getpid()` is the SERVICE —
+    /// the agent that owns the click-through overlay windows is a DIFFERENT
+    /// process, so self-exclusion alone lets the overlay (or the agent itself)
+    /// claim pointer ownership and the real app beneath is never resolved.
+    /// Set once by the service from the client handshake.
+    private let exclusionLock = NSLock()
+    private var excludedOwnerPids: Set<pid_t> = []
+    private var excludedWindowIDs: Set<Int> = []
+    func setExclusions(pids: Set<pid_t>, windowIDs: Set<Int>) {
+        exclusionLock.lock(); excludedOwnerPids = pids; excludedWindowIDs = windowIDs; exclusionLock.unlock()
+    }
+    private func isExcluded(owner pid: pid_t) -> Bool {
+        if pid == getpid() { return true }
+        exclusionLock.lock(); let e = excludedOwnerPids.contains(pid); exclusionLock.unlock()
+        return e
+    }
     // Admission geometry — role sets, envelopes, frame floor, giant/area bounds —
     // all live in `GeometryPolicy` (ClickAssistGeometry.swift). This class only
     // reads one `GeometryVerdict` per element and counts the rejection bucket.
@@ -911,7 +928,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// cua-spacesd, screenshot/recording HUDs) are invisible to it. Falls back to
     /// the historical CG-order scan only when the hit test fails or times out.
     private func pointerOwnerPid(_ pointer: CGPoint) -> (pid: pid_t?, source: String) {
-        if let hit = systemWideHitPid(pointer), hit > 0, hit != getpid() {
+        if let hit = systemWideHitPid(pointer), hit > 0, !isExcluded(owner: hit) {
             return (hit, "ax-hit")
         }
         return (pointerWindowOwnerPid(pointer), "cg-fallback")
@@ -949,6 +966,11 @@ final class AccessibilityResolver: @unchecked Sendable {
             }
             guard let pidNum = entry[kCGWindowOwnerPID as String] as? NSNumber else { continue }
             let owner = pid_t(truncating: pidNum)
+            if let wid = (entry[kCGWindowNumber as String] as? NSNumber)?.intValue {
+                exclusionLock.lock(); let skip = excludedWindowIDs.contains(wid); exclusionLock.unlock()
+                if skip { continue }
+            }
+            if owner != getpid(), isExcluded(owner: owner) { continue }
             if owner == selfPid {
                 // Our own layer-0 GUI window is a legitimate hover target candidate
                 // (caught by the self-RPC guard in refresh). Our non-zero-layer

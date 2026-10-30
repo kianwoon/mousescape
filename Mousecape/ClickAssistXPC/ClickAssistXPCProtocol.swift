@@ -13,6 +13,7 @@ import Foundation
 
 @objc protocol ClickAssistXPCProtocol {
     /// Liveness probe. The service replies with a short token.
+    func configure(_ json: Data, reply: @escaping (Bool) -> Void)
     func ping(reply: @escaping (String) -> Void)
     /// Service identity as JSON {version, pid, epoch}. `epoch` is generated once
     /// at service start, so a client can detect a replaced process.

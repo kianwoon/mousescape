@@ -24,6 +24,10 @@ private final class ClickAssistClientEndpoint: NSObject, ClickAssistXPCProtocol 
 
     func ping(reply: @escaping (String) -> Void) { reply("pong") }
     func serviceInfo(reply: @escaping (Data) -> Void) { reply(Data()) }
+    /// Client side of the shared protocol: configuration is a service-side
+    /// concern, so the client acknowledges and ignores it.
+    func configure(_ json: Data, reply: @escaping (Bool) -> Void) { reply(true) }
+
     func activate(_ requestData: Data, reply: @escaping (Data) -> Void) {
         reply(Data())
     }
@@ -54,6 +58,10 @@ final class ClickAssistServiceClient: @unchecked Sendable {
 
     /// No successful snapshot for this long ⇒ evidence is invalid immediately.
     private static let snapshotSilenceLimit: CFTimeInterval = 1.0
+
+    /// Supplied by the engine (AppKit lives there): the agent's own overlay
+    /// window numbers, which the service must exclude from pointer ownership.
+    var overlayWindowProvider: (() -> [Int])?
 
     init(cache: CacheStore, log: @escaping (String) -> Void) {
         self.cache = cache
@@ -126,6 +134,17 @@ final class ClickAssistServiceClient: @unchecked Sendable {
         guard let proxy = conn.remoteObjectProxy as? ClickAssistXPCProtocol else {
             log("XPC_UNAVAILABLE reason=proxy-unavailable")
             return
+        }
+        // Tell the service which processes/windows are OURS: the service cannot
+        // know the agent's pid, so without this the agent's click-through overlay
+        // claims pointer ownership and the real window beneath is never resolved.
+        let overlayIDs: [Int] = overlayWindowProvider?() ?? []
+        let cfg: [String: Any] = ["agentPid": Int(ProcessInfo.processInfo.processIdentifier),
+                                  "overlayWindowIDs": overlayIDs]
+        if let cfgData = try? JSONSerialization.data(withJSONObject: cfg),
+           let cproxy = conn.remoteObjectProxy as? ClickAssistXPCProtocol {
+            cproxy.configure(cfgData) { _ in }
+            log("XPC_CONFIGURE agentPid=\(ProcessInfo.processInfo.processIdentifier) overlayWindows=\(overlayIDs.count)")
         }
         proxy.serviceInfo { [weak self] data in
             guard let self else { return }
