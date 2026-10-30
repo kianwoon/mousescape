@@ -61,6 +61,9 @@ final class ClickAssistServiceClient: @unchecked Sendable {
     private let snapGapRing = LatencyRing(capacity: 2048)
     private var lastUsableSnapshotAt: CFTimeInterval = 0
     private var lastSnapGapLogAt: CFTimeInterval = 0
+    /// First-appearance trace state (client queue only).
+    private var acceptedCycleCount = 0
+    private var firstRingLoggedPtrGen: UInt64 = 0
 
     /// No successful snapshot for this long ⇒ evidence is invalid immediately.
     /// MEASURED, not guessed: the resolver's normal idle gap is p50 318 ms and
@@ -269,6 +272,7 @@ final class ClickAssistServiceClient: @unchecked Sendable {
             log(String(format: "XPC_SNAPSHOT_RX targets=%d bytes=%d epoch=%@ age_ms=%.1f",
                        decoded.wire.targets.count, data.count,
                        decoded.wire.epoch as NSString, decoded.ageMs))
+            emitTrace(wire: decoded.wire, receivedAt: now)
             // Usable = at least one target carried an actual verdict.
             let usable = decoded.wire.targets.contains {
                 !$0.verdict.isEmpty && $0.verdict != ClickAssistVerdict.unknown.rawValue
@@ -288,6 +292,61 @@ final class ClickAssistServiceClient: @unchecked Sendable {
                     lastSnapGapLogAt = now
                 }
             }
+        }
+    }
+
+    // MARK: - first-appearance trace (client queue; never the tap)
+
+    /// Emit the consolidated line when the cycle took >500 ms end to end, on the
+    /// first ring-capable snapshot for a pointer generation, or every 20th cycle.
+    private func emitTrace(wire: SnapshotWire, receivedAt: CFTimeInterval) {
+        acceptedCycleCount += 1
+        let ptrGen = wire.ptrGen ?? 0
+        let ringNow = ringIsCapable(wire)
+        let firstRing = ringNow && ptrGen != firstRingLoggedPtrGen
+        if firstRing { firstRingLoggedPtrGen = ptrGen }
+        // `total` is cycle-start -> client-accepted: the true first-appearance
+        // path (walk + evidence + encode + send + receive). `recv_age` isolates
+        // the post-publish leg; `send` is the residual after the measured encode.
+        let recvAgeMs = max(0, (receivedAt - wire.publishedAt) * 1000)
+        let totalMs = max(0, (receivedAt - (wire.cycleStartAt ?? wire.publishedAt)) * 1000)
+        guard totalMs > 500 || acceptedCycleCount % 20 == 0 || firstRing else { return }
+        let encodeMs = wire.encodeMs ?? 0
+        let sample = ClickAssistTraceSample(
+            cycle: wire.generation, ptrGen: ptrGen,
+            walkMs: wire.walkMs ?? 0, evidenceMs: wire.evidenceMs ?? 0,
+            encodeMs: encodeMs, sendMs: max(0, recvAgeMs - encodeMs),
+            recvAgeMs: recvAgeMs, totalMs: totalMs,
+            targets: wire.targets.count, evidenceN: wire.evidenceN ?? 0,
+            trunc: wire.trunc ?? "none")
+        log(ClickAssistTraceFormatter.cbTrace(sample))
+    }
+
+    /// Would the overlay show a ring from this snapshot? Mirrors the overlay's
+    /// minimum decision (nearest in-tolerance candidate with fresh confirmed
+    /// evidence) so the first ring for a pointer generation is identifiable.
+    private func ringIsCapable(_ wire: SnapshotWire) -> Bool {
+        let point = CGPoint(x: wire.pointerX ?? 0, y: wire.pointerY ?? 0)
+        let cands = wire.targets.map { t in
+            DecisionCore.Candidate(key: t.key, rect: t.rect.cgRect,
+                                   inset: CGFloat(t.inset),
+                                   tier: t.tier == 1 ? .firstClass : .secondClass,
+                                   role: t.role, label: t.label,
+                                   verdict: ClickAssistVerdict(rawValue: t.verdict) ?? .unknown,
+                                   chromeEligible: t.chromeEligible,
+                                   evidenceGeneration: t.evidenceGeneration,
+                                   collectedAt: t.collectedAt)
+        }
+        let scored = DecisionCore.displayCandidates(point: point, candidates: cands,
+                                                    tolerance: 12, limit: 3)
+        return scored.contains { choice in
+            let ageMs = choice.candidate.collectedAt > 0
+                ? (wire.publishedAt - choice.candidate.collectedAt) * 1000 : 0
+            guard ClickAssistEvidence.displayState(
+                evidenceGeneration: choice.candidate.evidenceGeneration,
+                currentGeneration: wire.generation, ageMs: ageMs) == .fresh else { return false }
+            return choice.candidate.verdict == .confirmed
+                || choice.candidate.verdict == .confirmedWeak
         }
     }
 

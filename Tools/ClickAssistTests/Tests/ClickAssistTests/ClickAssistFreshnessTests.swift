@@ -8,12 +8,14 @@ import CoreGraphics
 final class ClickAssistFreshnessTests: XCTestCase {
 
     func testWindowsAreDistinctAndActivationIsStricter() {
-        // 1100 ms is measured, not chosen: SNAP_GAP p95 on heavy pages is 943 ms
-        // (idle cadence 700 ms + resolve up to 253 ms).
-        XCTAssertEqual(ClickAssistEvidence.displayMaxAgeMs, 1100)
+        // Display is back to the review-order 700 ms; first-appearance LATENCY,
+        // not a wider window, is the real fix. Activation stays 400 ms.
+        XCTAssertEqual(ClickAssistEvidence.displayMaxAgeMs, 700)
         XCTAssertEqual(ClickAssistEvidence.activationMaxAgeMs, 400)
         XCTAssertLessThan(ClickAssistEvidence.activationMaxAgeMs,
                           ClickAssistEvidence.displayMaxAgeMs)
+        // Position-specific evidence is capped at ONE candidate per cycle.
+        XCTAssertEqual(ClickAssistEvidence.maxEvidenceCandidatesPerCycle, 1)
     }
 
     /// Stale for activation long before it is stale for display.
@@ -23,9 +25,8 @@ final class ClickAssistFreshnessTests: XCTestCase {
             (399, .fresh, .fresh),
             (401, .fresh, .stale),
             (500, .fresh, .stale),
-            (900, .fresh, .stale),
-            (1099, .fresh, .stale),
-            (1101, .stale, .stale),
+            (699, .fresh, .stale),
+            (701, .stale, .stale),
         ]
         for c in cases {
             XCTAssertEqual(ClickAssistEvidence.displayState(
@@ -73,5 +74,27 @@ final class ClickAssistFreshnessTests: XCTestCase {
         XCTAssertEqual(s.p50Us / 1000, 500)
         XCTAssertEqual(s.p95Us / 1000, 950)
         XCTAssertEqual(s.maxUs / 1000, 1000)
+    }
+
+    /// Pure formatter: exact wire shape, no I/O. Overshoot is derived from the
+    /// pointer-window deadline and is reported independently of the rotation walk.
+    func testTraceFormatters() {
+        XCTAssertEqual(
+            ClickAssistTraceFormatter.resolverCycle(
+                gen: 42, walkMs: 160.04, deadlineMs: 100,
+                evidenceN: 1, evidenceMs: 12.5),
+            "RESOLVER_CYCLE gen=42 walk_ms=160.0 deadline_ms=100 overshoot=1 evidence_n=1 evidence_ms=12.5")
+        XCTAssertEqual(
+            ClickAssistTraceFormatter.resolverCycle(
+                gen: 43, walkMs: 90, deadlineMs: 100,
+                evidenceN: 1, evidenceMs: 0),
+            "RESOLVER_CYCLE gen=43 walk_ms=90.0 deadline_ms=100 overshoot=0 evidence_n=1 evidence_ms=0.0")
+        let sample = ClickAssistTraceSample(
+            cycle: 7, ptrGen: 3, walkMs: 95.2, evidenceMs: 4.4,
+            encodeMs: 0.8, sendMs: 1.2, recvAgeMs: 2.0, totalMs: 512.5,
+            targets: 12, evidenceN: 1, trunc: "deadline")
+        XCTAssertEqual(
+            ClickAssistTraceFormatter.cbTrace(sample),
+            "CB_TRACE cycle=7 ptrGen=3 walk_ms=95.2 evidence_ms=4.4 encode_ms=0.8 send_ms=1.2 recv_age_ms=2.0 total_ms=512.5 targets=12 evidence_n=1 trunc=deadline")
     }
 }

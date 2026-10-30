@@ -30,6 +30,15 @@ struct SnapshotWire: Codable, Equatable, Sendable {
     var pointerY: Double?
     var appName: String?
     var targets: [SnapshotWireTarget]
+    /// Trace attribution for first-appearance latency. Optional so an older
+    /// service/client pair stays wire-compatible.
+    var ptrGen: UInt64?
+    var cycleStartAt: Double?
+    var walkMs: Double?
+    var evidenceMs: Double?
+    var encodeMs: Double?
+    var evidenceN: Int?
+    var trunc: String?
 
     init(epoch: String, generation: UInt64, publishedAt: Double,
          ageMs: Double = ClickAssistSnapshotCodec.evidenceMaxAgeMs,
@@ -165,6 +174,12 @@ extension SnapshotWire {
         self.pointerX = Double(snapshot.pointer.x)
         self.pointerY = Double(snapshot.pointer.y)
         self.appName = snapshot.appName
+        self.ptrGen = snapshot.pointerGeneration
+        self.cycleStartAt = snapshot.cycleStartAt
+        self.walkMs = snapshot.walkMs
+        self.evidenceMs = snapshot.evidenceMs
+        self.evidenceN = snapshot.evidenceN
+        self.trunc = snapshot.trunc
     }
 
     /// Materialize the local immutable snapshot the tap/overlay consume. `stamp`
@@ -179,6 +194,50 @@ extension SnapshotWire {
                       pointer: .zero,
                       appName: "-",
                       pid: pid,
-                      epoch: epoch)
+                      epoch: epoch,
+                      pointerGeneration: ptrGen ?? 0,
+                      cycleStartAt: cycleStartAt ?? 0,
+                      walkMs: walkMs ?? 0,
+                      evidenceMs: evidenceMs ?? 0,
+                      evidenceN: evidenceN ?? 0,
+                      trunc: trunc ?? "none")
+    }
+}
+
+// MARK: - First-appearance trace formatting (pure; unit-tested with no I/O)
+
+/// One resolver cycle's latency attribution. All timestamps are monotonic
+/// (CACurrentMediaTime) and all durations are milliseconds.
+struct ClickAssistTraceSample: Equatable, Sendable {
+    var cycle: UInt64
+    var ptrGen: UInt64
+    var walkMs: Double
+    var evidenceMs: Double
+    var encodeMs: Double
+    var sendMs: Double
+    var recvAgeMs: Double
+    var totalMs: Double
+    var targets: Int
+    var evidenceN: Int
+    /// `none` | `deadline` | `budget`.
+    var trunc: String
+}
+
+enum ClickAssistTraceFormatter {
+    /// Per-cycle pointer-window cycle line. `overshoot` is reported separately
+    /// from the shared rotation deadline so a slow pointer walk is attributable.
+    static func resolverCycle(gen: UInt64, walkMs: Double, deadlineMs: Double,
+                              evidenceN: Int, evidenceMs: Double) -> String {
+        let overshoot = walkMs > deadlineMs * 1.5 ? 1 : 0
+        return String(format: "RESOLVER_CYCLE gen=%llu walk_ms=%.1f deadline_ms=%.0f overshoot=%d evidence_n=%d evidence_ms=%.1f",
+                      gen, walkMs, deadlineMs, overshoot, evidenceN, evidenceMs)
+    }
+
+    /// Client-side consolidated line: publish -> client accepted, broken into
+    /// walk / evidence / encode / send / receive segments.
+    static func cbTrace(_ s: ClickAssistTraceSample) -> String {
+        String(format: "CB_TRACE cycle=%llu ptrGen=%llu walk_ms=%.1f evidence_ms=%.1f encode_ms=%.1f send_ms=%.1f recv_age_ms=%.1f total_ms=%.1f targets=%d evidence_n=%d trunc=%@",
+               s.cycle, s.ptrGen, s.walkMs, s.evidenceMs, s.encodeMs, s.sendMs,
+               s.recvAgeMs, s.totalMs, s.targets, s.evidenceN, s.trunc as NSString)
     }
 }

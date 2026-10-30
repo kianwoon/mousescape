@@ -452,15 +452,18 @@ struct GestureLatch: Sendable {
 /// act only on evidence that is still current enough to be safe.
 enum ClickAssistEvidence {
     /// Ring/overlay may display evidence collected within this window.
-    /// MEASURED, not chosen: SNAP_GAP telemetry on a heavy page (YouTube) shows
-    /// usable evidence gaps of p50 318 ms / p95 943 ms because the idle cadence is
-    /// 700 ms plus a resolve up to 253 ms. At 700 ms the seek bar lost its ring
-    /// between publishes (`reason=stale:age(746ms)` observed live). 1100 ms sits
-    /// above the measured p95 with headroom; activation stays strict at 400 ms
-    /// because a click may not use evidence this stale.
-    static let displayMaxAgeMs: Double = 1100
+    /// 700 ms is the review-order value: first-appearance LATENCY (a new pointer
+    /// waiting for the next publish + resolve), not a wider display window, is
+    /// the real problem. A wider window only hides the missing evidence.
+    /// Activation stays strict at 400 ms.
+    static let displayMaxAgeMs: Double = 700
     /// Redirect/AXPress may act only on evidence collected within this window.
     static let activationMaxAgeMs: Double = 400
+
+    /// Position-specific evidence is capped at the SINGLE nearest candidate per
+    /// pointer generation: one hit-test + at most one ancestry walk per cycle.
+    /// Role/press/chrome classification is still collected for every target.
+    static let maxEvidenceCandidatesPerCycle = 1
 
     enum State: String, Sendable {
         case fresh

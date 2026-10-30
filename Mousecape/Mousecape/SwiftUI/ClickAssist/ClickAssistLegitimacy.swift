@@ -87,11 +87,12 @@ final class LegitimacyPolicy: @unchecked Sendable {
                                  destination: CGPoint, siblings: [CGRect]) -> ClickAssistVerdict {
         guard pid > 0, pid != getpid() else { return .unknown }
         let app = AXUIElementCreateApplication(pid)
-        // Evidence collection runs in the XPC service, OFF the event tap, so a
-        // generous timeout costs nothing user-visible. 0.1 s was too tight for
-        // heavy pages: YouTube's seek bar returned nothing at all and the ring was
-        // suppressed as `legitimacy-unknown` on every hover (observed live).
-        AXUIElementSetMessagingTimeout(app, 0.35)
+        // Timeout budget is RING LATENCY, not tap safety: this runs inside the
+        // resolve cycle, so a long timeout delays every publish. 0.1 s + one retry
+        // is enough to ride out a transient Chromium failure; a genuine "no answer"
+        // is covered by the geometric fallback below instead of by waiting longer
+        // (measured: 0.35 s pushed cycles to p95 240 ms and the ring felt slow).
+        AXUIElementSetMessagingTimeout(app, 0.1)
         var element: AXUIElement?
         var hitResult = AXUIElementCopyElementAtPosition(app, Float(destination.x), Float(destination.y), &element)
         if hitResult != .success || element == nil {

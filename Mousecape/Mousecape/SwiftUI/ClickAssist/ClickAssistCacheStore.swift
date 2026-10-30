@@ -16,7 +16,7 @@ struct CachedTarget: Sendable {
     /// genuine control role; second-class = container admitted by the tile/row
     /// size envelope only.
     let tier: DecisionCore.Tier
-    /// Published evidence (resolver background queue, top-3 nearest only). The tap
+    /// Published evidence (resolver background queue, single nearest only). The tap
     /// consumes these values; it never refreshes them with an AX call.
     var verdict: ClickAssistVerdict = .unknown
     var chromeEligible: Bool = false
@@ -41,6 +41,15 @@ struct CacheSnapshot: Sendable {
     /// Service epoch that produced this snapshot. An empty value means the
     /// snapshot was produced locally (static harness / tests).
     var epoch: String = "-"
+    /// Trace attribution carried resolver -> wire -> client. `pointerGeneration`
+    /// increments only when the pointer moves beyond the 2 pt epsilon; `cycleID`
+    /// is the resolver `generation` above.
+    var pointerGeneration: UInt64 = 0
+    var cycleStartAt: CFTimeInterval = 0
+    var walkMs: Double = 0
+    var evidenceMs: Double = 0
+    var evidenceN: Int = 0
+    var trunc: String = "none"
 
     static let empty = CacheSnapshot(generation: 0, targets: [], valid: false,
                                      reason: "unavailable:not-started", stamp: 0,

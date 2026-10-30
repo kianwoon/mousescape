@@ -127,9 +127,14 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var pendingResolvedPid: pid_t = 0
     private var pendingResolvedPidCount = 0
     private static let pointerPidHysteresisCycles = 2
-    /// Set when a walk bails out because the 0.25 s deadline passed. Reset per
-    /// refresh; drives both `partial` and the published `trunc=` reason.
+    /// Set when a walk bails out because its deadline passed (pointer window
+    /// 100 ms, rotation 250 ms). Reset per refresh; drives `partial`/`trunc=`.
     private var truncatedByDeadline = false
+    /// Cooperative deadlines. The POINTER-WINDOW walk is the one on the
+    /// first-appearance path, so it gets the tight 100 ms budget; the rotating
+    /// global slice keeps 250 ms because it only fills the union in the background.
+    private static let pointerWindowDeadlineMs: Double = 60
+    private static let rotationDeadlineMs: Double = 250
     /// Persisted breadth-first frontier. The head cursor survives refreshes, so
     /// successive 600-node slices advance into different subtrees instead of
     /// re-walking the same prefix. Bounded and reset on invalidation/app change.
@@ -159,11 +164,16 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// 119 ms/pass on a 150 ms cadence). Moving pointer -> keep the fast cadence;
     /// pointer still for longer than `idleMovementWindow` -> slow down and skip
     /// the rotation slice. Any movement snaps back on the very next tick.
-    private static let fastCadence: TimeInterval = 0.15
-    private static let idleCadence: TimeInterval = 0.7
+    private static let fastCadence: TimeInterval = 0.1
+    private static let idleCadence: TimeInterval = 0.4
     private static let idleMovementWindow: CFTimeInterval = 1.5
     /// Movement smaller than this is treated as noise (sub-pixel/drift).
     private static let pointerMoveEpsilon: CGFloat = 2.0
+    /// Increments only when the pointer moves beyond `pointerMoveEpsilon`.
+    /// Carried through resolver -> wire -> client so first-appearance latency is
+    /// attributable to ONE pointer position.
+    private var pointerGeneration: UInt64 = 0
+    private var lastPointerGenerationPoint: CGPoint?
     /// Queue-confined cadence state (resolver serial queue only).
     private var lastCyclePointer: CGPoint?
     private var lastMovementAt: CFTimeInterval = 0
@@ -473,6 +483,20 @@ final class AccessibilityResolver: @unchecked Sendable {
         }
         let frontPid = front.processIdentifier
         let pointer = currentPointer()
+        // Pointer generation: the trace ID for THIS pointer position. Increment
+        // only beyond the 2 pt epsilon, so sub-pixel drift cannot fragment one
+        // hover into many generations.
+        if let previous = lastPointerGenerationPoint {
+            let dx = pointer.x - previous.x
+            let dy = pointer.y - previous.y
+            if (dx * dx + dy * dy) > (Self.pointerMoveEpsilon * Self.pointerMoveEpsilon) {
+                pointerGeneration += 1
+                lastPointerGenerationPoint = pointer
+            }
+        } else {
+            pointerGeneration += 1
+            lastPointerGenerationPoint = pointer
+        }
 
         // TARGET THE WINDOW UNDER THE POINTER, not the frontmost app. The user can
         // hover a visible window of a background app; resolving frontmost-only made
@@ -574,7 +598,8 @@ final class AccessibilityResolver: @unchecked Sendable {
 
         var out: [CachedTarget] = []
         var budget = Self.nodeBudget
-        let deadline = t0 + 0.25
+        let rotationDeadline = t0 + Self.rotationDeadlineMs / 1000
+        let pointerDeadline = t0 + Self.pointerWindowDeadlineMs / 1000
         truncatedByDeadline = false
         cycleDisplayBounds = Self.displayBoundsAX()
         let screenUnion = cycleDisplayBounds.reduce(CGRect.null) { $0.union($1) }
@@ -627,8 +652,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         // Pointer-region seed FIRST: resolve the element under the cursor and walk
         // its immediate ancestry, so the visibly hovered control is captured even
         // when the global walk later exhausts its budget in a huge web-content tree.
+        let pointerWalkStart = CACurrentMediaTime()
         let seedHit = seedAtPointer(appEl, pointer: pointer, out: &out, budget: &budget,
-                                    deadline: deadline, screenUnion: screenUnion)
+                                    deadline: pointerDeadline, screenUnion: screenUnion)
 
         // POINTER-WINDOW PRIORITY: Chromium web content often refuses AX hit-testing,
         // and the rotating global walk reaches a deep video-controls subtree only
@@ -643,7 +669,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         var pwinStats = WalkStats()
         if let pwin {
             var pwinBudget = min(Self.pointerWindowBudget, budget)
-            walkGuided(pwin, pointer: pointer, out: &out, budget: &pwinBudget, deadline: deadline,
+            walkGuided(pwin, pointer: pointer, out: &out, budget: &pwinBudget, deadline: pointerDeadline,
                        screenUnion: screenUnion, appElement: appEl, pid: pid,
                        maxDepth: Self.pointerWindowGuidedMaxDepth,
                        subtreeDepth: Self.pointerWindowMaxDepth, stats: &pwinStats)
@@ -653,13 +679,14 @@ final class AccessibilityResolver: @unchecked Sendable {
             var bandBudget = min(budget, 220)
             let bandStart = bandBudget
             walkBand(pwin, pointer: pointer, radius: 48, out: &out, budget: &bandBudget,
-                     deadline: deadline, screenUnion: screenUnion, appElement: appEl, pid: pid,
+                     deadline: pointerDeadline, screenUnion: screenUnion, appElement: appEl, pid: pid,
                      maxDepth: Self.pointerWindowGuidedMaxDepth, stats: &pwinStats)
             let bandSpent = bandStart - bandBudget
             pwinSpent = (min(Self.pointerWindowBudget, budget) - pwinBudget) + bandSpent
             budget -= pwinSpent   // total work stays inside the shared node budget
         }
         let pwinTargets = Set(out.map { $0.key }).subtracting(keysBeforePwin).count
+        let pointerWalkMs = (CACurrentMediaTime() - pointerWalkStart) * 1000
 
         // Rotating BFS slice: resumes the persisted frontier so each cycle visits a
         // different part of the tree instead of re-walking the same 600-node prefix.
@@ -672,16 +699,16 @@ final class AccessibilityResolver: @unchecked Sendable {
         }
         if let menuBar { roots.append(menuBar) }
         if let openMenu { roots.append(openMenu) }
-        let rotationSkipped = !rotationAllowed || budget <= 0 || CACurrentMediaTime() >= deadline
+        let rotationSkipped = !rotationAllowed || budget <= 0 || CACurrentMediaTime() >= rotationDeadline
         let sliceId = rotationSkipped ? -1
-            : walkSlice(roots: roots, out: &out, budget: &budget, deadline: deadline,
+            : walkSlice(roots: roots, out: &out, budget: &budget, deadline: rotationDeadline,
                         screenUnion: screenUnion, appElement: appEl, pid: pid)
 
         // Budget/deadline exhaustion publishes the PARTIAL set (still valid); only
         // AX API failure means "unavailable". Report WHY: a deadline cut used to be
         // logged as partial=0 because only the node budget was checked.
         let budgetHit = budget <= 0
-        let deadlineHit = truncatedByDeadline || CACurrentMediaTime() >= deadline
+        let deadlineHit = truncatedByDeadline || CACurrentMediaTime() >= rotationDeadline
         let trunc: String
         if budgetHit && deadlineHit { trunc = "both" }
         else if budgetHit { trunc = "budget" }
@@ -754,14 +781,16 @@ final class AccessibilityResolver: @unchecked Sendable {
         let visited = Self.nodeBudget - budget
         let gen = nextGeneration()
         var validatedKeys: Set<String> = []
-        // Publish evidence for the THREE targets nearest the pointer — the same
-        // set the router can consider. Bounded: at most 3 hit-tests + 3 ancestry
-        // walks per cycle; everything else publishes without evidence.
+        // Publish POSITION-SPECIFIC evidence for the SINGLE nearest target — one
+        // hit-test + at most one ancestry walk per cycle. Role, press capability
+        // and chrome ancestry classification stay collection-time data on every
+        // target (see `collect`); only the legitimacy hit-test is capped here.
+        let evidenceStart = CACurrentMediaTime()
         if let legitimacy {
             let nearest = out.indices
                 .sorted { Self.boundaryDistance(pointer, out[$0].rect)
                         < Self.boundaryDistance(pointer, out[$1].rect) }
-                .prefix(3)
+                .prefix(ClickAssistEvidence.maxEvidenceCandidatesPerCycle)
             let siblings = out.filter { $0.tier == .firstClass }.map(\.rect)
             for idx in nearest {
                 let target = out[idx]
@@ -782,6 +811,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                 validatedKeys.insert(target.key)
             }
         }
+        let evidenceMs = (CACurrentMediaTime() - evidenceStart) * 1000
         // Carried evidence stays usable until its COLLECTION age expires (the
         // display/activation windows), not because a later cycle republished.
         for idx in out.indices where out[idx].collectedAt > 0 {
@@ -790,11 +820,34 @@ final class AccessibilityResolver: @unchecked Sendable {
         let partialNoRenew = partial
             ? out.filter { $0.collectedAt > 0 && !validatedKeys.contains($0.key) }.count
             : 0
-        let snap = CacheSnapshot(generation: gen, targets: out, valid: true, reason: "fresh",
+        // PAYLOAD FILTER: the ring and the click only ever use candidates within
+        // the assist radius of the pointer. Publishing the whole page (700-900
+        // targets) cost 7-29 ms of JSON encode per cycle, which is ring latency.
+        // Keep everything within reach of a plausible click (radius + one screen
+        // step of slack) and drop the rest; the union still holds them, so they
+        // come back as soon as the pointer is near.
+        let publishRadius: CGFloat = 160
+        let published = out.filter {
+            Self.boundaryDistance(pointer, $0.rect) <= publishRadius
+        }
+        let snap = CacheSnapshot(generation: gen, targets: published, valid: true, reason: "fresh",
                                  stamp: CACurrentMediaTime(), resolverMs: ms, pointer: pointer,
-                                 appName: appName, pid: pid)
+                                 appName: appName, pid: pid,
+                                 pointerGeneration: pointerGeneration,
+                                 cycleStartAt: t0, walkMs: pointerWalkMs,
+                                 evidenceMs: evidenceMs, evidenceN: validatedKeys.count,
+                                 trunc: trunc)
         elements.set(elementRefs, pid: pid)
         cache.publish(snap)
+
+        // Per-cycle pointer-window deadline accounting. Sampled to bound volume,
+        // but ALWAYS emitted when the walk overshot the 100 ms deadline by >50%.
+        if pointerWalkMs > Self.pointerWindowDeadlineMs * 1.5 || gen % 20 == 0 {
+            log(ClickAssistTraceFormatter.resolverCycle(
+                gen: gen, walkMs: pointerWalkMs,
+                deadlineMs: Self.pointerWindowDeadlineMs,
+                evidenceN: validatedKeys.count, evidenceMs: evidenceMs))
+        }
 
         let rej = rejCounts.isEmpty ? "-"
             : rejCounts.sorted { $0.key < $1.key }

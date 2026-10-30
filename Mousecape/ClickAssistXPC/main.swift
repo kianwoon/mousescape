@@ -118,8 +118,12 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
     // MARK: publish
 
     private func publish(_ snapshot: CacheSnapshot) {
-        let wire = SnapshotWire(snapshot: snapshot, epoch: epoch)
-        guard let data = ClickAssistSnapshotCodec.encode(wire) else {
+        var wire = SnapshotWire(snapshot: snapshot, epoch: epoch)
+        // Encode once to MEASURE, then re-encode with the measurement attached so
+        // the client can attribute encode vs transport. JSON encode of a bounded
+        // payload is sub-millisecond; this stays off the tap path.
+        let encodeStart = CACurrentMediaTime()
+        guard let probe = ClickAssistSnapshotCodec.encode(wire) else {
             stateLock.lock()
             oversizeCount += 1
             let n = oversizeCount
@@ -127,6 +131,8 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
             svcLog("SNAPSHOT_ENCODE_REJECT reason=oversize count=\(n) generation=\(snapshot.generation)")
             return
         }
+        wire.encodeMs = (CACurrentMediaTime() - encodeStart) * 1000
+        let data = ClickAssistSnapshotCodec.encode(wire) ?? probe
         // Snapshot the sender list; each sender coalesces independently.
         stateLock.lock()
         let current = senders
