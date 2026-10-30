@@ -20,6 +20,7 @@ final class OverlayPanel: NSPanel {
 /// tolerance ring OUTSIDE the AX frame (dashed), and the real-cursor marker.
 final class OverlayView: NSView {
     var cgFrame = CGRect.zero            // AX frame, global display coords
+    var primaryDim = false               // unnamed candidate: visually demoted (weak ghost signal)
     var cgSecondaryFrame: CGRect?        // second confirmed target, subdued ring
     var cgPanelTopLeft = CGPoint.zero    // panel's top-left in global display coords
     var cgPointer = CGPoint.zero         // real cursor position
@@ -63,7 +64,7 @@ final class OverlayView: NSView {
         // AX frame: solid.
         let f = CGRect(origin: local(cgFrame.origin), size: cgFrame.size)
         let framePath = NSBezierPath(rect: f)
-        framePath.lineWidth = 2
+        framePath.lineWidth = primaryDim ? 1 : 2
         (mode == "direct-hit" ? NSColor.systemGreen : NSColor.systemBlue).setStroke()
         framePath.stroke()
         // Pointer marker at the REAL cursor position (never moved by us).
@@ -108,6 +109,7 @@ final class TargetingOverlay {
                                            y: CGFloat.greatestFiniteMagnitude)
     private var lastDrawnMode = ""
     private var lastDrawnTolerance: CGFloat = -1
+    private var lastDrawnDim: Bool = false
     /// The ONE legitimacy policy, shared with the tap. The overlay carries no
     /// visibility heuristics of its own: a ring is drawn only when the renderer
     /// confirms the destination point.
@@ -174,14 +176,14 @@ final class TargetingOverlay {
         let pointer = CGEvent(source: nil)?.location ?? .zero
         var action = "none"
         var reason = s.valid ? String(format: "stale:age(%.0fms)", ageMs) : s.reason
-        var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool, tier: Int)?
-        var secondary: (key: String, rect: CGRect, tier: Int)?
+        var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool, tier: Int, named: Bool)?
+        var secondary: (key: String, rect: CGRect, tier: Int, named: Bool)?
         var confirmedCount = 0
         var suppressed: (key: String, verdict: LegitimacyPolicy.Verdict)?
         if fresh {
             let cands = s.targets.map { DecisionCore.Candidate(key: $0.key, rect: $0.rect,
                                                                inset: $0.inset, tier: $0.tier,
-                                                               role: $0.role) }
+                                                               role: $0.role, label: $0.label) }
             // Up to three nearest in-tolerance first-class candidates, validated
             // at their own destination points (fail-closed). Every confirmed one
             // is indicated; the nearest wins the click.
@@ -208,14 +210,16 @@ final class TargetingOverlay {
             }
             confirmedCount = confirmed.count
             if let winner = confirmed.first {
+                let winnerNamed = !winner.0.candidate.label.isEmpty
                 primary = (winner.0.candidate.key, winner.0.candidate.rect, winner.1,
                            winner.0.dist, winner.0.dist == 0,
-                           winner.0.candidate.tier == .firstClass ? 1 : 2)
+                           winner.0.candidate.tier == .firstClass ? 1 : 2, winnerNamed)
                 action = "show"
                 reason = winner.0.dist == 0 ? "direct-hit" : "redirect"
                 if confirmed.count > 1 {
                     secondary = (confirmed[1].0.candidate.key, confirmed[1].0.candidate.rect,
-                                 confirmed[1].0.candidate.tier == .firstClass ? 1 : 2)
+                                 confirmed[1].0.candidate.tier == .firstClass ? 1 : 2,
+                                 !confirmed[1].0.candidate.label.isEmpty)
                 }
             } else if let suppressed {
                 reason = "legitimacy-\(suppressed.verdict.rawValue)"
@@ -240,16 +244,16 @@ final class TargetingOverlay {
         if sig != lastSig {
             lastSig = sig
             if action == "show", let primary {
-                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed tier=%d cands=%d winner=1",
+                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed tier=%d named=%d cands=%d winner=1",
                            s.generation, primary.key as NSString, primary.rect.origin.x, primary.rect.origin.y,
                            primary.rect.width, primary.rect.height, tolerance, pointer.x, pointer.y,
                            reason as NSString, (primary.direct ? "direct-hit" : "redirect") as NSString,
-                           primary.tier, confirmedCount))
+                           primary.tier, primary.named ? 1 : 0, confirmedCount))
                 if let secondary {
-                    log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=secondary mode=secondary legitimacy=confirmed tier=%d cands=%d winner=2",
+                    log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=secondary mode=secondary legitimacy=confirmed tier=%d named=%d cands=%d winner=2",
                                s.generation, secondary.key as NSString, secondary.rect.origin.x, secondary.rect.origin.y,
                                secondary.rect.width, secondary.rect.height, tolerance, pointer.x, pointer.y,
-                               secondary.tier, confirmedCount))
+                               secondary.tier, secondary.named ? 1 : 0, confirmedCount))
                 }
             } else {
                 log(String(format: "OVERLAY_STATE gen=%llu action=none pointer=(%.1f,%.1f) reason=%@",
@@ -257,15 +261,19 @@ final class TargetingOverlay {
             }
         }
         draw(action: action, frame: primary?.rect, secondary: secondary?.rect,
-             pointer: pointer, mode: primary?.direct == true ? "direct-hit" : "redirect")
+             pointer: pointer,
+             mode: primary?.direct == true ? "direct-hit" : "redirect",
+             primaryDim: !(primary?.named ?? true))
     }
 
-    private func draw(action: String, frame: CGRect?, secondary: CGRect?, pointer: CGPoint, mode: String) {
+    private func draw(action: String, frame: CGRect?, secondary: CGRect?, pointer: CGPoint,
+                      mode: String, primaryDim: Bool = false) {
         // Skip redundant redraws: state transitions always paint; pointer moves
         // only matter while a highlight is shown. This keeps the 30 Hz sampling
         // nearly free when the ring is static or blank.
         let stateChanged = action != lastDrawnAction || frame != lastDrawnFrame
             || secondary != lastDrawnSecondary || mode != lastDrawnMode || tolerance != lastDrawnTolerance
+            || primaryDim != lastDrawnDim
         let pointerChanged = pointer != lastDrawnPointer
         guard stateChanged || (action == "show" && pointerChanged) else { return }
         lastDrawnAction = action
@@ -274,6 +282,7 @@ final class TargetingOverlay {
         lastDrawnMode = mode
         lastDrawnPointer = pointer
         lastDrawnTolerance = tolerance
+        lastDrawnDim = primaryDim
 
         guard action == "show", let frame else {
             // NO target highlight: keep the (click-through) panel but draw nothing.
@@ -314,6 +323,7 @@ final class TargetingOverlay {
         view.cgPointer = pointer
         view.tolerance = tolerance
         view.mode = mode
+        view.primaryDim = primaryDim
         view.isBlank = false
         view.needsDisplay = true
         if !panel.isVisible { panel.orderFrontRegardless() }   // never activates, never keys

@@ -150,7 +150,7 @@ final class AssistTap: @unchecked Sendable {
         switch targetSource {
         case .staticTargets(let ts):
             return Resolution(candidates: ts.map { Candidate(key: $0.name, rect: $0.rect, inset: $0.inset,
-                                                              tier: .firstClass) },
+                                                              tier: .firstClass, label: $0.name) },
                               valid: true, reason: "static", generation: 0, ageMs: 0,
                               source: "static", pid: 0)
         case .cache(let store):
@@ -160,7 +160,7 @@ final class AssistTap: @unchecked Sendable {
             let reason = s.valid ? (fresh ? "fresh" : String(format: "stale:age(%.0fms)", ageMs)) : s.reason
             return Resolution(candidates: s.targets.map { Candidate(key: $0.key, rect: $0.rect,
                                                                      inset: $0.inset, tier: $0.tier,
-                                                                     role: $0.role) },
+                                                                     role: $0.role, label: $0.label) },
                               valid: fresh, reason: reason, generation: s.generation,
                               ageMs: ageMs, source: "cache", pid: s.pid)
         }

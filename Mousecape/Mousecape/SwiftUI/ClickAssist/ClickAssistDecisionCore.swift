@@ -69,13 +69,18 @@ enum DecisionCore {
         /// AX role, needed for the snap-mode decision. Empty for the P0 static
         /// harness, which keeps first-class center snapping.
         let role: String
+        /// Accessible name evidence (title/description). Unnamed candidates are
+        /// legitimate but are demoted visually — a weak ghost signal, never a veto.
+        let label: String
 
-        init(key: String, rect: CGRect, inset: CGFloat, tier: Tier, role: String = "") {
+        init(key: String, rect: CGRect, inset: CGFloat, tier: Tier, role: String = "",
+             label: String = "") {
             self.key = key
             self.rect = rect
             self.inset = inset
             self.tier = tier
             self.role = role
+            self.label = label
         }
     }
 
@@ -355,6 +360,12 @@ final class LegitimacyPolicy: @unchecked Sendable {
         abs(a.width - b.width) <= eps && abs(a.height - b.height) <= eps
     }
 
+    private static func attr(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
+        var v: CFTypeRef?
+        AXUIElementCopyAttributeValue(el, name as CFString, &v)
+        return v
+    }
+
     private static func role(of el: AXUIElement) -> String {
         var v: CFTypeRef?
         AXUIElementCopyAttributeValue(el, kAXRoleAttribute as CFString, &v)
@@ -420,6 +431,11 @@ final class LegitimacyPolicy: @unchecked Sendable {
             if candidate.contains(destination),
                directControlRoles.contains(candidateRole) { return .confirmed }
             return .unknown
+        }
+        // AXEnabled veto: a DISABLED control is never a legitimate click target.
+        // (Cheap; true supplies no visibility evidence — see Codex audit.)
+        if let enabled = attr(element, kAXEnabledAttribute) as? Bool, enabled == false {
+            return .mismatch
         }
         // Confirmation must prove THE CHOSEN TARGET. Two accepted answers:
         // 1. the renderer's answer sits inside the candidate's own rect, or IS
