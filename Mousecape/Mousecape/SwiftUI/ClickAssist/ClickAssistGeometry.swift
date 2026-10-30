@@ -142,11 +142,20 @@ enum GeometryPolicy {
                                    rejection: fits ? nil : .oversized)
         }
         // 4. Tracks: thin in absolute terms AND sliver-thin or very wide.
+        // A track-role control that is NOT track-shaped (e.g. a 400x150 volume
+        // slider) is still a real control: it falls to the same bulk bound as a
+        // direct role instead of being rejected for lacking a track shape —
+        // that is the pre-refactor behaviour and must not silently tighten.
         if admittedTrackRoles.contains(role) {
             let thin = minSide <= trackMaxMinSide
                 && (minSide <= trackShortMinSide || aspect >= trackMinAspect)
-            return GeometryVerdict(candidateClass: thin ? .track : nil,
-                                   rejection: thin ? nil : .oversized)
+            if thin {
+                return GeometryVerdict(candidateClass: .track, rejection: nil)
+            }
+            let fits = rect.width * rect.height <= maxControlArea
+                && rect.height <= maxControlHeight
+            return GeometryVerdict(candidateClass: fits ? .track : nil,
+                                   rejection: fits ? nil : .oversized)
         }
         // 5. Press-capable generic group = flattened web button.
         if role == "AXGroup", hasPressAction {
