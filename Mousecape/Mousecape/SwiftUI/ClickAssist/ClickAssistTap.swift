@@ -260,8 +260,39 @@ final class AssistTap: @unchecked Sendable {
 
             switch DecisionCore.route(point: original, candidates: res.candidates, tolerance: tolerance) {
             case .directHit(let hit, let others):
+                // Promotion: a near-miss can land INSIDE a container (e.g. a
+                // browser tab) whose nested chrome button is still within the
+                // assist radius. Only a structurally-eligible chrome button can
+                // be promoted, so web content keeps the untouched direct-hit path.
+                var promotionFailure: String?
+                if let promoted = promotedTarget(hit: hit, res: res, point: original) {
+                    let promotedDest = DecisionCore.centerPoint(into: promoted.rect)
+                    let promotedVerdict = legitimacyVerdict(for: promoted, destination: promotedDest,
+                                                             res: res)
+                    if promotedVerdict == .confirmed || promotedVerdict == .confirmedWeak {
+                        if let el = cacheStoreForDelivery?.element(for: promoted.key, pid: res.pid),
+                           AssistTap.axPressEligible(el, role: promoted.role) {
+                            performAXPressDelivery(element: el, best: promoted,
+                                                   corrected: promotedDest,
+                                                   snap: DecisionCore.snapMode(for: promoted),
+                                                   dist: DecisionCore.boundaryDistance(original, promoted.rect),
+                                                   cands: 1, res: res, label: label,
+                                                   original: original, started: started,
+                                                   extra: "promoted=1 from=\(hit.key) ")
+                            return nil
+                        }
+                        // Fail closed: eligibility could not be re-proven at
+                        // delivery, so this click is NOT redirected.
+                        emit("PASSTHROUGH", type: label, original: original, mutated: nil,
+                             reason: "promotion-unavailable", res: res, started: started,
+                             extra: "promoted=1 from=\(hit.key) target=\(promoted.key)")
+                        return Unmanaged.passUnretained(event)
+                    }
+                    promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) verdict=\(promotedVerdict.rawValue)"
+                }
                 let verdict = legitimacyVerdict(for: hit, destination: original, res: res)
                 var extra = "element=\(hit.key) boundary=0.0 action=passthrough legitimacy=\(verdict.rawValue)"
+                if let promotionFailure { extra += " " + promotionFailure }
                 if let other = others.first { extra += " other=\(other.key) other_dist=\(String(format: "%.1f", other.dist))" }
                 emit("PASSTHROUGH", type: label, original: original, mutated: nil,
                      reason: "direct-hit", res: res, started: started, extra: extra)
@@ -341,13 +372,10 @@ final class AssistTap: @unchecked Sendable {
                 // Chrome-button delivery: structural gate, then EXACTLY ONE
                 // AXPress. Synthetic CGEvents are ignored by Chromium chrome.
                 if let element, AssistTap.axPressEligible(element, role: best.role) {
-                    let result = AXUIElementPerformAction(element, "AXPress" as CFString)
-                    pressGestureToken = UUID()
-                    latched = nil
-                    unlatchedForDrag = false
-                    emit("MUTATE", type: label, original: original, mutated: corrected,
-                         reason: "redirect", res: res, started: started,
-                         extra: "target=\(best.key) dist=\(String(format: "%.1f", winner.0.dist)) snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(confirmed.count) winner=1 mode=axpress\(result == .success ? "" : " axpress=failed(\(result.rawValue))")")
+                    performAXPressDelivery(element: element, best: best, corrected: corrected,
+                                           snap: snap, dist: winner.0.dist,
+                                           cands: confirmed.count, res: res, label: label,
+                                           original: original, started: started, extra: "")
                     return nil
                 }
 
@@ -395,6 +423,49 @@ final class AssistTap: @unchecked Sendable {
     }
 
     // MARK: - AXPress delivery gate (chrome only)
+
+    /// Delivers one gesture via AXPress: exactly one perform, then latch the
+    /// per-gesture token so the matching up (and any drag) is swallowed by the
+    /// top-of-handle guard. Shared by the redirect and direct-hit promotion paths.
+    private func performAXPressDelivery(element: AXUIElement, best: Candidate,
+                                        corrected: CGPoint, snap: DecisionCore.Snap,
+                                        dist: Double, cands: Int, res: Resolution,
+                                        label: String, original: CGPoint,
+                                        started: CFTimeInterval, extra: String) {
+        let result = AXUIElementPerformAction(element, "AXPress" as CFString)
+        pressGestureToken = UUID()
+        latched = nil
+        unlatchedForDrag = false
+        emit("MUTATE", type: label, original: original, mutated: corrected,
+             reason: "redirect", res: res, started: started,
+             extra: "target=\(best.key) dist=\(String(format: "%.1f", dist)) snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(cands) winner=1 \(extra)mode=axpress\(result == .success ? "" : " axpress=failed(\(result.rawValue))")")
+    }
+
+    /// Finds the nearest chrome button contained in a direct-hit candidate and
+    /// still inside the assist radius. Margin-tolerant: the hit rect is inflated
+    /// by 2 pt. Eligibility is the SAME structural AXPress gate as the redirect
+    /// path, so a web container (AXWebArea in ancestry) never promotes.
+    private func promotedTarget(hit: Candidate, res: Resolution, point: CGPoint) -> Candidate? {
+        let containing = hit.rect.insetBy(dx: -2, dy: -2)
+        let store = cacheStoreForDelivery
+        var best: (candidate: Candidate, dist: CGFloat)?
+        for c in res.candidates where c.key != hit.key {
+            let dist = DecisionCore.boundaryDistance(point, c.rect)
+            guard dist <= tolerance, containing.contains(c.rect) else { continue }
+            guard let el = store?.element(for: c.key, pid: res.pid),
+                  AssistTap.axPressEligible(el, role: c.role) else { continue }
+            if let b = best {
+                let area = c.rect.width * c.rect.height
+                let bestArea = b.candidate.rect.width * b.candidate.rect.height
+                if dist < b.dist || (dist == b.dist && area < bestArea) {
+                    best = (c, dist)
+                }
+            } else {
+                best = (c, dist)
+            }
+        }
+        return best?.candidate
+    }
 
     /// Structural eligibility: role must be AXButton, the element must still
     /// advertise AXPress, and its ancestry must reach the window through chrome
