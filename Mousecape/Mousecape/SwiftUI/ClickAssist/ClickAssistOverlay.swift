@@ -176,7 +176,7 @@ final class TargetingOverlay {
         let pointer = CGEvent(source: nil)?.location ?? .zero
         var action = "none"
         var reason = s.valid ? String(format: "stale:age(%.0fms)", ageMs) : s.reason
-        var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool, tier: Int, named: Bool)?
+        var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool, tier: Int, named: Bool, weakVerdict: Bool)?
         var secondary: (key: String, rect: CGRect, tier: Int, named: Bool)?
         var confirmedCount = 0
         var suppressed: (key: String, verdict: LegitimacyPolicy.Verdict)?
@@ -189,7 +189,7 @@ final class TargetingOverlay {
             // is indicated; the nearest wins the click.
             let scored = DecisionCore.displayCandidates(point: pointer, candidates: cands,
                                                         tolerance: tolerance, limit: 3)
-            var confirmed: [(DecisionCore.ScoredCandidate, CGPoint)] = []
+            var confirmed: [(DecisionCore.ScoredCandidate, CGPoint, LegitimacyPolicy.Verdict)] = []
             for choice in scored {
                 let snap = DecisionCore.snapMode(for: choice.candidate)
                 let dest = snap == .center
@@ -202,8 +202,8 @@ final class TargetingOverlay {
                     candidateRole: choice.candidate.role, destination: dest,
                     siblings: cands.filter { $0.key != choice.candidate.key && $0.tier == .firstClass }
                                    .map { $0.rect }) ?? .confirmed
-                if verdict == .confirmed {
-                    confirmed.append((choice, dest))
+                if verdict == .confirmed || verdict == .confirmedWeak {
+                    confirmed.append((choice, dest, verdict))
                 } else if suppressed == nil {
                     suppressed = (choice.candidate.key, verdict)
                 }
@@ -211,9 +211,11 @@ final class TargetingOverlay {
             confirmedCount = confirmed.count
             if let winner = confirmed.first {
                 let winnerNamed = !winner.0.candidate.label.isEmpty
+                let winnerWeak = winner.2 == .confirmedWeak
                 primary = (winner.0.candidate.key, winner.0.candidate.rect, winner.1,
                            winner.0.dist, winner.0.dist == 0,
-                           winner.0.candidate.tier == .firstClass ? 1 : 2, winnerNamed)
+                           winner.0.candidate.tier == .firstClass ? 1 : 2, winnerNamed,
+                           winnerWeak)
                 action = "show"
                 reason = winner.0.dist == 0 ? "direct-hit" : "redirect"
                 if confirmed.count > 1 {
@@ -244,11 +246,12 @@ final class TargetingOverlay {
         if sig != lastSig {
             lastSig = sig
             if action == "show", let primary {
-                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed tier=%d named=%d cands=%d winner=1",
+                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed tier=%d named=%d cands=%d weak=%d winner=1",
                            s.generation, primary.key as NSString, primary.rect.origin.x, primary.rect.origin.y,
                            primary.rect.width, primary.rect.height, tolerance, pointer.x, pointer.y,
                            reason as NSString, (primary.direct ? "direct-hit" : "redirect") as NSString,
-                           primary.tier, primary.named ? 1 : 0, confirmedCount))
+                           primary.tier, primary.named ? 1 : 0, confirmedCount,
+                           primary.weakVerdict ? 1 : 0))
                 if let secondary {
                     log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=secondary mode=secondary legitimacy=confirmed tier=%d named=%d cands=%d winner=2",
                                s.generation, secondary.key as NSString, secondary.rect.origin.x, secondary.rect.origin.y,
@@ -263,7 +266,7 @@ final class TargetingOverlay {
         draw(action: action, frame: primary?.rect, secondary: secondary?.rect,
              pointer: pointer,
              mode: primary?.direct == true ? "direct-hit" : "redirect",
-             primaryDim: !(primary?.named ?? true))
+             primaryDim: !(primary?.named ?? true) || (primary?.weakVerdict ?? false))
     }
 
     private func draw(action: String, frame: CGRect?, secondary: CGRect?, pointer: CGPoint,

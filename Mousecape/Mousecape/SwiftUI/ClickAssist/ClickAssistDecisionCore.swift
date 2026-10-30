@@ -332,7 +332,12 @@ enum DecisionCore {
 /// `unknown` both pass the original click through untouched.
 final class LegitimacyPolicy: @unchecked Sendable {
     enum Verdict: String, Sendable {
+        /// Strong evidence: the renderer's hit-test answered WITH this candidate
+        /// (frame inside it, or exactly its own surface).
         case confirmed
+        /// Weak evidence: geometry-only (container answers, fullscreen incoherent
+        /// answers). Legitimate enough to assist, but the ring is demoted.
+        case confirmedWeak
         case mismatch
         case unknown
     }
@@ -434,7 +439,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
         // control whose own rect holds the destination stands on its geometry.
         if !hitFrame.contains(destination) {
             if candidate.contains(destination),
-               directControlRoles.contains(candidateRole) { return .confirmed }
+               directControlRoles.contains(candidateRole) { return .confirmedWeak }
             return .unknown
         }
         // AXEnabled veto: a DISABLED control is never a legitimate click target.
@@ -449,8 +454,8 @@ final class LegitimacyPolicy: @unchecked Sendable {
         //    first-class candidate) that CONTAINS this candidate — Chromium
         //    answers a tab's inner ✕ with the tab's own frame. Scoped to that
         //    containment; an unrelated container still fails.
-        if candidate.contains(hitFrame) { return .confirmed }
-        if sameFrame(candidate, hitFrame) { return .confirmed }
+        if candidate.contains(hitFrame) { return .confirmed }               // strong
+        if sameFrame(candidate, hitFrame) { return .confirmed }             // strong
         if hitFrame.contains(candidate),
            siblings.contains(where: { sameFrame($0, hitFrame) }) { return .confirmed }
         // 3. The renderer answered a surface that CONTAINS a real control placed
@@ -458,7 +463,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
         //    for their seek bar). Only direct-control roles qualify — a generic
         //    container or anonymous group can never be confirmed this way.
         if hitFrame.contains(candidate),
-           Self.directControlRoles.contains(candidateRole) { return .confirmed }
+           Self.directControlRoles.contains(candidateRole) { return .confirmedWeak }
         // 4. A CONTAINER answer cannot veto a real control that covers the point.
         //    Web players answer with the video/overlay group at points where the
         //    seek bar is fully clickable (measured in fullscreen: menu bar or a
@@ -467,7 +472,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
         let hitRole = Self.role(of: element)
         if candidate.contains(destination),
            Self.directControlRoles.contains(candidateRole),
-           !Self.directControlRoles.contains(hitRole) { return .confirmed }
+           !Self.directControlRoles.contains(hitRole) { return .confirmedWeak }
         return .mismatch
     }
 
