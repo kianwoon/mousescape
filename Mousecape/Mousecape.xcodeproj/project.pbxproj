@@ -10,6 +10,10 @@
 		C1B0000000000000000000B1 /* ClickAssistConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A1 /* ClickAssistConfig.swift */; };
 		C1B0000000000000000000B2 /* ClickAssistDecisionCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A2 /* ClickAssistDecisionCore.swift */; };
 		C1B0000000000000000000B3 /* ClickAssistGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A8 /* ClickAssistGeometry.swift */; };
+		F1A0000000000000000000C1 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000000000000000000B1 /* main.swift */; };
+		F1A0000000000000000000C2 /* ClickAssistXPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000000000000000000B2 /* ClickAssistXPCProtocol.swift */; };
+		F1A0000000000000000000C3 /* ClickAssistXPCProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = F1A0000000000000000000B2 /* ClickAssistXPCProtocol.swift */; };
+		F1A0000000000000000000C4 /* ClickAssistResolver.xpc in CopyFiles */ = {isa = PBXBuildFile; fileRef = F1A0000000000000000000A1 /* ClickAssistResolver.xpc */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
 		1B57EC46401E4928B48C5E89 /* ArgumentParser in Frameworks */ = {isa = PBXBuildFile; productRef = 86D2A987242A45FBB21AE949 /* ArgumentParser */; };
 		9CB312EE7052700D9F29C682 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7A5B757C0780EA0A10BF1469 /* main.swift */; };
 		DE27927D2F61D93200CCEBD3 /* UserPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE27927C2F61D93200CCEBD3 /* UserPreferences.swift */; };
@@ -133,6 +137,13 @@
 			remoteGlobalIDString = FAC69FAC189D608900BC829D;
 			remoteInfo = mousecloak;
 		};
+		F1A0000000000000000000A9 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FAC69F59189D603C00BC829D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = F1A0000000000000000000A0;
+			remoteInfo = ClickAssistResolver;
+		};
 		D1A0000000000000000000A8 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
 			containerPortal = FAC69F59189D603C00BC829D /* Project object */;
@@ -143,6 +154,15 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		F1A0000000000000000000A8 /* Embed XPC Service */ = {
+			isa = PBXCopyFilesBuildPhase;
+			dstPath = Contents/XPCServices;
+			dstSubfolder = Wrapper;
+			files = (
+				F1A0000000000000000000C4 /* ClickAssistResolver.xpc in CopyFiles */,
+			);
+			name = "Embed XPC Service";
+		};
 		DE2E175D2F5B2CCE00055E78 /* CopyFiles */ = {
 			isa = PBXCopyFilesBuildPhase;
 			dstPath = Contents/Library/LoginItems;
@@ -173,6 +193,10 @@
 
 /* Begin PBXFileReference section */
 		D1A0000000000000000000A7 /* ClickAssistAgent.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClickAssistAgent.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F1A0000000000000000000A1 /* ClickAssistResolver.xpc */ = {isa = PBXFileReference; explicitFileType = wrapper.xpc-service; includeInIndex = 0; path = ClickAssistResolver.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
+		F1A0000000000000000000B1 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistXPC/main.swift; sourceTree = SOURCE_ROOT; };
+		F1A0000000000000000000B2 /* ClickAssistXPCProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistXPC/ClickAssistXPCProtocol.swift; sourceTree = SOURCE_ROOT; };
+		F1A0000000000000000000B3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = ClickAssistXPC/Info.plist; sourceTree = SOURCE_ROOT; };
 		D1A0000000000000000000B1 /* AgentMain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentMain.swift; sourceTree = "<group>"; };
 		D1A0000000000000000000B2 /* AgentLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentLog.swift; sourceTree = "<group>"; };
 		C1A0000000000000000000A1 /* ClickAssistConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistConfig.swift; sourceTree = "<group>"; };
@@ -339,6 +363,11 @@
 				DEACCEL004ACCEL0000000001 /* Accelerate.framework in Frameworks */,
 			);
 		};
+		F1A0000000000000000000A6 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+			);
+		};
 		D1A0000000000000000000A5 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
@@ -354,6 +383,16 @@
 				D1A0000000000000000000B2 /* AgentLog.swift */,
 			);
 			path = ClickAssistAgent;
+			sourceTree = "<group>";
+		};
+		F1A0000000000000000000D0 /* ClickAssistXPC */ = {
+			isa = PBXGroup;
+			children = (
+				F1A0000000000000000000B1 /* main.swift */,
+				F1A0000000000000000000B2 /* ClickAssistXPCProtocol.swift */,
+				F1A0000000000000000000B3 /* Info.plist */,
+			);
+			path = ClickAssistXPC;
 			sourceTree = "<group>";
 		};
 		C1C0000000000000000000C1 /* ClickAssist */ = {
@@ -445,6 +484,7 @@
 				FAC69FAF189D608900BC829D /* mousecloak */,
 				DE2E172B2F5B290000055E78 /* MousecapeHelper */,
 				D1A0000000000000000000D0 /* ClickAssistAgent */,
+				F1A0000000000000000000D0 /* ClickAssistXPC */,
 				FAC69F63189D603C00BC829D /* Frameworks */,
 				FAC69F62189D603C00BC829D /* Products */,
 			);
@@ -457,6 +497,7 @@
 				FAC69FAD189D608900BC829D /* mousecloak */,
 				DE2E172A2F5B290000055E78 /* MousecapeHelper.app */,
 				D1A0000000000000000000A7 /* ClickAssistAgent.app */,
+				F1A0000000000000000000A1 /* ClickAssistResolver.xpc */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -612,15 +653,34 @@
 				D1A0000000000000000000A4 /* Sources */,
 				D1A0000000000000000000A5 /* Frameworks */,
 				D1A0000000000000000000A6 /* Resources */,
+				F1A0000000000000000000A8 /* Embed XPC Service */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				F1A0000000000000000000AA /* PBXTargetDependency */,
 			);
 			name = ClickAssistAgent;
 			productName = ClickAssistAgent;
 			productReference = D1A0000000000000000000A7 /* ClickAssistAgent.app */;
 			productType = "com.apple.product-type.application";
+		};
+		F1A0000000000000000000A0 /* ClickAssistResolver */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = F1A0000000000000000000A2 /* Build configuration list for PBXNativeTarget "ClickAssistResolver" */;
+			buildPhases = (
+				F1A0000000000000000000A5 /* Sources */,
+				F1A0000000000000000000A6 /* Frameworks */,
+				F1A0000000000000000000A7 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ClickAssistResolver;
+			productName = ClickAssistResolver;
+			productReference = F1A0000000000000000000A1 /* ClickAssistResolver.xpc */;
+			productType = "com.apple.product-type.xpc-service";
 		};
 		DE2E17292F5B290000055E78 /* MousecapeHelper */ = {
 			isa = PBXNativeTarget;
@@ -695,6 +755,9 @@
 					DE2E17292F5B290000055E78 = {
 						CreatedOnToolsVersion = 26.1;
 					};
+					F1A0000000000000000000A0 = {
+						CreatedOnToolsVersion = 26.1;
+					};
 					FAC69F60189D603C00BC829D = {
 						ProvisioningStyle = Automatic;
 					};
@@ -723,6 +786,7 @@
 				FAC69FAC189D608900BC829D /* mousecloak */,
 				DE2E17292F5B290000055E78 /* MousecapeHelper */,
 				D1A0000000000000000000A0 /* ClickAssistAgent */,
+				F1A0000000000000000000A0 /* ClickAssistResolver */,
 			);
 		};
 /* End PBXProject section */
@@ -742,6 +806,11 @@
 				FAC69F7D189D603C00BC829D /* Assets.xcassets in Resources */,
 				DE53D4032F3B398800011C1F /* Localizable.xcstrings in Resources */,
 				DE2C56182F6F075C00DCFED7 /* AppIcon.icon in Resources */,
+			);
+		};
+		F1A0000000000000000000A7 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
 			);
 		};
 		D1A0000000000000000000A6 /* Resources */ = {
@@ -840,6 +909,13 @@
 				9A4568A6FBA055D959B11A8C /* outerShadow.m in Sources */,
 			);
 		};
+		F1A0000000000000000000A5 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+				F1A0000000000000000000C1 /* main.swift in Sources */,
+				F1A0000000000000000000C2 /* ClickAssistXPCProtocol.swift in Sources */,
+			);
+		};
 		D1A0000000000000000000A4 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			files = (
@@ -853,11 +929,17 @@
 				D1A0000000000000000000C8 /* ClickAssistOverlay.swift in Sources */,
 				D1A0000000000000000000C9 /* ClickAssistEngine.swift in Sources */,
 				D1A0000000000000000000CA /* ClickAssistGeometry.swift in Sources */,
+				F1A0000000000000000000C3 /* ClickAssistXPCProtocol.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */
 
 /* Begin PBXTargetDependency section */
+		F1A0000000000000000000AA /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = F1A0000000000000000000A0 /* ClickAssistResolver */;
+			targetProxy = F1A0000000000000000000A9 /* PBXContainerItemProxy */;
+		};
 		D1A0000000000000000000A9 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			target = D1A0000000000000000000A0 /* ClickAssistAgent */;
@@ -876,6 +958,53 @@
 /* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
+		F1A0000000000000000000A3 /* Debug configuration for PBXNativeTarget "ClickAssistResolver" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "ClickAssistXPC/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.4.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.sdmj76.ClickAssistResolver;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		F1A0000000000000000000A4 /* Release configuration for PBXNativeTarget "ClickAssistResolver" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_IDENTITY = "-";
+				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "-";
+				CODE_SIGN_STYLE = Automatic;
+				ENABLE_HARDENED_RUNTIME = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = "ClickAssistXPC/Info.plist";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 15.0;
+				MARKETING_VERSION = 1.4.1;
+				PRODUCT_BUNDLE_IDENTIFIER = com.sdmj76.ClickAssistResolver;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
 		D1A0000000000000000000A2 /* Debug configuration for PBXNativeTarget "ClickAssistAgent" */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -1276,6 +1405,15 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
+		F1A0000000000000000000A2 /* Build configuration list for PBXNativeTarget "ClickAssistResolver" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				F1A0000000000000000000A3 /* Debug */,
+				F1A0000000000000000000A4 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 		D1A0000000000000000000A1 /* Build configuration list for PBXNativeTarget "ClickAssistAgent" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (

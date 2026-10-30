@@ -31,6 +31,12 @@ final class ClickAssistEngine {
     private(set) var tap: AssistTap?
     private(set) var resolver: AccessibilityResolver?
     private(set) var overlay: TargetingOverlay?
+    /// Embedded ClickAssistResolver.xpc connection. Nil until a probe starts; a
+    /// failure here is diagnostic only and never touches the tap/resolver.
+    private var xpcConnection: NSXPCConnection?
+    /// Bundle identifier of the embedded service, which is also the launchd Mach
+    /// service name registered from its Info.plist `XPCService > ServiceName`.
+    static let xpcServiceName = "com.sdmj76.ClickAssistResolver"
 
     /// When false the engine never auto-prompts for Accessibility; permission must
     /// be requested by an explicit user action (the persistent agent uses this).
@@ -203,10 +209,16 @@ final class ClickAssistEngine {
         }
         resolver = r
         r.start()
+        startXPCProbe()
         if config.indicatorEnabled { startOverlay() }
     }
 
     private func stopEngine() {
+        if let xpcConnection {
+            xpcConnection.invalidate()
+            debugLog("[ClickAssist] XPC_INVALIDATED reason=engine-stop")
+            self.xpcConnection = nil
+        }
         resolver?.stop()
         resolver = nil
         tap?.stop()
@@ -222,6 +234,40 @@ final class ClickAssistEngine {
         resolver?.invalidate(reason: "tolerance-change", prefixStale: false)
         debugLog(String(format: "[ClickAssist] TOLERANCE_APPLY from=%.1f to=%.1f",
                         old, config.tolerancePoints))
+    }
+
+    // MARK: - XPC service probe (A1a: structural only)
+
+    /// Opens one connection to the embedded service and asks for its identity.
+    /// Every failure path only logs: the engine, tap and resolver keep running
+    /// exactly as before. No reconnect policy yet (A1b).
+    private func startXPCProbe() {
+        let conn = NSXPCConnection(serviceName: Self.xpcServiceName)
+        conn.remoteObjectInterface = NSXPCInterface(with: ClickAssistXPCProtocol.self)
+        conn.interruptionHandler = {
+            debugLog("[ClickAssist] XPC_INVALIDATED reason=interrupted")
+        }
+        conn.invalidationHandler = {
+            debugLog("[ClickAssist] XPC_INVALIDATED reason=invalidated")
+        }
+        conn.resume()
+        xpcConnection = conn
+        let issued = CACurrentMediaTime()
+        guard let proxy = conn.remoteObjectProxyWithErrorHandler({ error in
+            debugLog("[ClickAssist] XPC_UNAVAILABLE reason=proxy-error detail=\"\(error.localizedDescription)\"")
+        }) as? ClickAssistXPCProtocol else {
+            debugLog("[ClickAssist] XPC_UNAVAILABLE reason=proxy-unavailable")
+            return
+        }
+        proxy.serviceInfo { data in
+            let latencyUs = (CACurrentMediaTime() - issued) * 1_000_000
+            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+            let version = obj["version"] as? String ?? "-"
+            let pid = (obj["pid"] as? NSNumber)?.intValue ?? 0
+            let epoch = obj["epoch"] as? String ?? "-"
+            debugLog(String(format: "[ClickAssist] XPC_SERVICE_INFO version=%@ pid=%d epoch=%@ latency_us=%.0f",
+                           version, pid, epoch, latencyUs))
+        }
     }
 
     private func startOverlay() {
