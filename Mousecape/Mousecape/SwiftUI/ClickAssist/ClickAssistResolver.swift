@@ -220,6 +220,8 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Candidates rejected by the user size invariant (too big = wrong for sure).
     private var oversized = 0
     private var tileTooLarge = 0
+    /// Tile-like candidates rejected for a sliver aspect ratio (not area).
+    private var tileTooWide = 0
     private var dedupedCount = 0
 
     init(cache: CacheStore, log: @escaping (String) -> Void) {
@@ -558,6 +560,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         rowTooLarge = 0
         tileTooSmall = 0
         tileTooLarge = 0
+        tileTooWide = 0
         dedupedCount = 0
 
         // Per-pid union swap. This is now reached only on a LEGITIMATE switch
@@ -714,7 +717,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         cache.setElements(elementRefs, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d deduped=%d pwinMode=%@ pidSrc=%@",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d tileTooWide=%d deduped=%d pwinMode=%@ pidSrc=%@",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -725,7 +728,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                    pwinStats.guidedFallback ? 1 : 0,
                    (pwinStats.guidedFallbackReason ?? "-") as NSString,
                    rotationSkipped ? 1 : 0, rowTooLarge,
-                   tileTooSmall, tileTooLarge, dedupedCount, pwinMode as NSString,
+                   tileTooSmall, tileTooLarge, tileTooWide, dedupedCount, pwinMode as NSString,
                    pidSrc as NSString))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
@@ -1145,6 +1148,7 @@ final class AccessibilityResolver: @unchecked Sendable {
             // and spans half the page). A real control is compact. Oversized
             // press-groups are page furniture and stay rejected.
             if let pressFrame = frame(el),
+               pressFrame.width.isFinite, pressFrame.height.isFinite,
                pressFrame.width <= 420, pressFrame.height <= 220 {
                 isPressGroup = true
                 role = "AXPressGroup"
@@ -1161,7 +1165,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         var isWideThinGroup = false
         if role == "AXGroup", !isRowLike, !isPressGroup,
            let preFrame = frame(el),
-           preFrame.width >= 300, (2...6).contains(Int(preFrame.height)) {
+           preFrame.width.isFinite, preFrame.height.isFinite,
+           preFrame.width >= 300, preFrame.height >= 2, preFrame.height <= 6 {
             isWideThinGroup = true
             isTileLike = false
         }
@@ -1212,7 +1217,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         // an absolute 60 pt cap rejected it; at ≤300% it is ~20 pt). A track is
         // ≥8:1; a 2289×963 container (2.4:1) never qualifies.
         let trackAspect = max(rect.width, rect.height) / max(min(rect.width, rect.height), 1)
-        let isThinTrack = isWideTrackRole && (min(rect.width, rect.height) <= 60 || trackAspect >= 8)
+        let isThinTrack = isWideTrackRole
+            && min(rect.width, rect.height) <= 200
+            && (min(rect.width, rect.height) <= 60 || trackAspect >= 8)
         if !isThinTrack, !isWideTrackRole, rect.width >= 4000 || rect.height >= 2000 {
             return false
         }
@@ -1254,7 +1261,7 @@ final class AccessibilityResolver: @unchecked Sendable {
             // Tiles are boxy; a wide-short sliver is a bar wrapper (action-row
             // toolbar exposed as AXGroup), not a clickable thumbnail.
             guard max(rect.width, rect.height) / min(rect.width, rect.height) <= Self.tileMaxAspect else {
-                tileTooLarge += 1
+                tileTooWide += 1
                 noteRejectedNearPointer(el, role: role)
                 return false
             }

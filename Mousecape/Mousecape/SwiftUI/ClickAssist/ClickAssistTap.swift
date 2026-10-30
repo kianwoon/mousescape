@@ -297,13 +297,13 @@ final class AssistTap: @unchecked Sendable {
                             }
                         }
                         // Fail closed: eligibility could not be re-proven at
-                        // delivery, so this click is NOT redirected.
-                        emit("PASSTHROUGH", type: label, original: original, mutated: nil,
-                             reason: "promotion-unavailable", res: res, started: started,
-                             extra: "promoted=1 from=\(hit.key) target=\(promoted.key)")
-                        return Unmanaged.passUnretained(event)
+                        // delivery, so this click is NOT redirected. Fall through
+                        // to the normal direct-hit passthrough (which computes the
+                        // hit's own verdict and logs the other= diagnostics).
+                        promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) unavailable=1"
+                    } else {
+                        promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) verdict=\(promotedVerdict.rawValue)"
                     }
-                    promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) verdict=\(promotedVerdict.rawValue)"
                 }
                 let verdict = legitimacyVerdict(for: hit, destination: original, res: res)
                 var extra = "element=\(hit.key) boundary=0.0 action=passthrough legitimacy=\(verdict.rawValue)"
@@ -590,6 +590,9 @@ final class AssistTap: @unchecked Sendable {
         var s = CGSize.zero
         guard AXValueGetValue(pRaw as! AXValue, .cgPoint, &p),
               AXValueGetValue(sRaw as! AXValue, .cgSize, &s) else { return nil }
+        // Finite geometry only: an infinite/NaN frame must never reach
+        // centerPoint → event.location (inf − inf = NaN crashed the overlay).
+        guard p.x.isFinite, p.y.isFinite, s.width.isFinite, s.height.isFinite else { return nil }
         return CGRect(origin: p, size: s)
     }
 
