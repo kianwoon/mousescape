@@ -260,6 +260,20 @@ final class AssistTap: @unchecked Sendable {
 
             switch DecisionCore.route(point: original, candidates: res.candidates, tolerance: tolerance) {
             case .directHit(let hit, let others):
+                // Self delivery: when the hit element is ITSELF a chrome-gated
+                // AXButton (e.g. the real 16x16 tab-close glyph), a synthetic
+                // click is ignored by Chromium. AXPress acts on the element, so
+                // deliver it directly. Web surfaces fail the gate (AXWebArea).
+                if let el = cacheStoreForDelivery?.element(for: hit.key, pid: res.pid),
+                   AssistTap.axPressEligible(el, role: hit.role),
+                   performAXPressDelivery(element: el, best: hit,
+                                          corrected: DecisionCore.centerPoint(into: hit.rect),
+                                          snap: DecisionCore.snapMode(for: hit),
+                                          dist: 0, cands: 1, res: res, label: label,
+                                          original: original, started: started,
+                                          extra: "self=1 ") {
+                    return nil
+                }
                 // Promotion: a near-miss can land INSIDE a container (e.g. a
                 // browser tab) whose nested chrome button is still within the
                 // assist radius. Only a structurally-eligible chrome button can
