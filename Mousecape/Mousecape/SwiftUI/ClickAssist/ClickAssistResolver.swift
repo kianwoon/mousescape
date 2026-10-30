@@ -15,63 +15,9 @@ import CoreGraphics
 ///  * app activation / deactivation (NSWorkspace, NSApplication)
 /// Any of those publishes an INVALID snapshot first (fail-open) and then refreshes.
 final class AccessibilityResolver: @unchecked Sendable {
-    /// Roles that accept a click as a meaningful action. This is the SINGLE
-    /// collection-time filter: the router and the overlay both read the published
-    /// snapshot, so anything excluded here can never be routed or highlighted.
-    /// Deliberately excluded: AXStaticText, AXGroup, AXScrollArea, AXWebArea,
-    /// AXImage, AXOutline and every other container — a click on those is not a
-    /// control activation, and highlighting them made the indicator noisy
-    /// (observed: a 1296x67 text-line element highlighted in direct-hit mode).
-    /// Row-like containers are handled separately by `rowLikeRoles` below.
-    private static let eligibleRoles: Set<String> = [
-        // Buttons / links
-        "AXButton", "AXMenuButton", "AXLink",
-        // Toggles
-        "AXCheckBox", "AXRadioButton",
-        // Menus
-        "AXMenuItem", "AXMenuBarItem",
-        // Selection / tabs
-        "AXPopUpButton", "AXComboBox", "AXTab", "AXSegmentedControl",
-        // Value controls
-        "AXSlider", "AXDisclosureTriangle",
-        // Editable text (secure fields are still rejected below)
-        "AXTextField", "AXSearchField"
-    ]
-    /// Row-like containers are clickable list rows/cells in many web and native
-    /// UIs (WhatsApp Web contact rows are `AXCell`), but the SAME roles also wrap
-    /// page-sized containers. They are admitted only when row-sized: below
-    /// `rowMaxHeight` tall AND below `rowMaxArea` in area. Anything larger stays
-    /// rejected (counted as `rowTooLarge`) so a full-page cell cannot hijack a click.
-    private static let rowLikeRoles: Set<String> = ["AXCell", "AXRow", "AXListItem"]
-    /// 200 pt: a list row taller than this is a multi-row group or a card, not a
-    /// single clickable row (observed contact row: 59 pt; two-row card ≈ 118 pt).
-    private static let rowMaxHeight: CGFloat = 200
-    /// 120 000 pt² (≈ 600 × 200): admits a wide list row at full row height while
-    /// rejecting page/sidebar containers (a 1200 × 800 cell is 960 000 pt²).
-    private static let rowMaxArea: CGFloat = 120_000
-    /// Tile-like containers: thumbnails/tiles are exposed as AXImage and AXGroup in
-    /// web galleries. They are admitted only inside a tile envelope — each side at
-    /// least `tileMinDimension` and area at most `tileMaxArea` — so page-sized
-    /// AXGroup containers (1466×944, 1664×1526) stay rejected.
-    private static let tileLikeRoles: Set<String> = ["AXImage", "AXGroup"]
-    /// 30 pt: below this a tile is an icon/decoration, not a clickable thumbnail.
-    private static let tileMinDimension: CGFloat = 30
-    /// 3:1 — tiles are boxy (204×290 = 1.4, banners ≈ 1.8). Beyond 3:1 the element
-    /// is a bar/toolbar wrapper (observed offender: 1258×47 = 27:1), not a tile.
-    private static let tileMaxAspect: CGFloat = 3
-    /// 120 000 pt² (≈ 346 × 346): same spirit as the row guard; a 204×290 thumbnail
-    /// (59 160) passes, a 1466×944 container (1 383 904) does not.
-    /// Tiles are also BOXY: max side ÷ min side ≤ 3. A wide-short sliver (e.g. a
-    /// 1258×47 toolbar wrapper) is page furniture, not a thumbnail — the area and
-    /// min-side guards alone admit it (59 126 pt², min side 47).
-    private static let tileMaxArea: CGFloat = 120_000
-    /// USER INVARIANT: the dimension of a legitimate click cannot be too big.
-    /// Any non-track candidate larger than this area — or taller than this height —
-    /// is wrong for sure and is rejected outright, regardless of role, capability
-    /// (AXPress), or hit-test answers. Wide-thin track roles (AXSlider/AXScrollBar)
-    /// are exempt via isWideTrack (a seek bar legitimately spans the screen).
-    private static let maxControlArea: CGFloat = 150_000
-    private static let maxControlHeight: CGFloat = 600
+    // Admission geometry — role sets, envelopes, frame floor, giant/area bounds —
+    // all live in `GeometryPolicy` (ClickAssistGeometry.swift). This class only
+    // reads one `GeometryVerdict` per element and counts the rejection bucket.
     /// Two candidates whose frames overlap this completely are the SAME control
     /// exposed twice (e.g. AXImage + its AXGroup wrapper); the smaller area wins.
     private static let duplicateIoUThreshold: CGFloat = 0.85
@@ -222,7 +168,24 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var tileTooLarge = 0
     /// Tile-like candidates rejected for a sliver aspect ratio (not area).
     private var tileTooWide = 0
+    /// Every rejection this cycle keyed by `RejectionReason.rawValue`, published
+    /// as `rej=[reason:count,...]` so a bucket names its real cause.
+    private var rejCounts: [String: Int] = [:]
     private var dedupedCount = 0
+
+    /// Count one policy rejection. The five legacy named counters keep their
+    /// pre-refactor names; the aggregate carries every reason.
+    private func record(_ reason: RejectionReason) {
+        rejCounts[reason.rawValue, default: 0] += 1
+        switch reason {
+        case .oversized: oversized += 1
+        case .rowTooLarge: rowTooLarge += 1
+        case .tileTooSmall: tileTooSmall += 1
+        case .tileTooLarge: tileTooLarge += 1
+        case .tileTooWide: tileTooWide += 1
+        default: break
+        }
+    }
 
     init(cache: CacheStore, log: @escaping (String) -> Void) {
         self.cache = cache
@@ -561,6 +524,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         tileTooSmall = 0
         tileTooLarge = 0
         tileTooWide = 0
+        rejCounts.removeAll()
         dedupedCount = 0
 
         // Per-pid union swap. This is now reached only on a LEGITIMATE switch
@@ -717,7 +681,10 @@ final class AccessibilityResolver: @unchecked Sendable {
         cache.setElements(elementRefs, pid: pid)
         cache.publish(snap)
 
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d tileTooWide=%d deduped=%d pwinMode=%@ pidSrc=%@",
+        let rej = rejCounts.isEmpty ? "-"
+            : rejCounts.sorted { $0.key < $1.key }
+                .map { "\($0.key):\($0.value)" }.joined(separator: ",")
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d tileTooWide=%d deduped=%d rej=%@ pwinMode=%@ pidSrc=%@",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -728,7 +695,8 @@ final class AccessibilityResolver: @unchecked Sendable {
                    pwinStats.guidedFallback ? 1 : 0,
                    (pwinStats.guidedFallbackReason ?? "-") as NSString,
                    rotationSkipped ? 1 : 0, rowTooLarge,
-                   tileTooSmall, tileTooLarge, tileTooWide, dedupedCount, pwinMode as NSString,
+                   tileTooSmall, tileTooLarge, tileTooWide, dedupedCount, rej as NSString,
+                   pwinMode as NSString,
                    pidSrc as NSString))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
@@ -1128,51 +1096,21 @@ final class AccessibilityResolver: @unchecked Sendable {
     }
 
     /// Extract one element as a candidate if its role/geometry qualifies.
+    /// ALL admission logic lives in `GeometryPolicy.classify` — this method only
+    /// reads the AX inputs, applies the policy, and counts the rejection bucket.
     @discardableResult
     private func collect(_ el: AXUIElement, out: inout [CachedTarget],
                          screenUnion: CGRect) -> Bool {
-        guard var role = stringAttr(el, kAXRoleAttribute) else { return false }
-        var isRowLike = Self.rowLikeRoles.contains(role)
-        var isTileLike = Self.tileLikeRoles.contains(role)
-        // Capability admission: a generic AXGroup that supports AXPress is a real
-        // button — a flattened DIV with a JS click handler. Chromium exposes these
-        // only once the complete renderer tree is enabled (AXManualAccessibility),
-        // and the old role whitelist discarded exactly these controls. Admit as
-        // first-class: capability (AXPress), not role, is what makes it clickable.
-        var isPressGroup = false
-        if role == "AXGroup", !Self.eligibleRoles.contains(role),
-           let actions = attr(el, "AXActionNames") as? [String],
-           actions.contains("AXPress") {
-            // Button-size envelope only: press-capable wrappers come in ALL sizes
-            // (a page-level div with a delegated click handler carries AXPress too
-            // and spans half the page). A real control is compact. Oversized
-            // press-groups are page furniture and stay rejected.
-            if let pressFrame = frame(el),
-               pressFrame.width.isFinite, pressFrame.height.isFinite,
-               pressFrame.width <= 420, pressFrame.height <= 220 {
-                isPressGroup = true
-                role = "AXPressGroup"
-                isRowLike = false
-                isTileLike = false
-            }
+        guard let role = stringAttr(el, kAXRoleAttribute) else { return false }
+        // Capability (AXPress), read once — this is row 5 of the policy table.
+        var hasPressAction = false
+        if role == "AXGroup", !GeometryPolicy.eligibleRoles.contains(role),
+           let actions = attr(el, "AXActionNames") as? [String] {
+            hasPressAction = actions.contains("AXPress")
         }
-        // Wide-thin group admission: page zoom >300% collapses web seek bars to
-        // 2pt-tall anonymous AXGroups (measured: iyf bar 653×2 at >300%, ring
-        // working at ≤300%) — the role filter and the tile envelope (min side 30)
-        // both reject them. Admit ONLY the track shape: very wide, ≤6pt tall.
-        // Decorative dividers are narrow; toolbar wrappers are ≥40pt tall —
-        // neither fits. Hit-test identity at ring time is the real evidence.
-        var isWideThinGroup = false
-        if role == "AXGroup", !isRowLike, !isPressGroup,
-           let preFrame = frame(el),
-           preFrame.width.isFinite, preFrame.height.isFinite,
-           preFrame.width >= 300, preFrame.height >= 2, preFrame.height <= 6 {
-            isWideThinGroup = true
-            isTileLike = false
-        }
-        guard Self.eligibleRoles.contains(role) || isRowLike || isTileLike || isPressGroup || isWideThinGroup else {
-            // Diagnostics only: remember near-pointer elements the role filter drops
-            // (e.g. a <div> web button exposed as AXGroup). Bounded and per-cycle.
+        // Role family first, so a role reject is diagnosed even without a frame.
+        guard GeometryPolicy.isCandidateRole(role) else {
+            record(.role)
             noteRejectedNearPointer(el, role: role)
             return false
         }
@@ -1187,93 +1125,31 @@ final class AccessibilityResolver: @unchecked Sendable {
                 let r = frame(el).map { "\($0)" } ?? "nil"
                 log("RESOLVER_SKIP_SECURE label=\"\(title)\" subrole=AXSecureTextField rect=\(r) reason=never-redirect")
             }
+            record(.secure)
             return false
         }
-        // A value control's track is legitimately screen-wide in fullscreen video
-        // (observed: 7405×10 "progress bar" AXSlider spanning the display), so the
-        // page-container size cap must not apply to these thin track roles.
-        let isWideTrackRole = role == "AXSlider" || role == "AXScrollBar" || role == "AXValueIndicator"
-        // Wide-thin exemption to the 4pt floor: page zoom >300% collapses web
-        // seek bars to 2pt-tall frames (measured: iyf bar 653×2 at >300%,
-        // admitted fine at ≤300%) — a wide element is still a track, not a
-        // degenerate rect. Narrow 1-3pt slivers (dividers) stay rejected.
-        guard let rect = frame(el),
-              rect.width >= 4,
-              rect.height >= (rect.width >= 300 ? 2 : 4),
-              // Finite geometry only: AX can answer ±infinity (and NaN) frames —
-              // an infinite rect passes every size guard for wide-track roles and
-              // then poisons centerPoint (inf − inf = NaN), which crashed the
-              // overlay's main-thread render (EXC_BREAKPOINT on Int(NaN)).
-              rect.origin.x.isFinite, rect.origin.y.isFinite,
-              rect.width.isFinite, rect.height.isFinite,
-              rect.intersects(screenUnion) else {
+        guard let rect = frame(el) else { return false }
+        let verdict = GeometryPolicy.classify(role: role, hasPressAction: hasPressAction,
+                                              rect: rect)
+        if let rejection = verdict.rejection {
+            record(rejection)
+            // The two silent buckets stay silent (today: no note, no counter).
+            if rejection != .nonFinite, rejection != .degenerate {
+                noteRejectedNearPointer(el, role: role)
+            }
             return false
         }
-        // A track is legitimately THIN and may span the screen (fullscreen seek
-        // bar: observed 7638×7). A "slider" that is 2289×963 is NOT a track — it
-        // is a mis-exposed player container and falls to the invariant below.
-        // THIN is aspect-based, not absolute: page zoom scales the control with
-        // the page (measured: iyf "scrub bar" AXSlider 3195×76 at 388% zoom —
-        // an absolute 60 pt cap rejected it; at ≤300% it is ~20 pt). A track is
-        // ≥8:1; a 2289×963 container (2.4:1) never qualifies.
-        let trackAspect = max(rect.width, rect.height) / max(min(rect.width, rect.height), 1)
-        let isThinTrack = isWideTrackRole
-            && min(rect.width, rect.height) <= 200
-            && (min(rect.width, rect.height) <= 60 || trackAspect >= 8)
-        if !isThinTrack, !isWideTrackRole, rect.width >= 4000 || rect.height >= 2000 {
-            return false
-        }
-        // USER INVARIANT (final): too big = wrong for sure. Thin tracks exempt;
-        // EVERYTHING else — role whitelist, row/tile envelope, capability
-        // admission, mis-exposed wide-role containers — is bounded.
-        if !isThinTrack, rect.width * rect.height > Self.maxControlArea
-            || rect.height > Self.maxControlHeight {
-            oversized += 1
-            noteRejectedNearPointer(el, role: role)
-            return false
-        }
-        // Row-like roles pass the role filter only when row-sized; a page/sidebar
-        // container in AXCell/AXRow/AXListItem clothing stays rejected and is counted
-        // so the guard is auditable. Both thresholds must hold.
-        if isRowLike {
-            guard rect.height < Self.rowMaxHeight,
-                  rect.width * rect.height < Self.rowMaxArea else {
-                rowTooLarge += 1
-                noteRejectedNearPointer(el, role: role)
-                return false
-            }
-        }
-        // Tile-like roles pass only inside the tile envelope: each side ≥ minimum
-        // (an icon/decoration below 30 pt is not a thumbnail) and area ≤ maximum
-        // (page containers such as 1466×944 stay out). Counted per reason.
-        if isTileLike {
-            guard rect.width >= Self.tileMinDimension,
-                  rect.height >= Self.tileMinDimension else {
-                tileTooSmall += 1
-                noteRejectedNearPointer(el, role: role)
-                return false
-            }
-            guard rect.width * rect.height <= Self.tileMaxArea else {
-                tileTooLarge += 1
-                noteRejectedNearPointer(el, role: role)
-                return false
-            }
-            // Tiles are boxy; a wide-short sliver is a bar wrapper (action-row
-            // toolbar exposed as AXGroup), not a clickable thumbnail.
-            guard max(rect.width, rect.height) / min(rect.width, rect.height) <= Self.tileMaxAspect else {
-                tileTooWide += 1
-                noteRejectedNearPointer(el, role: role)
-                return false
-            }
-        }
+        guard let cls = verdict.candidateClass, rect.intersects(screenUnion) else { return false }
+        // A press group is published as a group, not as a container role.
+        let admittedRole = cls == .pressGroup ? "AXPressGroup" : role
         let ident = stringAttr(el, kAXIdentifierAttribute)
         let title = stringAttr(el, kAXTitleAttribute)
-        let key = ident ?? title ?? "\(role)@\(Int(rect.minX)),\(Int(rect.minY))"
+        let key = ident ?? title ?? "\(admittedRole)@\(Int(rect.minX)),\(Int(rect.minY))"
         let label = title ?? stringAttr(el, kAXDescriptionAttribute) ?? role
-        // Tier is decided ONCE here: a genuine control role is first-class; a
-        // candidate admitted only by the row/tile envelope is second-class.
-        let tier: DecisionCore.Tier = (Self.eligibleRoles.contains(role) || isPressGroup) ? .firstClass : .secondClass
-        out.append(CachedTarget(key: key, role: role, label: label, rect: rect, inset: 2, tier: tier))
+        // Tier comes from the policy class: control roles and capability-admitted
+        // press groups are first-class; envelope-only admissions are second-class.
+        out.append(CachedTarget(key: key, role: admittedRole, label: label, rect: rect,
+                                inset: 2, tier: GeometryPolicy.tier(for: cls)))
         // Delivery side table: the tap needs the live element reference to decide
         // AXPress vs synthetic. Same-process reference, stored outside the snapshot.
         elementRefs[key] = el
@@ -1520,13 +1396,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     }
 
     private func frame(_ el: AXUIElement) -> CGRect? {
-        guard let pRaw = attr(el, kAXPositionAttribute), CFGetTypeID(pRaw) == AXValueGetTypeID(),
-              let sRaw = attr(el, kAXSizeAttribute), CFGetTypeID(sRaw) == AXValueGetTypeID() else { return nil }
-        var p = CGPoint.zero
-        var s = CGSize.zero
-        guard AXValueGetValue(pRaw as! AXValue, .cgPoint, &p),
-              AXValueGetValue(sRaw as! AXValue, .cgSize, &s) else { return nil }
-        return CGRect(origin: p, size: s)
+        AXGeometry.frame(el)   // single validated reader (ClickAssistGeometry.swift)
     }
 
     /// Union of all displays expressed in AX/CG global coordinates. Keeps stale or

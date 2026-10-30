@@ -422,16 +422,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
     }
 
     private static func axFrame(_ el: AXUIElement) -> CGRect? {
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let posRef, let sizeRef else { return nil }
-        var origin = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &origin),
-              AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) else { return nil }
-        return CGRect(origin: origin, size: size)
+        AXGeometry.frame(el)   // single validated reader (ClickAssistGeometry.swift)
     }
 
     /// Validate `candidate` at `destination` for app `pid`. `siblings` are the

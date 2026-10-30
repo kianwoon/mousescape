@@ -582,18 +582,9 @@ final class AssistTap: @unchecked Sendable {
     /// AX failure so callers fall back to the cached rect.
     private func axFrame(_ el: AXUIElement) -> CGRect? {
         AXUIElementSetMessagingTimeout(el, 0.05)
-        guard let pRaw = AssistTap.axAttribute(el, kAXPositionAttribute),
-              let sRaw = AssistTap.axAttribute(el, kAXSizeAttribute),
-              CFGetTypeID(pRaw) == AXValueGetTypeID(),
-              CFGetTypeID(sRaw) == AXValueGetTypeID() else { return nil }
-        var p = CGPoint.zero
-        var s = CGSize.zero
-        guard AXValueGetValue(pRaw as! AXValue, .cgPoint, &p),
-              AXValueGetValue(sRaw as! AXValue, .cgSize, &s) else { return nil }
-        // Finite geometry only: an infinite/NaN frame must never reach
+        // Single validated reader: a non-finite frame must never reach
         // centerPoint → event.location (inf − inf = NaN crashed the overlay).
-        guard p.x.isFinite, p.y.isFinite, s.width.isFinite, s.height.isFinite else { return nil }
-        return CGRect(origin: p, size: s)
+        return AXGeometry.frame(el)
     }
 
     /// Largest per-edge movement between two frames (pt).
