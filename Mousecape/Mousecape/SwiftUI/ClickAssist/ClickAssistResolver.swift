@@ -787,9 +787,22 @@ final class AccessibilityResolver: @unchecked Sendable {
         // target (see `collect`); only the legitimacy hit-test is capped here.
         let evidenceStart = CACurrentMediaTime()
         if let legitimacy {
+            // The single evidence slot MUST belong to the candidate the router
+            // would pick, otherwise the ring shows `legitimacy-unknown` for a
+            // target that merely lost a tie. Measured regression: a tab close and
+            // a page link both sat at distance 0, the link won a distance-only
+            // sort, and the close button lost its ring. Same comparator as
+            // DecisionCore.resolve: distance, then smaller area, then stable order.
             let nearest = out.indices
-                .sorted { Self.boundaryDistance(pointer, out[$0].rect)
-                        < Self.boundaryDistance(pointer, out[$1].rect) }
+                .sorted { lhs, rhs in
+                    let dl = Self.boundaryDistance(pointer, out[lhs].rect)
+                    let dr = Self.boundaryDistance(pointer, out[rhs].rect)
+                    if dl != dr { return dl < dr }
+                    let al = out[lhs].rect.width * out[lhs].rect.height
+                    let ar = out[rhs].rect.width * out[rhs].rect.height
+                    if al != ar { return al < ar }
+                    return lhs < rhs
+                }
                 .prefix(ClickAssistEvidence.maxEvidenceCandidatesPerCycle)
             let siblings = out.filter { $0.tier == .firstClass }.map(\.rect)
             for idx in nearest {

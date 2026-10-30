@@ -425,6 +425,30 @@ private struct SeededGenerator: RandomNumberGenerator {
     }
 }
 
+// MARK: - Distance-0 tie (guards the evidence-slot regression)
+
+/// A tab close button (16x16) and a page link (900x28) can both contain the
+/// pointer, i.e. both sit at boundary distance 0. The router must pick the
+/// smaller control, and the single position-specific evidence slot must follow
+/// the same comparator — when it did not, the close button rendered as
+/// `legitimacy-unknown` and lost its ring entirely.
+final class ClickAssistTieBreakTests: XCTestCase {
+    private func cand(_ key: String, _ r: CGRect) -> DecisionCore.Candidate {
+        DecisionCore.Candidate(key: key, rect: r, inset: 2, tier: .firstClass, role: "AXButton")
+    }
+
+    func testSmallerControlWinsAtEqualDistance() {
+        let link = cand("link@0,0", CGRect(x: 0, y: 0, width: 900, height: 28))
+        let close = cand("close@14,6", CGRect(x: 14, y: 6, width: 16, height: 16))
+        let point = CGPoint(x: 20, y: 12)
+        let decision = DecisionCore.route(point: point, candidates: [link, close], tolerance: 12)
+        guard case .directHit(let hit, _) = decision else {
+            return XCTFail("expected a direct hit, got \(decision)")
+        }
+        XCTAssertEqual(hit.rect, close.rect, "the smaller control must win an equal-distance tie")
+    }
+}
+
 // MARK: - Candidate identity collision (guards the tab-✕ regression)
 
 /// Every browser tab ✕ is labelled "Close". Label-only keys collapsed them into
