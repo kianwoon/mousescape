@@ -56,8 +56,14 @@ final class AccessibilityResolver: @unchecked Sendable {
     private static let tileLikeRoles: Set<String> = ["AXImage", "AXGroup"]
     /// 30 pt: below this a tile is an icon/decoration, not a clickable thumbnail.
     private static let tileMinDimension: CGFloat = 30
+    /// 3:1 — tiles are boxy (204×290 = 1.4, banners ≈ 1.8). Beyond 3:1 the element
+    /// is a bar/toolbar wrapper (observed offender: 1258×47 = 27:1), not a tile.
+    private static let tileMaxAspect: CGFloat = 3
     /// 120 000 pt² (≈ 346 × 346): same spirit as the row guard; a 204×290 thumbnail
     /// (59 160) passes, a 1466×944 container (1 383 904) does not.
+    /// Tiles are also BOXY: max side ÷ min side ≤ 3. A wide-short sliver (e.g. a
+    /// 1258×47 toolbar wrapper) is page furniture, not a thumbnail — the area and
+    /// min-side guards alone admit it (59 126 pt², min side 47).
     private static let tileMaxArea: CGFloat = 120_000
     /// USER INVARIANT: the dimension of a legitimate click cannot be too big.
     /// Any non-track candidate larger than this area — or taller than this height —
@@ -1192,6 +1198,13 @@ final class AccessibilityResolver: @unchecked Sendable {
                 return false
             }
             guard rect.width * rect.height <= Self.tileMaxArea else {
+                tileTooLarge += 1
+                noteRejectedNearPointer(el, role: role)
+                return false
+            }
+            // Tiles are boxy; a wide-short sliver is a bar wrapper (action-row
+            // toolbar exposed as AXGroup), not a clickable thumbnail.
+            guard max(rect.width, rect.height) / min(rect.width, rect.height) <= Self.tileMaxAspect else {
                 tileTooLarge += 1
                 noteRejectedNearPointer(el, role: role)
                 return false
