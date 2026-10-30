@@ -87,11 +87,28 @@ final class LegitimacyPolicy: @unchecked Sendable {
                                  destination: CGPoint, siblings: [CGRect]) -> ClickAssistVerdict {
         guard pid > 0, pid != getpid() else { return .unknown }
         let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.1)
+        // Evidence collection runs in the XPC service, OFF the event tap, so a
+        // generous timeout costs nothing user-visible. 0.1 s was too tight for
+        // heavy pages: YouTube's seek bar returned nothing at all and the ring was
+        // suppressed as `legitimacy-unknown` on every hover (observed live).
+        AXUIElementSetMessagingTimeout(app, 0.35)
         var element: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(app, Float(destination.x), Float(destination.y),
-                                               &element) == .success,
-              let element, let hitFrame = axFrame(element) else { return .unknown }
+        var hitResult = AXUIElementCopyElementAtPosition(app, Float(destination.x), Float(destination.y), &element)
+        if hitResult != .success || element == nil {
+            // One retry: Chromium occasionally fails the first query under load.
+            usleep(15_000)
+            hitResult = AXUIElementCopyElementAtPosition(app, Float(destination.x), Float(destination.y), &element)
+        }
+        guard hitResult == .success, let element, let hitFrame = axFrame(element) else {
+            // No testimony at all. A first-class control whose OWN rect contains
+            // the destination still stands on its geometry — the same rule already
+            // applied when the hit-test answers incoherently (below). Anonymous
+            // groups get nothing: they have no role evidence.
+            if candidate.contains(destination), directControlRoles.contains(candidateRole) {
+                return .confirmedWeak
+            }
+            return .unknown
+        }
         // The renderer's answer must cover the destination to mean anything.
         // In macOS fullscreen Chromium answers out of a broken coordinate space
         // (measured: the menu bar for a point at the bottom of the screen, or a
