@@ -358,6 +358,19 @@ final class AssistTap: @unchecked Sendable {
                                                     destination: dest, res: res)
                     if verdict == .confirmed {
                         confirmed.append((choice, dest, snap, false))
+                    } else if verdict == .confirmedWeak {
+                        // Weak evidence is deliverable ONLY for chrome-gated
+                        // targets: AXPress acts on the element itself, so the
+                        // coordinate hit-test weakness that makes Chromium chrome
+                        // answers weak is immaterial. Web candidates never pass
+                        // the gate, so weak web evidence stays passthrough.
+                        if let el = cacheStoreForDelivery?.element(for: choice.candidate.key,
+                                                                   pid: res.pid),
+                           AssistTap.axPressEligible(el, role: choice.candidate.role) {
+                            confirmed.append((choice, dest, snap, true))
+                        } else if firstFailure == nil {
+                            firstFailure = (choice.candidate.key, verdict)
+                        }
                     } else if firstFailure == nil {
                         firstFailure = (choice.candidate.key, verdict)
                     }
@@ -371,6 +384,7 @@ final class AssistTap: @unchecked Sendable {
                 }
                 let best = winner.0.candidate
                 let snap = winner.2
+                let weakEvidence = winner.3
                 // Delivery side table: the live element behind this candidate, when
                 // the resolver supplied one. nil (static harness, or dropped entry)
                 // keeps the exact legacy synthetic path below.
@@ -398,8 +412,17 @@ final class AssistTap: @unchecked Sendable {
                    performAXPressDelivery(element: element, best: best, corrected: corrected,
                                           snap: snap, dist: winner.0.dist,
                                           cands: confirmed.count, res: res, label: label,
-                                          original: original, started: started, extra: "") {
+                                          original: original, started: started,
+                                          extra: weakEvidence ? "legitimacy=confirmedWeak " : "") {
                     return nil
+                }
+                // Weak evidence is AXPress-only: a synthetic click here would be
+                // aimed on the very hit-test answer that could not be confirmed.
+                if weakEvidence {
+                    emit("PASSTHROUGH", type: label, original: original, mutated: nil,
+                         reason: "legitimacy-confirmedWeak", res: res, started: started,
+                         extra: "legitimacy=confirmedWeak target=\(best.key) cands=0 winner=0")
+                    return Unmanaged.passUnretained(event)
                 }
 
                 let delta = CGVector(dx: corrected.x - original.x, dy: corrected.y - original.y)
