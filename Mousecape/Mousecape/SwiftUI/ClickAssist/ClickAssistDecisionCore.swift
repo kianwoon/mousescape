@@ -127,7 +127,8 @@ enum DecisionCore {
         let all = scored
         let filtered = scored.filter { cand, _ in
             all.filter { other in
-                other.0.key != cand.key && cand.rect.contains(other.0.rect)
+                other.0.key != cand.key
+                    && DecisionCore.isNested(cand.rect, other.0.rect, margin: 0)
             }.count < 2
         }
         guard !filtered.isEmpty else { return .none }
@@ -262,6 +263,20 @@ enum DecisionCore {
         return .directHit(candidate: hit, others: others)
     }
 
+    /// Margin (pt) that makes a nesting test tolerant of Chromium frames that
+    /// are offset by 1-2 pt (a menu container vs the button it wraps). ONE
+    /// constant: the ring filter and the resolver's enclosure test share it.
+    static let nestMargin: CGFloat = 8
+
+    /// The ONE containment predicate. `outer` must contain `inner` expanded by
+    /// `margin` points; the default margin is the ring's tolerance. `margin: 0`
+    /// is the strict containment used by the resolver's wrapper filter, so both
+    /// places express containment the same way.
+    static func isNested(_ outer: CGRect, _ inner: CGRect,
+                         margin: CGFloat = nestMargin) -> Bool {
+        outer.insetBy(dx: -margin, dy: -margin).contains(inner)
+    }
+
     /// Center-snap only first-class, position-agnostic controls. Second-class
     /// rows/tiles and the position-sensitive roles keep the edge clamp.
     static func snapMode(for candidate: Candidate) -> Snap {
@@ -320,29 +335,28 @@ enum DecisionCore {
             let scored = ([winner] + alternates).prefix(limit).map {
                 ScoredCandidate(candidate: $0.candidate, dist: $0.dist)
             }
-            // Nesting test is margin-tolerant: the outer must contain the inner
-            // expanded by 8pt — Chromium frames are frequently offset by 1-2pt
-            // (menu containers vs their buttons), which defeats strict contains.
-            let nestMargin: CGFloat = 8
-            let winnerExpanded = scored.first.map {
-                $0.candidate.rect.insetBy(dx: -nestMargin, dy: -nestMargin)
+            // The shown set is an ANTICHAIN drawn from the scored set ONLY:
+            // element 0 (the winner) is never dropped, and an alternate is
+            // dropped when it nests — either way round — with the winner or with
+            // anything already kept. The wrapper test deliberately ignores the
+            // full `candidates` list: a cached ✕ inside the winning tab frame
+            // must not evict the tab the click actually hits.
+            guard let winnerEntry = scored.first else { return [] }
+            var kept: [ScoredCandidate] = [winnerEntry]
+            for cand in scored.dropFirst() {
+                let w = winnerEntry.candidate.rect
+                if isNested(w, cand.candidate.rect) || isNested(cand.candidate.rect, w) {
+                    continue
+                }
+                let nestsWithKept = kept.contains { entry in
+                    let r = entry.candidate.rect
+                    return isNested(r, cand.candidate.rect) || isNested(cand.candidate.rect, r)
+                }
+                if nestsWithKept { continue }
+                kept.append(cand)
             }
-            let kept = scored.enumerated().filter { entry in
-                let cand = entry.element
-                // Inner secondaries: a non-winner whose rect sits inside the
-                // winner's rect is an alternate/stale ring — never show both.
-                if entry.offset > 0, let winnerExpanded,
-                   winnerExpanded.contains(cand.candidate.rect) {
-                    return false
-                }
-                let expanded = cand.candidate.rect.insetBy(dx: -nestMargin, dy: -nestMargin)
-                return !candidates.contains { other in
-                    other.key != cand.candidate.key
-                        && expanded.contains(other.rect)
-                }
-            }.map(\.element)
-            // Safety: if everything nested (a lone wrapper with no inner control
-            // cached), keep the winner so a real control never goes unindicated.
+            // Safety: the winner is unconditional, so this can only fire if the
+            // scored set were empty — kept empty is impossible, fallback stays.
             return kept.isEmpty ? Array(scored.prefix(1)) : Array(kept.prefix(limit))
         case .ambiguous, .none:
             return []
