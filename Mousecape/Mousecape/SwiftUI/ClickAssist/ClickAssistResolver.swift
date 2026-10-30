@@ -1195,6 +1195,12 @@ final class AccessibilityResolver: @unchecked Sendable {
         guard let rect = frame(el),
               rect.width >= 4,
               rect.height >= (rect.width >= 300 ? 2 : 4),
+              // Finite geometry only: AX can answer ±infinity (and NaN) frames —
+              // an infinite rect passes every size guard for wide-track roles and
+              // then poisons centerPoint (inf − inf = NaN), which crashed the
+              // overlay's main-thread render (EXC_BREAKPOINT on Int(NaN)).
+              rect.origin.x.isFinite, rect.origin.y.isFinite,
+              rect.width.isFinite, rect.height.isFinite,
               rect.intersects(screenUnion) else {
             return false
         }

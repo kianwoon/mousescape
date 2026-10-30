@@ -439,6 +439,12 @@ final class LegitimacyPolicy: @unchecked Sendable {
     func validate(pid: pid_t, generation: UInt64, key: String,
                   candidate: CGRect, candidateRole: String, destination: CGPoint,
                   siblings: [CGRect]) -> Verdict {
+        // Non-finite geometry (AX can answer NaN/±inf frames — observed crash:
+        // Int(destination.x) trapping on the main thread) is never testimony.
+        // Reject before any arithmetic; fail closed and stay quiet.
+        guard destination.x.isFinite, destination.y.isFinite,
+              candidate.origin.x.isFinite, candidate.origin.y.isFinite,
+              candidate.width.isFinite, candidate.height.isFinite else { return .unknown }
         let now = CACurrentMediaTime()
         let cacheKey = "\(pid)|\(key)|\(Int(destination.x.rounded()))|\(Int(destination.y.rounded()))"
         lock.lock()
