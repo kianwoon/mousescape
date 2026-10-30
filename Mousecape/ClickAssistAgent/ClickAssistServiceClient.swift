@@ -59,10 +59,6 @@ final class ClickAssistServiceClient: @unchecked Sendable {
     /// No successful snapshot for this long ⇒ evidence is invalid immediately.
     private static let snapshotSilenceLimit: CFTimeInterval = 1.0
 
-    /// Supplied by the engine (AppKit lives there): the agent's own overlay
-    /// window numbers, which the service must exclude from pointer ownership.
-    var overlayWindowProvider: (() -> [Int])?
-
     init(cache: CacheStore, log: @escaping (String) -> Void) {
         self.cache = cache
         self.log = log
@@ -138,7 +134,11 @@ final class ClickAssistServiceClient: @unchecked Sendable {
         // Tell the service which processes/windows are OURS: the service cannot
         // know the agent's pid, so without this the agent's click-through overlay
         // claims pointer ownership and the real window beneath is never resolved.
-        let overlayIDs: [Int] = overlayWindowProvider?() ?? []
+        // Window IDs are unnecessary: every overlay window belongs to THIS
+        // agent process, and the service excludes the agent pid wholesale. Asking
+        // AppKit for window numbers here would touch NSApplication off the main
+        // actor (crash: dispatch_assert_queue in Swift 6 isolation checking).
+        let overlayIDs: [Int] = []
         let cfg: [String: Any] = ["agentPid": Int(ProcessInfo.processInfo.processIdentifier),
                                   "overlayWindowIDs": overlayIDs]
         if let cfgData = try? JSONSerialization.data(withJSONObject: cfg),

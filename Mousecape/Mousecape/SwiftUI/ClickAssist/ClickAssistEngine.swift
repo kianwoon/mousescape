@@ -189,12 +189,6 @@ final class ClickAssistEngine {
         let client = ClickAssistServiceClient(cache: cache) { line in
             debugLog("[ClickAssist] \(line)")
         }
-        client.overlayWindowProvider = { [weak self] in
-            guard let self else { return [] }
-            return NSApplication.shared.windows
-                .filter { $0.windowNumber > 0 }
-                .map { Int($0.windowNumber) }
-        }
         serviceClient = client
         let t = AssistTap(tolerance: config.tolerancePoints) { line in
             debugLog("[ClickAssist] \(line)")
