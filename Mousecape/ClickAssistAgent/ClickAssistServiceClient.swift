@@ -63,7 +63,13 @@ final class ClickAssistServiceClient: @unchecked Sendable {
     private var lastSnapGapLogAt: CFTimeInterval = 0
 
     /// No successful snapshot for this long ⇒ evidence is invalid immediately.
-    private static let snapshotSilenceLimit: CFTimeInterval = 1.0
+    /// MEASURED, not guessed: the resolver's normal idle gap is p50 318 ms and
+    /// p95 943 ms (SNAP_GAP telemetry) because the idle cadence is 700 ms plus a
+    /// resolve of up to 252 ms. A 1.0 s limit therefore trips during ORDINARY
+    /// idle operation: three unlucky cycles opened the circuit and disabled the
+    /// assist until an explicit restart. The limit must sit above the engine's
+    /// own rhythm, with headroom for one slow cycle plus transport.
+    private static let snapshotSilenceLimit: CFTimeInterval = 2.5
 
     init(cache: CacheStore, log: @escaping (String) -> Void) {
         self.cache = cache
