@@ -1152,7 +1152,20 @@ final class AccessibilityResolver: @unchecked Sendable {
                 isTileLike = false
             }
         }
-        guard Self.eligibleRoles.contains(role) || isRowLike || isTileLike || isPressGroup else {
+        // Wide-thin group admission: page zoom >300% collapses web seek bars to
+        // 2pt-tall anonymous AXGroups (measured: iyf bar 653×2 at >300%, ring
+        // working at ≤300%) — the role filter and the tile envelope (min side 30)
+        // both reject them. Admit ONLY the track shape: very wide, ≤6pt tall.
+        // Decorative dividers are narrow; toolbar wrappers are ≥40pt tall —
+        // neither fits. Hit-test identity at ring time is the real evidence.
+        var isWideThinGroup = false
+        if role == "AXGroup", !isRowLike, !isPressGroup,
+           let preFrame = frame(el),
+           preFrame.width >= 300, (2...6).contains(Int(preFrame.height)) {
+            isWideThinGroup = true
+            isTileLike = false
+        }
+        guard Self.eligibleRoles.contains(role) || isRowLike || isTileLike || isPressGroup || isWideThinGroup else {
             // Diagnostics only: remember near-pointer elements the role filter drops
             // (e.g. a <div> web button exposed as AXGroup). Bounded and per-cycle.
             noteRejectedNearPointer(el, role: role)
@@ -1175,7 +1188,13 @@ final class AccessibilityResolver: @unchecked Sendable {
         // (observed: 7405×10 "progress bar" AXSlider spanning the display), so the
         // page-container size cap must not apply to these thin track roles.
         let isWideTrackRole = role == "AXSlider" || role == "AXScrollBar" || role == "AXValueIndicator"
-        guard let rect = frame(el), rect.width >= 4, rect.height >= 4,
+        // Wide-thin exemption to the 4pt floor: page zoom >300% collapses web
+        // seek bars to 2pt-tall frames (measured: iyf bar 653×2 at >300%,
+        // admitted fine at ≤300%) — a wide element is still a track, not a
+        // degenerate rect. Narrow 1-3pt slivers (dividers) stay rejected.
+        guard let rect = frame(el),
+              rect.width >= 4,
+              rect.height >= (rect.width >= 300 ? 2 : 4),
               rect.intersects(screenUnion) else {
             return false
         }
