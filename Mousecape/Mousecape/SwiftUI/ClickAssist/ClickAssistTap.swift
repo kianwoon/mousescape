@@ -1,4 +1,5 @@
 // baseline-guard:allow new standalone prototype file, no prior baseline possible
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import QuartzCore
@@ -37,6 +38,10 @@ final class AssistTap: @unchecked Sendable {
     /// delivers tapDisabledByUserInput for a manual CGEvent.tapEnable(false), which
     /// must NOT auto-re-enable.
     private var manuallyDisabled = false
+    /// Latched at a mouse-down that was delivered via AXPress. While non-nil the
+    /// rest of that gesture (drag/up) is swallowed, so AXPress can never pair with
+    /// a synthetic event. The token also guarantees one AXPress per gesture.
+    private var pressGestureToken: UUID?
 
     var assistEnabled = true
     private(set) var tolerance: CGFloat
@@ -135,6 +140,11 @@ final class AssistTap: @unchecked Sendable {
     /// unchanged (same comparisons, same arithmetic, no new I/O or locks).
     private typealias Candidate = DecisionCore.Candidate
 
+    private var cacheStoreForDelivery: CacheStore? {
+        if case .cache(let store) = targetSource { return store }
+        return nil
+    }
+
     private struct Resolution {
         let candidates: [Candidate]
         let valid: Bool
@@ -213,6 +223,22 @@ final class AssistTap: @unchecked Sendable {
         let original = event.location
         let label = AssistTap.name(type)
 
+        // AXPress gesture consumption: the down that fired AXPress was swallowed,
+        // so its drags and matching up must be swallowed too. Returning nil from
+        // the callback consumes the event outright. The token is cleared on the up
+        // (or on an unexpected new down), so at most one AXPress per gesture.
+        if pressGestureToken != nil {
+            if isUp {
+                pressGestureToken = nil
+                emit("PASSTHROUGH", type: label, original: original, mutated: nil,
+                     reason: "axpress-swallow-up", res: resolution(), started: started,
+                     extra: "mode=axpress consumed=up")
+                return nil
+            }
+            if isDrag { return nil }
+            pressGestureToken = nil
+        }
+
         guard assistEnabled else {
             latched = nil
             emit("PASSTHROUGH", type: label, original: original, mutated: nil,
@@ -290,14 +316,47 @@ final class AssistTap: @unchecked Sendable {
                     return Unmanaged.passUnretained(event)
                 }
                 let best = winner.0.candidate
-                let corrected = winner.1
                 let snap = winner.2
+                // Delivery side table: the live element behind this candidate, when
+                // the resolver supplied one. nil (static harness, or dropped entry)
+                // keeps the exact legacy synthetic path below.
+                let element = cacheStoreForDelivery?.element(for: best.key, pid: res.pid)
+
+                // Fresh-frame revalidation: never aim at a moved target. Any AX
+                // failure falls back to the cached rect; a material move (> 24 pt
+                // on any edge) cancels the redirect entirely (passthrough).
+                var corrected = winner.1
+                if let element, let fresh = axFrame(element) {
+                    if AssistTap.frameMoved(best.rect, fresh) {
+                        emit("PASSTHROUGH", type: label, original: original, mutated: nil,
+                             reason: "stale-target", res: res, started: started,
+                             extra: "mode=synthetic target=\(best.key) cached=\(best.rect) fresh=\(fresh) moved=\(String(format: "%.1f", AssistTap.frameDelta(best.rect, fresh)))")
+                        return Unmanaged.passUnretained(event)
+                    }
+                    corrected = snap == .center
+                        ? DecisionCore.centerPoint(into: fresh)
+                        : DecisionCore.clampPoint(original, into: fresh, inset: best.inset)
+                }
+
+                // Chrome-button delivery: structural gate, then EXACTLY ONE
+                // AXPress. Synthetic CGEvents are ignored by Chromium chrome.
+                if let element, AssistTap.axPressEligible(element, role: best.role) {
+                    let result = AXUIElementPerformAction(element, "AXPress" as CFString)
+                    pressGestureToken = UUID()
+                    latched = nil
+                    unlatchedForDrag = false
+                    emit("MUTATE", type: label, original: original, mutated: corrected,
+                         reason: "redirect", res: res, started: started,
+                         extra: "target=\(best.key) dist=\(String(format: "%.1f", winner.0.dist)) snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(confirmed.count) winner=1 mode=axpress\(result == .success ? "" : " axpress=failed(\(result.rawValue))")")
+                    return nil
+                }
+
                 let delta = CGVector(dx: corrected.x - original.x, dy: corrected.y - original.y)
                 event.location = corrected
                 latched = (delta, best.key, snap, false)
                 emit("MUTATE", type: label, original: original, mutated: corrected,
                      reason: "redirect", res: res, started: started,
-                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", winner.0.dist)) target=\(best.key) mode=return-modified-event snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(confirmed.count) winner=1")
+                     extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", winner.0.dist)) target=\(best.key) mode=return-modified-event mode=synthetic snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(confirmed.count) winner=1")
                 return Unmanaged.passUnretained(event)
             }
         }
@@ -333,6 +392,72 @@ final class AssistTap: @unchecked Sendable {
         emit("PASSTHROUGH", type: label, original: original, mutated: nil,
              reason: "no-active-gesture", res: res, started: started)
         return Unmanaged.passUnretained(event)
+    }
+
+    // MARK: - AXPress delivery gate (chrome only)
+
+    /// Structural eligibility: role must be AXButton, the element must still
+    /// advertise AXPress, and its ancestry must reach the window through chrome
+    /// (AXTabGroup / AXToolbar) with NO AXWebArea anywhere on the chain. Any AX
+    /// read error is ambiguous and therefore not eligible. No app/label literals.
+    private static func axPressEligible(_ el: AXUIElement, role: String) -> Bool {
+        guard role == "AXButton" else { return false }
+        AXUIElementSetMessagingTimeout(el, 0.05)
+        guard let actions = axAttribute(el, "AXActionNames") as? [String],
+              actions.contains("AXPress") else { return false }
+        if let enabled = axAttribute(el, kAXEnabledAttribute) as? Bool, !enabled { return false }
+        return chromeAncestry(el)
+    }
+
+    /// Walk element -> window. Eligible only when an AXTabGroup or AXToolbar
+    /// ancestor is present and no AXWebArea appears at any point. A nil/odd role
+    /// or a failing parent read is treated as ambiguous -> false.
+    private static func chromeAncestry(_ el: AXUIElement) -> Bool {
+        var node: AXUIElement? = el
+        var sawChrome = false
+        var depth = 0
+        while let current = node, depth < 64 {
+            depth += 1
+            guard let role = axAttribute(current, kAXRoleAttribute) as? String else { return false }
+            if role == "AXWebArea" { return false }
+            if role == "AXTabGroup" || role == "AXToolbar" { sawChrome = true }
+            if role == "AXWindow" { break }
+            guard let parent = axAttribute(current, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            node = (parent as! AXUIElement)
+        }
+        return sawChrome
+    }
+
+    private static func axAttribute(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
+        var v: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success else { return nil }
+        return v
+    }
+
+    /// Fresh global frame (top-left space, same as CGEvent/AXPosition). nil on any
+    /// AX failure so callers fall back to the cached rect.
+    private func axFrame(_ el: AXUIElement) -> CGRect? {
+        AXUIElementSetMessagingTimeout(el, 0.05)
+        guard let pRaw = AssistTap.axAttribute(el, kAXPositionAttribute),
+              let sRaw = AssistTap.axAttribute(el, kAXSizeAttribute),
+              CFGetTypeID(pRaw) == AXValueGetTypeID(),
+              CFGetTypeID(sRaw) == AXValueGetTypeID() else { return nil }
+        var p = CGPoint.zero
+        var s = CGSize.zero
+        guard AXValueGetValue(pRaw as! AXValue, .cgPoint, &p),
+              AXValueGetValue(sRaw as! AXValue, .cgSize, &s) else { return nil }
+        return CGRect(origin: p, size: s)
+    }
+
+    /// Largest per-edge movement between two frames (pt).
+    private static func frameDelta(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        max(max(abs(a.minX - b.minX), abs(a.maxX - b.maxX)),
+            max(abs(a.minY - b.minY), abs(a.maxY - b.maxY)))
+    }
+
+    private static func frameMoved(_ a: CGRect, _ b: CGRect) -> Bool {
+        frameDelta(a, b) > 24
     }
 
     private func emit(_ kind: String, type: String, original: CGPoint, mutated: CGPoint?,

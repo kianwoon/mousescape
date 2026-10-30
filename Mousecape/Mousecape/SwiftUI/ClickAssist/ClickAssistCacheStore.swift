@@ -1,4 +1,5 @@
 // baseline-guard:allow new standalone prototype file, no prior baseline possible
+import ApplicationServices
 import CoreGraphics
 import Foundation
 
@@ -44,6 +45,12 @@ final class CacheStore: @unchecked Sendable {
     /// with the same immutable struct the tap router reads: a slow or dead observer
     /// can never block the tap callback, which only ever calls `current()`.
     private var observers: [(CacheSnapshot) -> Void] = []
+    /// Delivery-side table: the live AX element reference for each admitted
+    /// candidate key, keyed by owning pid. Populated by the resolver each publish
+    /// cycle, replaced wholesale, and cleared on invalidation. Deliberately NOT
+    /// part of the Sendable snapshot: AXUIElement is only valid in this process
+    /// and is not a value type, so it lives behind this lock as a side table.
+    private var axElements: [pid_t: [String: AXUIElement]] = [:]
 
     func publish(_ s: CacheSnapshot) {
         lock.lock()
@@ -63,5 +70,26 @@ final class CacheStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return snapshot
+    }
+
+    /// Replace the element side table for `pid` (one publish cycle's worth).
+    func setElements(_ map: [String: AXUIElement], pid: pid_t) {
+        lock.lock()
+        axElements = [pid: map]
+        lock.unlock()
+    }
+
+    func clearElements() {
+        lock.lock()
+        axElements.removeAll()
+        lock.unlock()
+    }
+
+    /// The element reference for a candidate key, or nil when the resolver did not
+    /// (or can no longer) supply one. Read by the tap at delivery time only.
+    func element(for key: String, pid: pid_t) -> AXUIElement? {
+        lock.lock()
+        defer { lock.unlock() }
+        return axElements[pid]?[key]
     }
 }

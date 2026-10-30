@@ -98,6 +98,11 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Last VALID published target set. Kept resolver-side so a transient invalid
     /// snapshot cannot erase the union before the next walk re-merges it.
     private var unionTargets: [CachedTarget] = []
+    /// Delivery side table: the live AX element behind each admitted candidate
+    /// key, published into CacheStore at the end of each cycle. Persists across
+    /// cycles so union-held targets keep a usable reference; pruned to the keys
+    /// still present and cleared on app switch / invalidation.
+    private var elementRefs: [String: AXUIElement] = [:]
     private var unionPid: pid_t = 0
     /// Per-pid stash of the union/rotation state. A LEGITIMATE pid switch parks the
     /// outgoing app's resolvable state here; flipping back restores it instead of
@@ -411,6 +416,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         let snap = CacheSnapshot(generation: nextGeneration(), targets: [], valid: false,
                                  reason: reason, stamp: CACurrentMediaTime(), resolverMs: 0,
                                  pointer: pointer, appName: prev.appName, pid: prev.pid)
+        elementRefs.removeAll()
+        cache.clearElements()
         cache.publish(snap)
         log("RESOLVER_INVALIDATE gen=\(snap.generation) reason=\(reason) action=pass-through-until-refresh")
     }
@@ -570,6 +577,9 @@ final class AccessibilityResolver: @unchecked Sendable {
                 resetRotation()
             }
             unionPid = pid
+            // Element references are pid-specific; never carry them across an app
+            // switch. The next walks repopulate and the tap falls back to synthetic.
+            elementRefs.removeAll()
             log("RESOLVER_EVENT app-switch-union prev=\(outgoing) new=\(pid) stash=\(restored ? "hit" : "miss") stashes=\(unionStashes.count)")
         }
 
@@ -689,6 +699,10 @@ final class AccessibilityResolver: @unchecked Sendable {
         out = dedupe.kept
         dedupedCount = dedupe.removed
         unionTargets = out
+        // Drop element references for keys that did not survive this cycle's
+        // union/dedupe — never leave a delivery aim pointing at a gone element.
+        let liveKeys = Set(out.map { $0.key })
+        elementRefs = elementRefs.filter { liveKeys.contains($0.key) }
 
         let near = out.filter { Self.boundaryDistance(pointer, $0.rect) <= 80 }.count
         let ms = (CACurrentMediaTime() - t0) * 1000
@@ -697,6 +711,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         let snap = CacheSnapshot(generation: gen, targets: out, valid: true, reason: "fresh",
                                  stamp: CACurrentMediaTime(), resolverMs: ms, pointer: pointer,
                                  appName: appName, pid: pid)
+        cache.setElements(elementRefs, pid: pid)
         cache.publish(snap)
 
         log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d deduped=%d pwinMode=%@ pidSrc=%@",
@@ -738,6 +753,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         let snap = CacheSnapshot(generation: gen, targets: [], valid: false, reason: reason,
                                  stamp: CACurrentMediaTime(), resolverMs: (CACurrentMediaTime() - t0) * 1000,
                                  pointer: currentPointer(), appName: "-", pid: 0)
+        elementRefs.removeAll()
+        cache.clearElements()
         cache.publish(snap)
         log("RESOLVER_UNAVAILABLE gen=\(gen) reason=\(reason) action=pass-through")
     }
@@ -749,6 +766,8 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  stamp: CACurrentMediaTime(),
                                  resolverMs: (CACurrentMediaTime() - t0) * 1000,
                                  pointer: currentPointer(), appName: "self", pid: getpid())
+        elementRefs.removeAll()
+        cache.clearElements()
         cache.publish(snap)
         log("RESOLVER_SELF_APP gen=\(gen) pid=\(getpid()) axQueries=0 action=pass-through")
     }
@@ -1218,6 +1237,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         // candidate admitted only by the row/tile envelope is second-class.
         let tier: DecisionCore.Tier = (Self.eligibleRoles.contains(role) || isPressGroup) ? .firstClass : .secondClass
         out.append(CachedTarget(key: key, role: role, label: label, rect: rect, inset: 2, tier: tier))
+        // Delivery side table: the tap needs the live element reference to decide
+        // AXPress vs synthetic. Same-process reference, stored outside the snapshot.
+        elementRefs[key] = el
         return true
     }
 
