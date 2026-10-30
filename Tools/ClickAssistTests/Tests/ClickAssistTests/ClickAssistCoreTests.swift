@@ -307,6 +307,61 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertLessThan(FrameContinuity.overlapFraction(cached, fresh), 0.5)
         XCTAssertTrue(FrameContinuity.moved(cached, fresh), "lost identity must cancel")
     }
+
+    // MARK: - H. published evidence / async AXPress policy
+
+    /// Fresh evidence: same generation, within the 400 ms window.
+    func testH1_evidenceFresh() {
+        XCTAssertEqual(ClickAssistEvidence.state(evidenceGeneration: 7, currentGeneration: 7,
+                                                 ageMs: 10), .fresh)
+    }
+
+    /// Evidence past maxAgeMs is stale (the tap must not refresh it synchronously).
+    func testH2_evidenceStale() {
+        XCTAssertEqual(ClickAssistEvidence.state(evidenceGeneration: 7, currentGeneration: 7,
+                                                 ageMs: ClickAssistEvidence.maxAgeMs + 1), .stale)
+    }
+
+    /// Evidence from another publish cycle is unusable even if the clock is fresh.
+    func testH3_evidenceWrongGeneration() {
+        XCTAssertEqual(ClickAssistEvidence.state(evidenceGeneration: 6, currentGeneration: 7,
+                                                 ageMs: 1), .wrongGeneration)
+        XCTAssertEqual(ClickAssistEvidence.state(evidenceGeneration: 0, currentGeneration: 7,
+                                                 ageMs: 1), .missing)
+    }
+
+    /// The worker accepts a request inside 150 ms and rejects one past it.
+    func testH4_requestExpiry() {
+        let request = AXPressRequest(targetKey: "tab-close", pid: 42, generation: 9,
+                                     issuedAt: 100, expiryMs: 150)
+        XCTAssertNil(AXPressGate.rejection(request: request, currentGeneration: 9,
+                                           identityMatches: true, now: 100.149))
+        XCTAssertEqual(AXPressGate.rejection(request: request, currentGeneration: 9,
+                                             identityMatches: true, now: 100.151), .expired)
+    }
+
+    /// A stale generation or swapped element is rejected before activation.
+    func testH5_generationAndIdentityRejection() {
+        let request = AXPressRequest(targetKey: "tab-close", pid: 42, generation: 9,
+                                     issuedAt: 100, expiryMs: 150)
+        XCTAssertEqual(AXPressGate.rejection(request: request, currentGeneration: 10,
+                                             identityMatches: true, now: 100.010),
+                       .staleGeneration)
+        XCTAssertEqual(AXPressGate.rejection(request: request, currentGeneration: 9,
+                                             identityMatches: false, now: 100.010),
+                       .identityMismatch)
+    }
+
+    /// Ownership is taken at dispatch: the matching up is consumed even when the
+    /// worker later rejects the activation (activation outcome is irrelevant).
+    func testH6_ownerConsumesUpRegardlessOfRejection() {
+        XCTAssertTrue(GestureOwnership.consumes(tokenActive: true, isDown: false,
+                                                isDrag: false, isUp: true))
+        XCTAssertTrue(GestureOwnership.consumes(tokenActive: true, isDown: false,
+                                                isDrag: true, isUp: false))
+        XCTAssertFalse(GestureOwnership.consumes(tokenActive: false, isDown: false,
+                                                 isDrag: false, isUp: true))
+    }
 }
 
 /// Deterministic RNG so a failure is reproducible from the seed alone.

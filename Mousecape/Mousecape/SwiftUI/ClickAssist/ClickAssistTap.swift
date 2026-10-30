@@ -47,12 +47,19 @@ final class AssistTap: @unchecked Sendable {
     /// gesture stays a passthrough: a gesture that began unsupported stays
     /// unsupported end-to-end.
     private var gestureUnsupported = false
+    /// Serial worker for AXPress activation. AX runs HERE, never on the callback.
+    private let axWorker = DispatchQueue(label: "clickassist.axpress.worker",
+                                         qos: .userInitiated)
+
+    /// Sendable carrier for an AX element reference crossing to the worker queue.
+    private final class AXElementHandle: @unchecked Sendable {
+        let element: AXUIElement
+        init(_ element: AXUIElement) { self.element = element }
+    }
 
     var assistEnabled = true
     private(set) var tolerance: CGFloat
     let log: (String) -> Void
-    /// The single legitimacy policy (renderer hit-test at the destination).
-    var legitimacy: LegitimacyPolicy?
 
     var targetSource: TargetSource = .staticTargets([])
 
@@ -122,6 +129,9 @@ final class AssistTap: @unchecked Sendable {
         CFRunLoopAddSource(CFRunLoopGetMain(), s, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
         log("TAP_ACTIVE mutable=defaultTap point=\(point == .cghidEventTap ? "hid" : "session") tolerance=\(tolerance)")
+        // Runtime invariant marker: the callback is a pure snapshot consumer; AX
+        // runs only on the resolver queue (evidence) and the serial worker (press).
+        log("TAP_AX_FREE invariant=callback-zero-ax evidenceMaxAgeMs=\(Int(ClickAssistEvidence.maxAgeMs)) pressExpiryMs=\(Int(AXPressGate.defaultExpiryMs))")
         return true
     }
 
@@ -175,24 +185,13 @@ final class AssistTap: @unchecked Sendable {
             let reason = s.valid ? (fresh ? "fresh" : String(format: "stale:age(%.0fms)", ageMs)) : s.reason
             return Resolution(candidates: s.targets.map { Candidate(key: $0.key, rect: $0.rect,
                                                                      inset: $0.inset, tier: $0.tier,
-                                                                     role: $0.role, label: $0.label) },
+                                                                     role: $0.role, label: $0.label,
+                                                                     verdict: $0.verdict,
+                                                                     chromeEligible: $0.chromeEligible,
+                                                                     evidenceGeneration: $0.evidenceGeneration) },
                               valid: fresh, reason: reason, generation: s.generation,
                               ageMs: ageMs, source: "cache", pid: s.pid)
         }
-    }
-
-    /// Single legitimacy check for a routing decision at its destination point.
-    /// No policy (static regression harness) keeps the legacy behaviour.
-    private func legitimacyVerdict(for candidate: Candidate, destination: CGPoint,
-                                   res: Resolution) -> LegitimacyPolicy.Verdict {
-        guard let legitimacy else { return .confirmed }
-        let siblings = res.candidates
-            .filter { $0.tier == .firstClass && $0.key != candidate.key }
-            .map { $0.rect }
-        return legitimacy.validate(pid: res.pid, generation: res.generation,
-                                   key: candidate.key, candidate: candidate.rect,
-                                   candidateRole: candidate.role,
-                                   destination: destination, siblings: siblings)
     }
 
     /// What may be done with ONE candidate aimed at ONE destination point.
@@ -207,51 +206,57 @@ final class AssistTap: @unchecked Sendable {
         }
         let kind: Kind
         /// The live element behind the candidate, when the resolver supplied one
-        /// (nil: static harness, or the entry was dropped). Needed by the caller
-        /// for fresh-frame revalidation even when the plan is synthetic.
+        /// (nil: static harness, or the entry was dropped).
         let element: AXUIElement?
         let verdict: LegitimacyPolicy.Verdict
-        /// One token for a passthrough line: `unavailable=1` when the evidence was
-        /// confirmed but the live element/chrome gate could not be re-proven,
-        /// `verdict=<v>` when the evidence itself failed.
-        let reasonToken: String
+        /// Passthrough token when evidence is missing/expired/failed.
+        let rejectReason: String?
     }
 
-    /// THE single delivery decision. Given a candidate and the point we would aim
-    /// at, it looks up the live element, applies the structural AXPress gate
-    /// (`axPressEligible`), computes the ONE legitimacy verdict for that
-    /// destination, and returns what may be done. Weak evidence
-    /// (`.confirmedWeak`) is deliverable ONLY as AXPress — the chrome gate is what
-    /// makes it safe; it is never synthesised. A material frame move (> 24 pt)
-    /// still cancels inside `performAXPressDelivery`.
+    /// THE single delivery decision, PURE COMPUTATION over published evidence.
+    /// No AX call, no hit-test, no fresh-frame read. The resolver publishes
+    /// `verdict`, `chromeEligible` and `evidenceGeneration` for the nearest
+    /// targets; anything missing, stale or from another generation is refused
+    /// (`evidence-missing` / `evidence-expired`) rather than refreshed.
     ///
-    /// `requiresConfirmation: false` is the direct-hit self path, which is
-    /// admitted by the router's own hit and delivers on structural eligibility
-    /// alone (no extra renderer hit-test, exactly as before).
+    /// `requiresConfirmation: false` is the direct-hit self path (admitted by the
+    /// router's own hit). The static P0 harness has no policy/evidence and keeps
+    /// its legacy confirmed/synthetic behaviour.
     private func resolveDelivery(for candidate: Candidate, destination: CGPoint,
                                  res: Resolution,
                                  requiresConfirmation: Bool = true,
                                  allowsSynthetic: Bool) -> DeliveryPlan {
-        // Verdict first, in the same AX order as the pre-refactor branches.
-        let verdict: LegitimacyPolicy.Verdict = requiresConfirmation
-            ? legitimacyVerdict(for: candidate, destination: destination, res: res)
-            : .confirmed
+        let isStatic = res.source == "static"
         let element = cacheStoreForDelivery?.element(for: candidate.key, pid: res.pid)
-        let axPressReady = element.map { AssistTap.axPressEligible($0, role: candidate.role) } ?? false
+        let evidence = isStatic
+            ? ClickAssistEvidence.State.fresh
+            : ClickAssistEvidence.state(evidenceGeneration: candidate.evidenceGeneration,
+                                        currentGeneration: res.generation,
+                                        ageMs: res.ageMs)
+        if requiresConfirmation, evidence != .fresh {
+            return DeliveryPlan(kind: .rejected, element: element, verdict: candidate.verdict,
+                                rejectReason: evidence == .missing
+                                    ? "evidence-missing" : "evidence-expired")
+        }
+        let verdict: LegitimacyPolicy.Verdict = requiresConfirmation
+            ? candidate.verdict : .confirmed
+        let chromeEligible = !isStatic && candidate.chromeEligible
         let evidenceOK = !requiresConfirmation
             || verdict == .confirmed || verdict == .confirmedWeak
-        if evidenceOK, axPressReady, let el = element {
+        if evidenceOK, chromeEligible, let el = element {
             return DeliveryPlan(kind: .axPress(destination), element: el, verdict: verdict,
-                                reasonToken: "unavailable=0")
+                                rejectReason: nil)
         }
         // Strong evidence only: a synthetic click aimed at a weak answer is unsafe.
-        if requiresConfirmation, verdict == .confirmed, allowsSynthetic {
+        // A chrome-eligible target with missing/expired evidence never degrades to
+        // synthetic — it was refused above or stays unavailable here.
+        if requiresConfirmation, verdict == .confirmed, allowsSynthetic, !chromeEligible {
             return DeliveryPlan(kind: .synthetic(destination), element: element,
-                                verdict: verdict, reasonToken: "unavailable=0")
+                                verdict: verdict, rejectReason: nil)
         }
         return DeliveryPlan(kind: .rejected, element: element, verdict: verdict,
-                            reasonToken: evidenceOK ? "unavailable=1"
-                                                    : "verdict=\(verdict.rawValue)")
+                            rejectReason: evidenceOK ? "evidence-missing"
+                                                     : "legitimacy-\(verdict.rawValue)")
     }
 
     /// Diagnostics helper for the no-candidate branch only: the nearest
@@ -384,6 +389,16 @@ final class AssistTap: @unchecked Sendable {
         }
 
         let res = resolution()
+        // Measured callback budget: evidence/route work must stay cheap. Past
+        // 8 ms the event is handed back untouched — this is a guard, never
+        // permission to call AX.
+        let cbUs = (CACurrentMediaTime() - started) * 1_000_000
+        if cbUs > 8_000 {
+            emit("PASSTHROUGH", type: label, original: original, mutated: nil,
+                 reason: "ax-deadline", res: res, started: started,
+                 extra: String(format: "cb_us=%.1f", cbUs))
+            return Unmanaged.passUnretained(event)
+        }
 
         if isDown {
             latched = nil
@@ -441,7 +456,7 @@ final class AssistTap: @unchecked Sendable {
                         // hit's own verdict and logs the other= diagnostics).
                         promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) unavailable=1"
                     } else {
-                        promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) \(plan.reasonToken)"
+                        promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) \(plan.rejectReason ?? "unavailable=1")"
                     }
                 }
                 let hitPlan = resolveDelivery(for: hit, destination: original, res: res,
@@ -504,7 +519,7 @@ final class AssistTap: @unchecked Sendable {
                                                             candidates: res.candidates,
                                                             tolerance: tolerance, limit: 3)
                 var confirmed: [(DecisionCore.ScoredCandidate, CGPoint, DecisionCore.Snap, DeliveryPlan)] = []
-                var firstFailure: (String, LegitimacyPolicy.Verdict)?
+                var firstFailure: (String, LegitimacyPolicy.Verdict, String?)?
                 for choice in scored {
                     let snap = DecisionCore.snapMode(for: choice.candidate)
                     let dest = snap == .center
@@ -518,14 +533,14 @@ final class AssistTap: @unchecked Sendable {
                         confirmed.append((choice, dest, snap, plan))
                     case .rejected:
                         if firstFailure == nil {
-                            firstFailure = (choice.candidate.key, plan.verdict)
+                            firstFailure = (choice.candidate.key, plan.verdict, plan.rejectReason)
                         }
                     }
                 }
                 guard let winner = confirmed.first else {
-                    let failure = firstFailure ?? ("-", .unknown)
+                    let failure = firstFailure ?? ("-", .unknown, nil)
                     emit("PASSTHROUGH", type: label, original: original, mutated: nil,
-                         reason: "legitimacy-\(failure.1.rawValue)", res: res, started: started,
+                         reason: failure.2 ?? "legitimacy-\(failure.1.rawValue)", res: res, started: started,
                          extra: "legitimacy=\(failure.1.rawValue) target=\(failure.0) cands=0 winner=0")
                     return Unmanaged.passUnretained(event)
                 }
@@ -538,22 +553,9 @@ final class AssistTap: @unchecked Sendable {
                 // keeps the exact legacy synthetic path below.
                 let element = plan.element
 
-                // Fresh-frame revalidation: never aim at a moved target. Any AX
-                // failure falls back to the cached rect; drift beyond the
-                // target-relative limit, or loss of half-overlap, cancels the
-                // redirect entirely (passthrough).
-                var corrected = winner.1
-                if let element, let fresh = axFrame(element) {
-                    if AssistTap.frameMoved(best.rect, fresh) {
-                        emit("PASSTHROUGH", type: label, original: original, mutated: nil,
-                             reason: "stale-target", res: res, started: started,
-                             extra: "mode=synthetic target=\(best.key) cached=\(best.rect) fresh=\(fresh) moved=\(String(format: "%.1f", AssistTap.frameDelta(best.rect, fresh))) iou=\(String(format: "%.2f", FrameContinuity.overlapFraction(best.rect, fresh)))")
-                        return Unmanaged.passUnretained(event)
-                    }
-                    corrected = snap == .center
-                        ? DecisionCore.centerPoint(into: fresh)
-                        : DecisionCore.clampPoint(original, into: fresh, inset: best.inset)
-                }
+                // Frame evidence is the PUBLISHED cached rect; the resolver checks
+                // movement/continuity on its own queue. Never refresh here.
+                let corrected = winner.1
 
                 // Chrome-button delivery: structural gate, then EXACTLY ONE
                 // AXPress. Synthetic CGEvents are ignored by Chromium chrome.
@@ -623,32 +625,61 @@ final class AssistTap: @unchecked Sendable {
     /// Delivers one gesture via AXPress: exactly one perform, then latch the
     /// per-gesture token so the matching up (and any drag) is swallowed by the
     /// top-of-handle guard. Shared by the redirect and direct-hit promotion paths.
-    /// Returns false when the element's fresh frame fails the target-relative
-    /// continuity check (drift beyond the size-scaled limit, or < half overlap):
-    /// the caller must then take its fail-closed passthrough path.
+    /// Takes ownership NOW (token + consume the down) and dispatches the AXPress
+    /// to the serial worker. The callback performs no AX: the worker re-checks
+    /// expiry, generation and element identity before activating. Returns true
+    /// (the down is consumed) as soon as ownership is taken.
     @discardableResult
     private func performAXPressDelivery(element: AXUIElement, best: Candidate,
                                         corrected: CGPoint, snap: DecisionCore.Snap,
                                         dist: Double, cands: Int, res: Resolution,
                                         label: String, original: CGPoint,
                                         started: CFTimeInterval, extra: String) -> Bool {
-        if let fresh = axFrame(element), AssistTap.frameMoved(best.rect, fresh) {
-            return false
-        }
-        let result = AXUIElementPerformAction(element, "AXPress" as CFString)
-        pressGestureToken = UUID()
+        let request = AXPressRequest(targetKey: best.key, pid: res.pid,
+                                     generation: res.generation,
+                                     issuedAt: CACurrentMediaTime())
+        pressGestureToken = request.requestID
         latched = nil
         unlatchedForDrag = false
         emit("MUTATE", type: label, original: original, mutated: corrected,
              reason: "redirect", res: res, started: started,
-             extra: "target=\(best.key) dist=\(String(format: "%.1f", dist)) snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(cands) winner=1 \(extra)mode=axpress\(result == .success ? "" : " axpress=failed(\(result.rawValue))")")
+             extra: "target=\(best.key) dist=\(String(format: "%.1f", dist)) snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(cands) winner=1 \(extra)mode=axpress request=\(request.requestID.uuidString)")
+        dispatchAXPress(request: request, element: element)
         return true
+    }
+
+    /// Off-callback activation. NEVER retries via a synthetic event; a rejected
+    /// request simply logs and dies (ownership already consumed the gesture).
+    private func dispatchAXPress(request: AXPressRequest, element: AXUIElement) {
+        let handle = AXElementHandle(element)
+        axWorker.async { [weak self] in
+            guard let self else { return }
+            let snap = self.cacheStoreForDelivery?.current()
+            let currentGeneration = snap?.generation ?? 0
+            let currentElement = self.cacheStoreForDelivery?.element(for: request.targetKey,
+                                                                      pid: request.pid)
+            let identityMatches = currentElement.map { CFEqual($0, handle.element) } ?? false
+            let now = CACurrentMediaTime()
+            if let reject = AXPressGate.rejection(request: request,
+                                                  currentGeneration: currentGeneration,
+                                                  identityMatches: identityMatches,
+                                                  now: now) {
+                let ageMs = (now - request.issuedAt) * 1000
+                self.log(String(format: "AXPRESS_REJECTED reason=%@ target=%@ request=%@ gen=%llu now_gen=%llu age_ms=%.1f",
+                                reject.rawValue as NSString, request.targetKey as NSString,
+                                request.requestID.uuidString as NSString,
+                                request.generation, currentGeneration, ageMs))
+                return
+            }
+            let result = AXUIElementPerformAction(handle.element, "AXPress" as CFString)
+            self.log("AXPRESS_DONE target=\(request.targetKey) request=\(request.requestID.uuidString) success=\(result == .success ? 1 : 0) code=\(result.rawValue)")
+        }
     }
 
     /// Finds the nearest chrome button contained in a direct-hit candidate and
     /// still inside the assist radius. Margin-tolerant: the hit rect is inflated
-    /// by 2 pt. Eligibility is the SAME structural AXPress gate as the redirect
-    /// path, so a web container (AXWebArea in ancestry) never promotes.
+    /// by 2 pt. Eligibility is the PUBLISHED `chromeEligible` evidence — no AX
+    /// read happens here.
     /// `restrictedTo` narrows the search to the candidates an ambiguity tie is
     /// actually about; nil means the caller supplies its own anchor (the
     /// direct-hit branch's containment).
@@ -656,15 +687,13 @@ final class AssistTap: @unchecked Sendable {
                                 containedIn: CGRect?,
                                 restrictedTo: Set<String>? = nil) -> Candidate? {
         let containing = containedIn?.insetBy(dx: -2, dy: -2)
-        let store = cacheStoreForDelivery
         var best: (candidate: Candidate, dist: CGFloat)?
         for c in res.candidates {
             if let restrictedTo, !restrictedTo.contains(c.key) { continue }
             let dist = DecisionCore.boundaryDistance(point, c.rect)
             guard dist <= tolerance else { continue }
             if let containing, !containing.contains(c.rect) { continue }
-            guard let el = store?.element(for: c.key, pid: res.pid),
-                  AssistTap.axPressEligible(el, role: c.role) else { continue }
+            guard c.chromeEligible else { continue }
             if let b = best {
                 let area = c.rect.width * c.rect.height
                 let bestArea = b.candidate.rect.width * b.candidate.rect.height
@@ -676,68 +705,6 @@ final class AssistTap: @unchecked Sendable {
             }
         }
         return best?.candidate
-    }
-
-    /// Structural eligibility: role must be AXButton, the element must still
-    /// advertise AXPress, and its ancestry must reach the window through chrome
-    /// (AXTabGroup / AXToolbar) with NO AXWebArea anywhere on the chain. Any AX
-    /// read error is ambiguous and therefore not eligible. No app/label literals.
-    private static func axPressEligible(_ el: AXUIElement, role: String) -> Bool {
-        guard role == "AXButton" else { return false }
-        AXUIElementSetMessagingTimeout(el, 0.05)
-        // Chromium chrome buttons advertise an EMPTY AXActionNames (measured:
-        // the tab ✕ exposes actions=[]) yet honor AXPress when performed —
-        // verified: AXPress on the ✕ closes the tab. The action-list check is
-        // therefore omitted; eligibility rests on role + structural ancestry +
-        // enabled below (AXPress failure is handled fail-closed at delivery).
-        if let enabled = axAttribute(el, kAXEnabledAttribute) as? Bool, !enabled { return false }
-        return chromeAncestry(el)
-    }
-
-    /// Walk element -> window. Eligible only when an AXTabGroup or AXToolbar
-    /// ancestor is present and no AXWebArea appears at any point. A nil/odd role
-    /// or a failing parent read is treated as ambiguous -> false.
-    private static func chromeAncestry(_ el: AXUIElement) -> Bool {
-        var node: AXUIElement? = el
-        var sawChrome = false
-        var depth = 0
-        while let current = node, depth < 64 {
-            depth += 1
-            guard let role = axAttribute(current, kAXRoleAttribute) as? String else { return false }
-            if role == "AXWebArea" { return false }
-            if role == "AXTabGroup" || role == "AXToolbar" { sawChrome = true }
-            if role == "AXWindow" { break }
-            guard let parent = axAttribute(current, kAXParentAttribute),
-                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
-            node = (parent as! AXUIElement)
-        }
-        return sawChrome
-    }
-
-    private static func axAttribute(_ el: AXUIElement, _ name: String) -> CFTypeRef? {
-        var v: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, name as CFString, &v) == .success else { return nil }
-        return v
-    }
-
-    /// Fresh global frame (top-left space, same as CGEvent/AXPosition). nil on any
-    /// AX failure so callers fall back to the cached rect.
-    private func axFrame(_ el: AXUIElement) -> CGRect? {
-        AXUIElementSetMessagingTimeout(el, 0.05)
-        // Single validated reader: a non-finite frame must never reach
-        // centerPoint → event.location (inf − inf = NaN crashed the overlay).
-        return AXGeometry.frame(el)
-    }
-
-    /// Largest per-edge movement between two frames (pt).
-    private static func frameDelta(_ a: CGRect, _ b: CGRect) -> CGFloat {
-        FrameContinuity.delta(a, b)
-    }
-
-    /// Target-relative continuity check (see FrameContinuity.moved): drift beyond
-    /// min(24, max(6, 0.25 * min(w, h))) OR loss of half-overlap cancels a redirect.
-    private static func frameMoved(_ a: CGRect, _ b: CGRect) -> Bool {
-        FrameContinuity.moved(a, b)
     }
 
     private func emit(_ kind: String, type: String, original: CGPoint, mutated: CGPoint?,

@@ -72,15 +72,24 @@ enum DecisionCore {
         /// Accessible name evidence (title/description). Unnamed candidates are
         /// legitimate but are demoted visually — a weak ghost signal, never a veto.
         let label: String
+        /// Evidence published by the resolver for the targets NEAREST the pointer.
+        /// The tap reads these; it never computes them (no AX on the callback).
+        let verdict: LegitimacyPolicy.Verdict
+        let chromeEligible: Bool
+        let evidenceGeneration: UInt64
 
         init(key: String, rect: CGRect, inset: CGFloat, tier: Tier, role: String = "",
-             label: String = "") {
+             label: String = "", verdict: LegitimacyPolicy.Verdict = .unknown,
+             chromeEligible: Bool = false, evidenceGeneration: UInt64 = 0) {
             self.key = key
             self.rect = rect
             self.inset = inset
             self.tier = tier
             self.role = role
             self.label = label
+            self.verdict = verdict
+            self.chromeEligible = chromeEligible
+            self.evidenceGeneration = evidenceGeneration
         }
     }
 
@@ -582,4 +591,74 @@ struct GestureLatch: Sendable {
     let target: String
     let snap: DecisionCore.Snap
     let edgeCore: Bool
+}
+
+/// Published-evidence freshness. ONE constant shared by resolver and tap: the
+/// resolver stamps evidence with the cycle generation, the tap only reads it.
+enum ClickAssistEvidence {
+    /// Evidence older than this, or from another generation, is unusable.
+    static let maxAgeMs: Double = 400
+
+    enum State: String, Sendable {
+        case fresh
+        case missing
+        case stale
+        case wrongGeneration = "wrong-generation"
+    }
+
+    static func state(evidenceGeneration: UInt64, currentGeneration: UInt64,
+                      ageMs: Double) -> State {
+        if evidenceGeneration == 0 { return currentGeneration == 0 ? .fresh : .missing }
+        if evidenceGeneration != currentGeneration { return .wrongGeneration }
+        if ageMs > maxAgeMs { return .stale }
+        return .fresh
+    }
+}
+
+/// One off-callback AXPress activation request. Pure value, testable.
+struct AXPressRequest: Sendable {
+    let requestID: UUID
+    let targetKey: String
+    let pid: pid_t
+    let generation: UInt64
+    let issuedAt: CFTimeInterval
+    let expiryMs: Double
+
+    init(requestID: UUID = UUID(), targetKey: String, pid: pid_t, generation: UInt64,
+         issuedAt: CFTimeInterval, expiryMs: Double = AXPressGate.defaultExpiryMs) {
+        self.requestID = requestID
+        self.targetKey = targetKey
+        self.pid = pid
+        self.generation = generation
+        self.issuedAt = issuedAt
+        self.expiryMs = expiryMs
+    }
+}
+
+/// The worker's pre-activation gate. Never retries via synthetic.
+enum AXPressGate {
+    static let defaultExpiryMs: Double = 150
+
+    enum Rejection: String, Sendable {
+        case expired
+        case staleGeneration = "stale-generation"
+        case identityMismatch = "identity-mismatch"
+    }
+
+    static func rejection(request: AXPressRequest, currentGeneration: UInt64,
+                          identityMatches: Bool, now: CFTimeInterval) -> Rejection? {
+        if (now - request.issuedAt) * 1000 > request.expiryMs { return .expired }
+        if request.generation != currentGeneration { return .staleGeneration }
+        if !identityMatches { return .identityMismatch }
+        return nil
+    }
+}
+
+/// Gesture ownership is independent of activation outcome: once an AXPress token
+/// is taken the tap consumes the rest of the gesture (drags and the matching up).
+enum GestureOwnership {
+    static func consumes(tokenActive: Bool, isDown: Bool, isDrag: Bool, isUp: Bool) -> Bool {
+        guard tokenActive else { return false }
+        return isDrag || isUp
+    }
 }

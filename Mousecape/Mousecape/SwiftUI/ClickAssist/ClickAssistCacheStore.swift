@@ -16,6 +16,11 @@ struct CachedTarget: Sendable {
     /// genuine control role; second-class = container admitted by the tile/row
     /// size envelope only.
     let tier: DecisionCore.Tier
+    /// Published evidence (resolver background queue, top-3 nearest only). The tap
+    /// consumes these values; it never refreshes them with an AX call.
+    var verdict: LegitimacyPolicy.Verdict = .unknown
+    var chromeEligible: Bool = false
+    var evidenceGeneration: UInt64 = 0
 }
 
 /// Immutable snapshot published by the background resolver and read by the tap.

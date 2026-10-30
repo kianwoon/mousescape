@@ -193,13 +193,12 @@ final class ClickAssistEngine {
             debugLog("[ClickAssist] \(line)")
         }
         t.targetSource = .cache(cache)
-        t.legitimacy = legitimacy
         guard t.start(point: .cghidEventTap) else {
             debugLog("[ClickAssist] ENGINE_PAUSED reason=tap-create-failed")
             return
         }
         tap = t
-        let r = AccessibilityResolver(cache: cache) { line in
+        let r = AccessibilityResolver(cache: cache, legitimacy: legitimacy) { line in
             debugLog("[ClickAssist] \(line)")
         }
         resolver = r

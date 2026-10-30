@@ -24,6 +24,9 @@ final class AccessibilityResolver: @unchecked Sendable {
 
     private let cache: CacheStore
     private let log: (String) -> Void
+    /// The ONE legitimacy policy shared with the overlay. Called ONLY on this
+    /// resolver queue (background) — never from the tap callback.
+    private let legitimacy: LegitimacyPolicy?
     private let queue = DispatchQueue(label: "clickassist.resolver", qos: .utility)
 
     private let stateLock = NSLock()
@@ -190,8 +193,10 @@ final class AccessibilityResolver: @unchecked Sendable {
         }
     }
 
-    init(cache: CacheStore, log: @escaping (String) -> Void) {
+    init(cache: CacheStore, legitimacy: LegitimacyPolicy? = nil,
+         log: @escaping (String) -> Void) {
         self.cache = cache
+        self.legitimacy = legitimacy
         self.log = log
     }
 
@@ -679,6 +684,32 @@ final class AccessibilityResolver: @unchecked Sendable {
         let ms = (CACurrentMediaTime() - t0) * 1000
         let visited = Self.nodeBudget - budget
         let gen = nextGeneration()
+        // Publish evidence for the THREE targets nearest the pointer — the same
+        // set the router can consider. Bounded: at most 3 hit-tests + 3 ancestry
+        // walks per cycle; everything else publishes without evidence.
+        if let legitimacy {
+            let nearest = out.indices
+                .sorted { Self.boundaryDistance(pointer, out[$0].rect)
+                        < Self.boundaryDistance(pointer, out[$1].rect) }
+                .prefix(3)
+            let siblings = out.filter { $0.tier == .firstClass }.map(\.rect)
+            for idx in nearest {
+                let target = out[idx]
+                guard let el = elementRefs[target.key] else { continue }
+                let probe = DecisionCore.Candidate(key: target.key, rect: target.rect,
+                                                   inset: target.inset, tier: target.tier,
+                                                   role: target.role, label: target.label)
+                let destination = DecisionCore.snapMode(for: probe) == .center
+                    ? DecisionCore.centerPoint(into: target.rect)
+                    : DecisionCore.clampPoint(pointer, into: target.rect, inset: target.inset)
+                out[idx].verdict = legitimacy.validate(
+                    pid: pid, generation: gen, key: target.key, candidate: target.rect,
+                    candidateRole: target.role, destination: destination,
+                    siblings: siblings.filter { $0 != target.rect })
+                out[idx].chromeEligible = chromeEligible(el, role: target.role)
+                out[idx].evidenceGeneration = gen
+            }
+        }
         let snap = CacheSnapshot(generation: gen, targets: out, valid: true, reason: "fresh",
                                  stamp: CACurrentMediaTime(), resolverMs: ms, pointer: pointer,
                                  appName: appName, pid: pid)
@@ -1388,6 +1419,29 @@ final class AccessibilityResolver: @unchecked Sendable {
     private func stringAttr(_ el: AXUIElement, _ name: String) -> String? {
         guard let raw = attr(el, name), CFGetTypeID(raw) == CFStringGetTypeID() else { return nil }
         return (raw as! CFString) as String
+    }
+
+    /// Structural AXPress eligibility, computed on this background queue: role is
+    /// AXButton, the control is enabled, and its ancestry reaches the window
+    /// through chrome (AXTabGroup / AXToolbar) with no AXWebArea anywhere.
+    private func chromeEligible(_ el: AXUIElement, role: String) -> Bool {
+        guard role == "AXButton" else { return false }
+        AXUIElementSetMessagingTimeout(el, 0.05)
+        if let enabled = attr(el, kAXEnabledAttribute) as? Bool, !enabled { return false }
+        var node: AXUIElement? = el
+        var sawChrome = false
+        var depth = 0
+        while let current = node, depth < 64 {
+            depth += 1
+            guard let r = stringAttr(current, kAXRoleAttribute) else { return false }
+            if r == "AXWebArea" { return false }
+            if r == "AXTabGroup" || r == "AXToolbar" { sawChrome = true }
+            if r == "AXWindow" { break }
+            guard let parent = attr(current, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            node = (parent as! AXUIElement)
+        }
+        return sawChrome
     }
 
     private func axArray(_ raw: CFTypeRef) -> [AXUIElement]? {
