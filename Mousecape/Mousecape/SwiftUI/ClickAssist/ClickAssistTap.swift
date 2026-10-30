@@ -1,5 +1,6 @@
 // baseline-guard:allow new standalone prototype file, no prior baseline possible
 import ApplicationServices
+import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
 import QuartzCore
@@ -42,6 +43,11 @@ final class AssistTap: @unchecked Sendable {
     /// rest of that gesture (drag/up) is swallowed, so AXPress can never pair with
     /// a synthetic event. The token also guarantees one AXPress per gesture.
     private var pressGestureToken: UUID?
+    /// Set when a gesture's DOWN failed the conservative support gate (non-primary
+    /// button, modifier, multi-click, or secure input). Every later event of that
+    /// gesture stays a passthrough: a gesture that began unsupported stays
+    /// unsupported end-to-end.
+    private var gestureUnsupported = false
 
     var assistEnabled = true
     private(set) var tolerance: CGFloat
@@ -281,6 +287,40 @@ final class AssistTap: @unchecked Sendable {
         let started = CACurrentMediaTime()
         let original = event.location
         let label = AssistTap.name(type)
+        let button = event.getIntegerValueField(.mouseEventButtonNumber)
+        let clicks = event.getIntegerValueField(.mouseEventClickState)
+        let gestureFlags = event.flags.intersection(
+            [.maskCommand, .maskControl, .maskAlternate, .maskShift])
+        let observed = "btn=\(button) flags=0x\(String(gestureFlags.rawValue, radix: 16)) clicks=\(clicks)"
+
+        // Secure input: a password prompt must never receive a relocated click,
+        // and secure input is the system-wide signal for it. Evaluated per event
+        // (cheap), never polled.
+        if IsSecureEventInputEnabled() {
+            if isDown { gestureUnsupported = true }
+            if isUp { gestureUnsupported = false; pressGestureToken = nil }
+            emit("PASSTHROUGH", type: label, original: original, mutated: nil,
+                 reason: "secure-input", res: resolution(), started: started,
+                 extra: observed)
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Conservative gesture gate: assist ONLY a plain primary single click.
+        // AXPress and coordinate relocation cannot faithfully reproduce modifier
+        // or multi-click semantics, so assisting them risks a wrong activation;
+        // they must stay native. A gesture that began unsupported stays
+        // unsupported end-to-end (its drags and up pass through too).
+        let supported = button == 0 && gestureFlags.isEmpty && clicks <= 1
+        let continuedUnsupported = gestureUnsupported && !isDown
+        if !supported || continuedUnsupported {
+            if isDown { gestureUnsupported = true }
+            if isUp { gestureUnsupported = false; pressGestureToken = nil }
+            emit("PASSTHROUGH", type: label, original: original, mutated: nil,
+                 reason: "gesture-unsupported", res: resolution(), started: started,
+                 extra: observed + (continuedUnsupported ? " continuity=1" : ""))
+            return Unmanaged.passUnretained(event)
+        }
+        if isDown { gestureUnsupported = false }
 
         // AXPress gesture consumption: the down that fired AXPress was swallowed,
         // so its drags and matching up must be swallowed too. Returning nil from
@@ -463,14 +503,15 @@ final class AssistTap: @unchecked Sendable {
                 let element = plan.element
 
                 // Fresh-frame revalidation: never aim at a moved target. Any AX
-                // failure falls back to the cached rect; a material move (> 24 pt
-                // on any edge) cancels the redirect entirely (passthrough).
+                // failure falls back to the cached rect; drift beyond the
+                // target-relative limit, or loss of half-overlap, cancels the
+                // redirect entirely (passthrough).
                 var corrected = winner.1
                 if let element, let fresh = axFrame(element) {
                     if AssistTap.frameMoved(best.rect, fresh) {
                         emit("PASSTHROUGH", type: label, original: original, mutated: nil,
                              reason: "stale-target", res: res, started: started,
-                             extra: "mode=synthetic target=\(best.key) cached=\(best.rect) fresh=\(fresh) moved=\(String(format: "%.1f", AssistTap.frameDelta(best.rect, fresh)))")
+                             extra: "mode=synthetic target=\(best.key) cached=\(best.rect) fresh=\(fresh) moved=\(String(format: "%.1f", AssistTap.frameDelta(best.rect, fresh))) iou=\(String(format: "%.2f", FrameContinuity.overlapFraction(best.rect, fresh)))")
                         return Unmanaged.passUnretained(event)
                     }
                     corrected = snap == .center
@@ -545,8 +586,9 @@ final class AssistTap: @unchecked Sendable {
     /// Delivers one gesture via AXPress: exactly one perform, then latch the
     /// per-gesture token so the matching up (and any drag) is swallowed by the
     /// top-of-handle guard. Shared by the redirect and direct-hit promotion paths.
-    /// Returns false when the element's fresh frame moved materially (> 24 pt on
-    /// any edge): the caller must then take its fail-closed passthrough path.
+    /// Returns false when the element's fresh frame fails the target-relative
+    /// continuity check (drift beyond the size-scaled limit, or < half overlap):
+    /// the caller must then take its fail-closed passthrough path.
     @discardableResult
     private func performAXPressDelivery(element: AXUIElement, best: Candidate,
                                         corrected: CGPoint, snap: DecisionCore.Snap,
@@ -652,12 +694,13 @@ final class AssistTap: @unchecked Sendable {
 
     /// Largest per-edge movement between two frames (pt).
     private static func frameDelta(_ a: CGRect, _ b: CGRect) -> CGFloat {
-        max(max(abs(a.minX - b.minX), abs(a.maxX - b.maxX)),
-            max(abs(a.minY - b.minY), abs(a.maxY - b.maxY)))
+        FrameContinuity.delta(a, b)
     }
 
+    /// Target-relative continuity check (see FrameContinuity.moved): drift beyond
+    /// min(24, max(6, 0.25 * min(w, h))) OR loss of half-overlap cancels a redirect.
     private static func frameMoved(_ a: CGRect, _ b: CGRect) -> Bool {
-        frameDelta(a, b) > 24
+        FrameContinuity.moved(a, b)
     }
 
     private func emit(_ kind: String, type: String, original: CGPoint, mutated: CGPoint?,

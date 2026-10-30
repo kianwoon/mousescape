@@ -276,6 +276,37 @@ final class ClickAssistCoreTests: XCTestCase {
             }
         }
     }
+
+    // MARK: - G. target-relative movement rule (frameMoved)
+
+    /// Small control: 16x16 tolerates 3 pt of drift, cancels at 6 pt.
+    func testG1_smallControlToleratesThreeNotSix() {
+        let base = rect(100, 100, 16, 16)
+        XCTAssertFalse(FrameContinuity.moved(base, base.offsetBy(dx: 3, dy: 0)))
+        XCTAssertTrue(FrameContinuity.moved(base, base.offsetBy(dx: 6, dy: 0)))
+    }
+
+    /// Large control: 400x400 tolerates 10 pt, cancels at 30 pt (never more than 24).
+    func testG2_largeControlToleratesTenNotThirty() {
+        let base = rect(100, 100, 400, 400)
+        XCTAssertFalse(FrameContinuity.moved(base, base.offsetBy(dx: 10, dy: 0)))
+        XCTAssertTrue(FrameContinuity.moved(base, base.offsetBy(dx: 30, dy: 0)))
+    }
+
+    /// An unchanged frame is the same control.
+    func testG3_identicalRectAllowed() {
+        let base = rect(50, 60, 120, 40)
+        XCTAssertFalse(FrameContinuity.moved(base, base))
+    }
+
+    /// Identity continuity: overlap below half the smaller area cancels even when
+    /// the two frames share an origin (here the control changed shape, overlap 0.25).
+    func testG4_lowOverlapCancelsRegardlessOfDistance() {
+        let cached = rect(100, 100, 400, 100)
+        let fresh = rect(100, 100, 100, 400)
+        XCTAssertLessThan(FrameContinuity.overlapFraction(cached, fresh), 0.5)
+        XCTAssertTrue(FrameContinuity.moved(cached, fresh), "lost identity must cancel")
+    }
 }
 
 /// Deterministic RNG so a failure is reproducible from the seed alone.

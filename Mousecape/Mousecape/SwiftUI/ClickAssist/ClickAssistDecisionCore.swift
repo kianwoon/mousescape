@@ -543,3 +543,33 @@ final class LegitimacyPolicy: @unchecked Sendable {
         lock.unlock()
     }
 }
+
+/// Identity continuity for a control seen twice (cached rect vs a fresh AX rect).
+/// Pure geometry, shared by the live tap and the headless suite.
+enum FrameContinuity {
+    /// Largest per-edge movement between two frames (pt).
+    static func delta(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        max(max(abs(a.minX - b.minX), abs(a.maxX - b.maxX)),
+            max(abs(a.minY - b.minY), abs(a.maxY - b.maxY)))
+    }
+
+    /// Intersection area as a fraction of the SMALLER rect's area (IoU-style
+    /// lower bound). 0 when the frames are disjoint; 1 when one contains the other.
+    static func overlapFraction(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let smaller = min(a.width * a.height, b.width * b.height)
+        guard smaller > 0 else { return 0 }
+        let inter = a.intersection(b)
+        guard !inter.isNull else { return 0 }
+        return (inter.width * inter.height) / smaller
+    }
+
+    /// Target-relative drift tolerance: a small control tolerates little movement
+    /// (down to 6 pt) and a large one more (up to 24 pt). A redirect is cancelled
+    /// at or beyond `limit`, OR when the fresh frame lost identity continuity
+    /// (overlap below half of the smaller area): a moved-but-overlapping frame is
+    /// the same control, a disjoint one is a different control.
+    static func moved(_ a: CGRect, _ b: CGRect) -> Bool {
+        let limit = min(24, max(6, 0.25 * min(a.width, a.height)))
+        return delta(a, b) >= limit || overlapFraction(a, b) < 0.5
+    }
+}
