@@ -24,6 +24,11 @@ struct SnapshotWire: Codable, Equatable, Sendable {
     var pid: Int32
     var valid: Bool
     var reason: String
+    /// Diagnostics + client-side reasoning: where the resolver's pointer sample
+    /// was and which app the snapshot describes. Optional for wire compatibility.
+    var pointerX: Double?
+    var pointerY: Double?
+    var appName: String?
     var targets: [SnapshotWireTarget]
 
     init(epoch: String, generation: UInt64, publishedAt: Double,
@@ -151,6 +156,9 @@ extension SnapshotWire {
                   valid: snapshot.valid,
                   reason: snapshot.reason,
                   targets: snapshot.targets.map(SnapshotWireTarget.init))
+        self.pointerX = Double(snapshot.pointer.x)
+        self.pointerY = Double(snapshot.pointer.y)
+        self.appName = snapshot.appName
     }
 
     /// Materialize the local immutable snapshot the tap/overlay consume. `stamp`

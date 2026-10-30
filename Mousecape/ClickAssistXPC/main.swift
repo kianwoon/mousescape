@@ -11,8 +11,25 @@
 import AppKit
 import Foundation
 
+/// The service must log where the AGENT logs: the resolver's diagnostics
+/// (RESOLVER_PUBLISH / rejections) are the only way to see why a candidate is
+/// missing, and os_log from an XPC service is invisible to the agent's file log.
+private let svcLogURL = FileManager.default
+    .homeDirectoryForCurrentUser
+    .appendingPathComponent("Library/Logs/Mousecape/ClickAssistAgent.log")
+private let svcLogLock = NSLock()
+
 private func svcLog(_ line: String) {
     NSLog("ClickAssistResolver: %@", line)
+    let stamp = ISO8601DateFormatter().string(from: Date())
+    let row = "\(stamp) [ClickAssist] \(line)\n"
+    svcLogLock.lock()
+    defer { svcLogLock.unlock() }
+    if let h = try? FileHandle(forWritingTo: svcLogURL) {
+        h.seekToEndOfFile()
+        h.write(row.data(using: .utf8) ?? Data())
+        try? h.close()
+    }
 }
 
 // MARK: - Per-connection coalescing sender

@@ -1242,7 +1242,18 @@ final class AccessibilityResolver: @unchecked Sendable {
         let admittedRole = cls == .pressGroup ? "AXPressGroup" : role
         let ident = stringAttr(el, kAXIdentifierAttribute)
         let title = stringAttr(el, kAXTitleAttribute)
-        let key = ident ?? title ?? "\(admittedRole)@\(Int(rect.minX)),\(Int(rect.minY))"
+        // IDENTITY: a label alone is not an identity. "Close" names every tab
+        // ✕ in every window, so a label-keyed union silently keeps ONE of them —
+        // observed live: the snapshot carried only a Close 162 pt away in another
+        // window and the hovered ✕ never reached the ring. Without an explicit
+        // AXIdentifier the key always carries the frame origin, making every
+        // element distinct while staying stable across cycles of the same element.
+        let key: String
+        if let ident, !ident.isEmpty {
+            key = ident
+        } else {
+            key = "\(title ?? admittedRole)@\(Int(rect.minX)),\(Int(rect.minY))"
+        }
         let label = title ?? stringAttr(el, kAXDescriptionAttribute) ?? role
         // Tier comes from the policy class: control roles and capability-admitted
         // press groups are first-class; envelope-only admissions are second-class.

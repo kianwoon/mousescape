@@ -51,6 +51,7 @@ final class ClickAssistServiceClient: @unchecked Sendable {
     /// payloads can be dropped without trusting the service to self-police.
     private var currentEpoch: String?
     private var currentGeneration: UInt64 = 0
+    private var lastNearDiagAt: CFTimeInterval = 0
     private var lastSnapshotAt: CFTimeInterval = 0
     private var evidenceMarkedInvalid = false
     private var silenceHandled = false
@@ -232,6 +233,25 @@ final class ClickAssistServiceClient: @unchecked Sendable {
             evidenceMarkedInvalid = false
             silenceHandled = false
             breaker.recordSuccess(now: now)
+            // Diagnostics: what the SERVICE actually published nearest the pointer.
+            // Answers "is the target in the snapshot at all, and what outranks it"
+            // without needing the service's own log sink. Throttled to ~2/s.
+            let now2 = CACurrentMediaTime()
+            if now2 - lastNearDiagAt > 0.5 {
+                lastNearDiagAt = now2
+                let ptr = CGPoint(x: decoded.wire.pointerX ?? 0, y: decoded.wire.pointerY ?? 0)
+                let near = decoded.wire.targets
+                    .map { (key: $0.key, dist: DecisionCore.boundaryDistance(ptr, CGRect(x: $0.rect.x, y: $0.rect.y, width: $0.rect.w, height: $0.rect.h))) }
+                    .sorted { $0.dist < $1.dist }
+                    .prefix(3)
+                    .map { "\($0.key):\(String(format: "%.1f", $0.dist))" }
+                    .joined(separator: ",")
+                let closeInfo: String = decoded.wire.targets
+                    .filter { $0.key == "Close" }
+                    .map { "Close@(\(Int($0.rect.x)),\(Int($0.rect.y)))d=\(String(format: "%.1f", DecisionCore.boundaryDistance(ptr, CGRect(x: $0.rect.x, y: $0.rect.y, width: $0.rect.w, height: $0.rect.h))))" }
+                    .joined(separator: "|")
+                log("SNAP_NEAR app=\(decoded.wire.appName ?? "-") pid=\(decoded.wire.pid) pointer=(\(Int(ptr.x)),\(Int(ptr.y))) targets=\(decoded.wire.targets.count) close=[\(closeInfo.isEmpty ? "absent" : closeInfo)] n3=[\(near)]")
+            }
             cache.publish(decoded.wire.cacheSnapshot())
             log(String(format: "XPC_SNAPSHOT_RX targets=%d bytes=%d epoch=%@ age_ms=%.1f",
                        decoded.wire.targets.count, data.count,
