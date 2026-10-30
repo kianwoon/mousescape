@@ -128,6 +128,7 @@
 		D1A0000000000000000000CC /* ClickAssistCircuitBreaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000AD /* ClickAssistCircuitBreaker.swift */; };
 		D1A0000000000000000000CD /* ClickAssistServiceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A0000000000000000000B3 /* ClickAssistServiceClient.swift */; };
 		D1A0000000000000000000CE /* ClickAssistActivationGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000AC /* ClickAssistActivationGate.swift */; };
+		D1A0000000000000000000CF /* ClickAssistLatency.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000AE /* ClickAssistLatency.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -220,6 +221,7 @@
 		C1A0000000000000000000AB /* ClickAssistSnapshotCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistSnapshotCodec.swift; sourceTree = "<group>"; };
 		C1A0000000000000000000AC /* ClickAssistActivationGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistActivationGate.swift; sourceTree = "<group>"; };
 		C1A0000000000000000000AD /* ClickAssistCircuitBreaker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistCircuitBreaker.swift; sourceTree = "<group>"; };
+		C1A0000000000000000000AE /* ClickAssistLatency.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistLatency.swift; sourceTree = "<group>"; };
 		D1A0000000000000000000B3 /* ClickAssistServiceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistServiceClient.swift; sourceTree = "<group>"; };
 		7A5B757C0780EA0A10BF1469 /* main.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		CF122E4B298E5744EE9F0578 /* mousecloak-Bridging-Header.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = "mousecloak-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -426,6 +428,7 @@
 				C1A0000000000000000000AB /* ClickAssistSnapshotCodec.swift */,
 				C1A0000000000000000000AC /* ClickAssistActivationGate.swift */,
 				C1A0000000000000000000AD /* ClickAssistCircuitBreaker.swift */,
+				C1A0000000000000000000AE /* ClickAssistLatency.swift */,
 			);
 			path = ClickAssist;
 			sourceTree = "<group>";
@@ -961,6 +964,7 @@
 				D1A0000000000000000000CC /* ClickAssistCircuitBreaker.swift in Sources */,
 				D1A0000000000000000000CD /* ClickAssistServiceClient.swift in Sources */,
 				D1A0000000000000000000CE /* ClickAssistActivationGate.swift in Sources */,
+				D1A0000000000000000000CF /* ClickAssistLatency.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

@@ -56,6 +56,9 @@ final class AssistTap: @unchecked Sendable {
     var assistEnabled = true
     private(set) var tolerance: CGFloat
     let log: (String) -> Void
+    /// Passive callback-duration ring. Written on the tap thread, read/sorted by
+    /// the engine's off-callback stats timer.
+    let latency = LatencyRing()
 
     var targetSource: TargetSource = .staticTargets([])
 
@@ -291,6 +294,7 @@ final class AssistTap: @unchecked Sendable {
             // duplicate activation survives. With the state cleared, the tap stays
             // in native passthrough until a fresh down arrives.
             let reason = type == .tapDisabledByTimeout ? "timeout" : "user-input"
+            latency.noteTapDisable(timeout: type == .tapDisabledByTimeout)
             latched = nil
             unlatchedForDrag = false
             pressGestureToken = nil
@@ -311,6 +315,7 @@ final class AssistTap: @unchecked Sendable {
         guard isDown || isUp || isDrag else { return Unmanaged.passUnretained(event) }
 
         let started = CACurrentMediaTime()
+        defer { latency.record((CACurrentMediaTime() - started) * 1_000_000) }
         let original = event.location
         let label = AssistTap.name(type)
         let button = event.getIntegerValueField(.mouseEventButtonNumber)

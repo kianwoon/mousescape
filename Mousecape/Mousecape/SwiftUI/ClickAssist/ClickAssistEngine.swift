@@ -37,6 +37,9 @@ final class ClickAssistEngine {
     private var trustPromptRequested = false
     private var prefObserverRegistered = false
     private var cacheObserverInstalled = false
+    /// Off-callback exporter: drains the tap's latency ring every 5 s while the
+    /// engine runs. Never runs on the tap thread.
+    private var statsTimer: Timer?
 
     private init() {
         self.config = prefs.readConfig()
@@ -205,10 +208,12 @@ final class ClickAssistEngine {
         }
         tap = t
         client.start()
+        startStatsTimer(for: t)
         if config.indicatorEnabled { startOverlay() }
     }
 
     private func stopEngine() {
+        stopStatsTimer()
         serviceClient?.stop()
         serviceClient = nil
         tap?.stop()
@@ -216,6 +221,30 @@ final class ClickAssistEngine {
         stopOverlay()
     }
 
+    /// Drains the tap's latency ring. Runs on the MAIN run loop, not a utility
+    /// queue: the engine is MainActor-isolated (Swift 6) and any background
+    /// closure touching it traps in dispatch_assert_queue — measured twice.
+    /// The tap never waits on this: it only writes into the ring's preallocated
+    /// buffer, and the drain sorts a copy every 5 s.
+    private func startStatsTimer(for tap: AssistTap) {
+        stopStatsTimer()
+        let ring = tap.latency
+        let timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+            let s = ring.snapshotAndReset()
+            guard s.count > 0 else { return }
+            debugLog(String(format: "CB_STATS count=%d p50_us=%.0f p99_us=%.0f p99_9_us=%.0f max_us=%.0f dropped=%llu tap_disable_timeout=%llu tap_disable_user_input=%llu",
+                            s.count, s.p50Us, s.p99Us, s.p99_9Us, s.maxUs,
+                            s.dropped, s.tapDisableTimeout, s.tapDisableUserInput))
+            _ = self
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        statsTimer = timer
+    }
+
+    private func stopStatsTimer() {
+        statsTimer?.invalidate()
+        statsTimer = nil
+    }
     private func applyToleranceChange(from old: CGFloat) {
         tap?.setTolerance(config.tolerancePoints)
         overlay?.setTolerance(config.tolerancePoints)

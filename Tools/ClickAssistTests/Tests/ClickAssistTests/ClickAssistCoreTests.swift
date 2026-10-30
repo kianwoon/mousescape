@@ -423,3 +423,25 @@ private struct SeededGenerator: RandomNumberGenerator {
         return state
     }
 }
+
+// MARK: - Candidate identity collision (guards the tab-✕ regression)
+
+/// Every browser tab ✕ is labelled "Close". Label-only keys collapsed them into
+/// one candidate, so the hovered ✕ was replaced by a sibling in another window and
+/// the ring vanished. Identity must be per-element.
+final class ClickAssistIdentityTests: XCTestCase {
+    private func cand(_ key: String, _ r: CGRect) -> DecisionCore.Candidate {
+        DecisionCore.Candidate(key: key, rect: r, inset: 2, tier: .firstClass, role: "AXButton")
+    }
+
+    func testSameLabelDifferentFramesBothSurviveAndPointerWins() {
+        let near = cand("Close@100,100", CGRect(x: 100, y: 100, width: 16, height: 16))
+        let far = cand("Close@400,400", CGRect(x: 400, y: 400, width: 16, height: 16))
+        let decision = DecisionCore.route(point: CGPoint(x: 108, y: 108),
+                                         candidates: [far, near], tolerance: 12)
+        guard case .directHit(let hit, _) = decision else {
+            return XCTFail("expected a direct hit on the near close button")
+        }
+        XCTAssertEqual(hit.key, "Close@100,100")
+    }
+}
