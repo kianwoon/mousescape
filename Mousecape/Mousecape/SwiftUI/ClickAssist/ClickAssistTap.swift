@@ -50,6 +50,15 @@ final class AssistTap: @unchecked Sendable {
     /// Serial worker for AXPress activation. AX runs HERE, never on the callback.
     private let axWorker = DispatchQueue(label: "clickassist.axpress.worker",
                                          qos: .userInitiated)
+    /// Bounded in-flight press accounting + last-activation dedup, all under one
+    /// short O(1) lock (held on the callback only for counter updates).
+    private let pressLock = NSLock()
+    private var pendingPresses = 0
+    private var lastPressTarget: String?
+    private var lastPressIssuedAt: CFTimeInterval?
+    /// The callback's own last successfully read snapshot: the non-blocking read
+    /// path returns it when the publish lock is contended.
+    private var lastSnapshot = CacheSnapshot.empty
 
     /// Sendable carrier for an AX element reference crossing to the worker queue.
     private final class AXElementHandle: @unchecked Sendable {
@@ -128,7 +137,7 @@ final class AssistTap: @unchecked Sendable {
         source = s
         CFRunLoopAddSource(CFRunLoopGetMain(), s, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
-        log("TAP_ACTIVE mutable=defaultTap point=\(point == .cghidEventTap ? "hid" : "session") tolerance=\(tolerance)")
+        log("TAP_ACTIVE mutable=defaultTap point=\(point == .cghidEventTap ? "hid" : "session") tolerance=\(tolerance) snapshotMiss=\(cacheStoreForDelivery?.snapshotTrylockMiss ?? 0)")
         // Runtime invariant marker: the callback is a pure snapshot consumer; AX
         // runs only on the resolver queue (evidence) and the serial worker (press).
         log("TAP_AX_FREE invariant=callback-zero-ax evidenceMaxAgeMs=\(Int(ClickAssistEvidence.maxAgeMs)) pressExpiryMs=\(Int(AXPressGate.defaultExpiryMs))")
@@ -179,7 +188,7 @@ final class AssistTap: @unchecked Sendable {
                               valid: true, reason: "static", generation: 0, ageMs: 0,
                               source: "static", pid: 0)
         case .cache(let store):
-            let s = store.current()
+            let s = store.current(else: &lastSnapshot)
             let ageMs = (CACurrentMediaTime() - s.stamp) * 1000
             let fresh = s.valid && ageMs <= DecisionCore.cacheMaxAge * 1000
             let reason = s.valid ? (fresh ? "fresh" : String(format: "stale:age(%.0fms)", ageMs)) : s.reason
@@ -648,13 +657,38 @@ final class AssistTap: @unchecked Sendable {
         return true
     }
 
-    /// Off-callback activation. NEVER retries via a synthetic event; a rejected
-    /// request simply logs and dies (ownership already consumed the gesture).
+    /// Off-callback activation. Admission (queue bound + dedup) is decided BEFORE
+    /// enqueue; the worker releases its slot on every exit path. NEVER retries via
+    /// a synthetic event; a rejected request logs and dies (ownership already
+    /// consumed the gesture).
     private func dispatchAXPress(request: AXPressRequest, element: AXUIElement) {
+        pressLock.lock()
+        let decision = AXPressAdmission.evaluate(
+            targetKey: request.targetKey, now: request.issuedAt,
+            lastTarget: lastPressTarget, lastIssuedAt: lastPressIssuedAt,
+            pending: pendingPresses)
+        var pendingAfter = pendingPresses
+        if decision == nil {
+            lastPressTarget = request.targetKey
+            lastPressIssuedAt = request.issuedAt
+            pendingPresses += 1
+            pendingAfter = pendingPresses
+        }
+        pressLock.unlock()
+        if let decision {
+            log(String(format: "AXPRESS_REJECTED reason=%@ target=%@ request=%@ pending=%d dt_ms=%.1f",
+                       decision.rejection.rawValue as NSString,
+                       request.targetKey as NSString,
+                       request.requestID.uuidString as NSString,
+                       pendingAfter, decision.dtMs))
+            return
+        }
         let handle = AXElementHandle(element)
         axWorker.async { [weak self] in
+            defer { self?.releasePressSlot() }
             guard let self else { return }
-            let snap = self.cacheStoreForDelivery?.current()
+            var seen = CacheSnapshot.empty
+            let snap = self.cacheStoreForDelivery?.current(else: &seen)
             let currentGeneration = snap?.generation ?? 0
             let currentElement = self.cacheStoreForDelivery?.element(for: request.targetKey,
                                                                       pid: request.pid)
@@ -671,9 +705,26 @@ final class AssistTap: @unchecked Sendable {
                                 request.generation, currentGeneration, ageMs))
                 return
             }
+            // Absolute deadline re-evaluated AT EXECUTION: a request that aged
+            // while queued is rejected here, never renewed.
+            let execNow = CACurrentMediaTime()
+            if AXPressGate.executionExpired(request, now: execNow) {
+                let ageMs = (execNow - request.issuedAt) * 1000
+                self.log(String(format: "AXPRESS_REJECTED reason=%@ target=%@ request=%@ age_ms=%.1f",
+                                AXPressGate.Rejection.expiredAtExecution.rawValue as NSString,
+                                request.targetKey as NSString,
+                                request.requestID.uuidString as NSString, ageMs))
+                return
+            }
             let result = AXUIElementPerformAction(handle.element, "AXPress" as CFString)
             self.log("AXPRESS_DONE target=\(request.targetKey) request=\(request.requestID.uuidString) success=\(result == .success ? 1 : 0) code=\(result.rawValue)")
         }
+    }
+
+    private func releasePressSlot() {
+        pressLock.lock()
+        if pendingPresses > 0 { pendingPresses -= 1 }
+        pressLock.unlock()
     }
 
     /// Finds the nearest chrome button contained in a direct-hit candidate and

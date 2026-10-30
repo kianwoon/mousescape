@@ -2,6 +2,7 @@
 import ApplicationServices
 import CoreGraphics
 import Foundation
+import os
 
 /// One accessible, actionable element as observed by the resolver.
 struct CachedTarget: Sendable {
@@ -42,10 +43,15 @@ struct CacheSnapshot: Sendable {
 }
 
 /// The only object shared between the resolver thread and the tap callback.
-/// The callback does a short lock + struct copy; it never calls Accessibility.
+/// The callback NEVER blocks: reads use `os_unfair_lock_trylock` and fall back to
+/// the reader's own last-seen immutable snapshot. Publishing stays a full lock.
 final class CacheStore: @unchecked Sendable {
-    private let lock = NSLock()
+    private var lock = os_unfair_lock_s()
     private var snapshot = CacheSnapshot.empty
+    /// Miss counter, guarded by its own trylock so even the counter cannot block
+    /// the callback.
+    private var missLock = os_unfair_lock_s()
+    private var _snapshotTrylockMiss = 0
     /// Post-publish observers (the P2a overlay). Called AFTER the lock is released,
     /// with the same immutable struct the tap router reads: a slow or dead observer
     /// can never block the tap callback, which only ever calls `current()`.
@@ -58,43 +64,72 @@ final class CacheStore: @unchecked Sendable {
     private var axElements: [pid_t: [String: AXUIElement]] = [:]
 
     func publish(_ s: CacheSnapshot) {
-        lock.lock()
+        os_unfair_lock_lock(&lock)
         snapshot = s
         let obs = observers
-        lock.unlock()
+        os_unfair_lock_unlock(&lock)
         for o in obs { o(s) }
     }
 
     func addObserver(_ o: @escaping (CacheSnapshot) -> Void) {
-        lock.lock()
+        os_unfair_lock_lock(&lock)
         observers.append(o)
-        lock.unlock()
+        os_unfair_lock_unlock(&lock)
     }
 
+    /// Event-tap read path: trylock only. `lastSeen` is the reader's own copy and
+    /// is overwritten on a successful read; on contention it is returned as-is.
+    /// Safe because snapshots are immutable and evidence carries its own
+    /// generation/age, so a slightly older snapshot is rejected by the existing
+    /// expiry rules rather than trusted.
+    func current(else lastSeen: inout CacheSnapshot) -> CacheSnapshot {
+        if os_unfair_lock_trylock(&lock) {
+            lastSeen = snapshot
+            os_unfair_lock_unlock(&lock)
+            return lastSeen
+        }
+        recordTrylockMiss()
+        return lastSeen
+    }
+
+    /// Publisher-side read (resolver only): blocking is acceptable off-callback.
     func current() -> CacheSnapshot {
-        lock.lock()
-        defer { lock.unlock() }
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
         return snapshot
+    }
+
+    private func recordTrylockMiss() {
+        guard os_unfair_lock_trylock(&missLock) else { return }
+        _snapshotTrylockMiss += 1
+        os_unfair_lock_unlock(&missLock)
+    }
+
+    /// Number of callback reads that could not take the lock (never blocks).
+    var snapshotTrylockMiss: Int {
+        guard os_unfair_lock_trylock(&missLock) else { return _snapshotTrylockMiss }
+        defer { os_unfair_lock_unlock(&missLock) }
+        return _snapshotTrylockMiss
     }
 
     /// Replace the element side table for `pid` (one publish cycle's worth).
     func setElements(_ map: [String: AXUIElement], pid: pid_t) {
-        lock.lock()
+        os_unfair_lock_lock(&lock)
         axElements = [pid: map]
-        lock.unlock()
+        os_unfair_lock_unlock(&lock)
     }
 
     func clearElements() {
-        lock.lock()
+        os_unfair_lock_lock(&lock)
         axElements.removeAll()
-        lock.unlock()
+        os_unfair_lock_unlock(&lock)
     }
 
     /// The element reference for a candidate key, or nil when the resolver did not
     /// (or can no longer) supply one. Read by the tap at delivery time only.
     func element(for key: String, pid: pid_t) -> AXUIElement? {
-        lock.lock()
-        defer { lock.unlock() }
+        os_unfair_lock_lock(&lock)
+        defer { os_unfair_lock_unlock(&lock) }
         return axElements[pid]?[key]
     }
 }

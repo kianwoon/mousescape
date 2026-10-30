@@ -362,6 +362,54 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertFalse(GestureOwnership.consumes(tokenActive: false, isDown: false,
                                                  isDrag: false, isUp: true))
     }
+
+    // MARK: - I. absolute deadline / bounded queue / dedup
+
+    /// The deadline is fixed at issue and re-checked at execution: a request that
+    /// aged while queued is rejected, and receipt never renews it.
+    func testI1_deadlineAtExecution() {
+        let request = AXPressRequest(targetKey: "tab-close", pid: 42, generation: 9,
+                                     issuedAt: 100, expiryMs: 150)
+        XCTAssertEqual(request.deadline, 100.15, accuracy: 1e-9)
+        XCTAssertFalse(AXPressGate.executionExpired(request, now: 100.10))
+        XCTAssertTrue(AXPressGate.executionExpired(request, now: 100.20),
+                      "a request that aged in the queue must die at execution")
+        XCTAssertTrue(AXPressGate.executionExpired(request, now: 100.15))
+    }
+
+    /// Two activations for the same target inside 250 ms collapse to one.
+    func testI2_duplicateWithinWindow() {
+        let dup = AXPressAdmission.evaluate(targetKey: "tab-close", now: 100.10,
+                                            lastTarget: "tab-close", lastIssuedAt: 100.00,
+                                            pending: 0)
+        XCTAssertEqual(dup?.rejection, .duplicate)
+        XCTAssertEqual(dup?.dtMs ?? 0, 100, accuracy: 0.001)
+        XCTAssertNil(AXPressAdmission.evaluate(targetKey: "tab-close", now: 100.25,
+                                               lastTarget: "tab-close", lastIssuedAt: 100.00,
+                                               pending: 0), "outside the 250 ms window")
+        XCTAssertNil(AXPressAdmission.evaluate(targetKey: "other", now: 100.10,
+                                               lastTarget: "tab-close", lastIssuedAt: 100.00,
+                                               pending: 0), "different target is not a duplicate")
+    }
+
+    /// At the bound the new activation is rejected and never enqueued.
+    func testI3_queueFull() {
+        XCTAssertEqual(AXPressAdmission.evaluate(targetKey: "t", now: 10,
+                                                 lastTarget: nil, lastIssuedAt: nil,
+                                                 pending: AXPressAdmission.maxPendingPresses)?.rejection,
+                       .queueFull)
+        XCTAssertNil(AXPressAdmission.evaluate(targetKey: "t", now: 10,
+                                               lastTarget: nil, lastIssuedAt: nil,
+                                               pending: AXPressAdmission.maxPendingPresses - 1))
+    }
+
+    /// Evidence outlives a press request by design (400 ms vs 150 ms).
+    func testI4_expiryRelationship() {
+        XCTAssertGreaterThan(ClickAssistEvidence.maxAgeMs, AXPressGate.defaultExpiryMs)
+        XCTAssertEqual(AXPressGate.defaultExpiryMs, 150)
+        XCTAssertEqual(AXPressAdmission.maxPendingPresses, 4)
+        XCTAssertEqual(AXPressAdmission.dedupeWindowMs, 250)
+    }
 }
 
 /// Deterministic RNG so a failure is reproducible from the seed alone.

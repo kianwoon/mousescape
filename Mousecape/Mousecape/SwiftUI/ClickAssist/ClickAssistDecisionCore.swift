@@ -615,7 +615,8 @@ enum ClickAssistEvidence {
     }
 }
 
-/// One off-callback AXPress activation request. Pure value, testable.
+/// One off-callback AXPress activation request. Pure value, testable. The
+/// deadline is ABSOLUTE at issue time and never renewed on receipt.
 struct AXPressRequest: Sendable {
     let requestID: UUID
     let targetKey: String
@@ -623,6 +624,7 @@ struct AXPressRequest: Sendable {
     let generation: UInt64
     let issuedAt: CFTimeInterval
     let expiryMs: Double
+    let deadline: CFTimeInterval
 
     init(requestID: UUID = UUID(), targetKey: String, pid: pid_t, generation: UInt64,
          issuedAt: CFTimeInterval, expiryMs: Double = AXPressGate.defaultExpiryMs) {
@@ -632,6 +634,7 @@ struct AXPressRequest: Sendable {
         self.generation = generation
         self.issuedAt = issuedAt
         self.expiryMs = expiryMs
+        self.deadline = issuedAt + expiryMs / 1000
     }
 }
 
@@ -641,15 +644,52 @@ enum AXPressGate {
 
     enum Rejection: String, Sendable {
         case expired
+        case expiredAtExecution = "expired-at-execution"
         case staleGeneration = "stale-generation"
         case identityMismatch = "identity-mismatch"
+        case duplicate
+        case queueFull = "queue-full"
     }
 
     static func rejection(request: AXPressRequest, currentGeneration: UInt64,
                           identityMatches: Bool, now: CFTimeInterval) -> Rejection? {
-        if (now - request.issuedAt) * 1000 > request.expiryMs { return .expired }
+        if now >= request.deadline { return .expired }
         if request.generation != currentGeneration { return .staleGeneration }
         if !identityMatches { return .identityMismatch }
+        return nil
+    }
+
+    /// Evaluated immediately before AXUIElementPerformAction: a request that aged
+    /// while queued is rejected there, even if it passed the earlier gate.
+    static func executionExpired(_ request: AXPressRequest, now: CFTimeInterval) -> Bool {
+        now >= request.deadline
+    }
+}
+
+/// Bounded-queue + deduplication admission. Pure so the callback accounting is
+/// testable: at most `maxPendingPresses` in flight, and one activation per target
+/// inside the dedupe window.
+enum AXPressAdmission {
+    static let maxPendingPresses = 4
+    static let dedupeWindowMs: Double = 250
+
+    struct Decision: Equatable, Sendable {
+        let rejection: AXPressGate.Rejection
+        let dtMs: Double
+    }
+
+    static func evaluate(targetKey: String, now: CFTimeInterval,
+                         lastTarget: String?, lastIssuedAt: CFTimeInterval?,
+                         pending: Int) -> Decision? {
+        if pending >= maxPendingPresses {
+            return Decision(rejection: .queueFull, dtMs: 0)
+        }
+        if lastTarget == targetKey, let lastIssuedAt {
+            let dtMs = (now - lastIssuedAt) * 1000
+            if dtMs < dedupeWindowMs {
+                return Decision(rejection: .duplicate, dtMs: dtMs)
+            }
+        }
         return nil
     }
 }
