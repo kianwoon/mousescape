@@ -1201,7 +1201,12 @@ final class AccessibilityResolver: @unchecked Sendable {
         // A track is legitimately THIN and may span the screen (fullscreen seek
         // bar: observed 7638×7). A "slider" that is 2289×963 is NOT a track — it
         // is a mis-exposed player container and falls to the invariant below.
-        let isThinTrack = isWideTrackRole && min(rect.width, rect.height) <= 60
+        // THIN is aspect-based, not absolute: page zoom scales the control with
+        // the page (measured: iyf "scrub bar" AXSlider 3195×76 at 388% zoom —
+        // an absolute 60 pt cap rejected it; at ≤300% it is ~20 pt). A track is
+        // ≥8:1; a 2289×963 container (2.4:1) never qualifies.
+        let trackAspect = max(rect.width, rect.height) / max(min(rect.width, rect.height), 1)
+        let isThinTrack = isWideTrackRole && (min(rect.width, rect.height) <= 60 || trackAspect >= 8)
         if !isThinTrack, !isWideTrackRole, rect.width >= 4000 || rect.height >= 2000 {
             return false
         }
