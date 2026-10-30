@@ -8,21 +8,24 @@ import CoreGraphics
 final class ClickAssistFreshnessTests: XCTestCase {
 
     func testWindowsAreDistinctAndActivationIsStricter() {
-        XCTAssertEqual(ClickAssistEvidence.displayMaxAgeMs, 700)
+        // 1100 ms is measured, not chosen: SNAP_GAP p95 on heavy pages is 943 ms
+        // (idle cadence 700 ms + resolve up to 253 ms).
+        XCTAssertEqual(ClickAssistEvidence.displayMaxAgeMs, 1100)
         XCTAssertEqual(ClickAssistEvidence.activationMaxAgeMs, 400)
         XCTAssertLessThan(ClickAssistEvidence.activationMaxAgeMs,
                           ClickAssistEvidence.displayMaxAgeMs)
     }
 
-    /// 500 ms old: still showable by the ring, never actionable by the tap.
+    /// Stale for activation long before it is stale for display.
     func testFiveHundredMsIsDisplayFreshButActivationStale() {
         let cases: [(ageMs: Double, display: ClickAssistEvidence.State,
                      activation: ClickAssistEvidence.State)] = [
             (399, .fresh, .fresh),
             (401, .fresh, .stale),
             (500, .fresh, .stale),
-            (699, .fresh, .stale),
-            (701, .stale, .stale),
+            (900, .fresh, .stale),
+            (1099, .fresh, .stale),
+            (1101, .stale, .stale),
         ]
         for c in cases {
             XCTAssertEqual(ClickAssistEvidence.displayState(
