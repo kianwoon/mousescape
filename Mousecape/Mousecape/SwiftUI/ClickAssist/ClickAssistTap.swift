@@ -385,10 +385,15 @@ final class AssistTap: @unchecked Sendable {
             case .ambiguous(let scored, let tie):
                 // Ambiguity between duplicate surfaces (e.g. an AXTabGroup and its
                 // AXRadioButton sharing one frame) is not evidence against a nested
-                // chrome button. Try the hit-agnostic promotion: any in-radius
-                // candidate passing the structural AXPress gate wins if its own
-                // legitimacy confirms. Everything else below is untouched.
-                if let promoted = promotedTarget(res: res, point: original, containedIn: nil) {
+                // chrome button. Promotion is SCOPED TO THE TIED SET: an ambiguous
+                // tie may only be resolved by evidence about the tied surfaces
+                // themselves — a third party merely in range (a tab strip next to
+                // two page sliders) is never a tie-breaker. A tied candidate that
+                // passes the structural AXPress gate wins if its own legitimacy
+                // confirms. Everything else below is untouched.
+                let tiedKeys = Set(scored.map { $0.candidate.key })
+                if let promoted = promotedTarget(res: res, point: original, containedIn: nil,
+                                                 restrictedTo: tiedKeys) {
                     let plan = resolveDelivery(for: promoted,
                                                destination: DecisionCore.centerPoint(into: promoted.rect),
                                                res: res, allowsSynthetic: false)
@@ -561,12 +566,17 @@ final class AssistTap: @unchecked Sendable {
     /// still inside the assist radius. Margin-tolerant: the hit rect is inflated
     /// by 2 pt. Eligibility is the SAME structural AXPress gate as the redirect
     /// path, so a web container (AXWebArea in ancestry) never promotes.
+    /// `restrictedTo` narrows the search to the candidates an ambiguity tie is
+    /// actually about; nil means the caller supplies its own anchor (the
+    /// direct-hit branch's containment).
     private func promotedTarget(res: Resolution, point: CGPoint,
-                                containedIn: CGRect?) -> Candidate? {
+                                containedIn: CGRect?,
+                                restrictedTo: Set<String>? = nil) -> Candidate? {
         let containing = containedIn?.insetBy(dx: -2, dy: -2)
         let store = cacheStoreForDelivery
         var best: (candidate: Candidate, dist: CGFloat)?
         for c in res.candidates {
+            if let restrictedTo, !restrictedTo.contains(c.key) { continue }
             let dist = DecisionCore.boundaryDistance(point, c.rect)
             guard dist <= tolerance else { continue }
             if let containing, !containing.contains(c.rect) { continue }
