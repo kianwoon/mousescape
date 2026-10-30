@@ -1106,10 +1106,17 @@ final class AccessibilityResolver: @unchecked Sendable {
         if role == "AXGroup", !Self.eligibleRoles.contains(role),
            let actions = attr(el, "AXActionNames") as? [String],
            actions.contains("AXPress") {
-            isPressGroup = true
-            role = "AXPressGroup"
-            isRowLike = false
-            isTileLike = false
+            // Button-size envelope only: press-capable wrappers come in ALL sizes
+            // (a page-level div with a delegated click handler carries AXPress too
+            // and spans half the page). A real control is compact. Oversized
+            // press-groups are page furniture and stay rejected.
+            if let pressFrame = frame(el),
+               pressFrame.width <= 420, pressFrame.height <= 220 {
+                isPressGroup = true
+                role = "AXPressGroup"
+                isRowLike = false
+                isTileLike = false
+            }
         }
         guard Self.eligibleRoles.contains(role) || isRowLike || isTileLike || isPressGroup else {
             // Diagnostics only: remember near-pointer elements the role filter drops
