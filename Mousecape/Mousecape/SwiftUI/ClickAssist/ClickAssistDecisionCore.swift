@@ -140,16 +140,21 @@ enum DecisionCore {
             if !fc.isEmpty {
                 pool = fc
             } else {
-                // The pointer sits inside a second-tier container (a player control
-                // bar, a list row). A FIRST-CLASS control living inside that
-                // container is the real target (the seek slider inside the player
-                // bar); the container itself is only the fallback when it holds
-                // nothing actionable.
+                // The pointer sits inside a second-tier element. TWO kinds:
+                // - STRUCTURAL WRAPPER: encloses first-class controls (a chip-bar
+                //   DIV, a player bar, a tab strip). It has no click semantics of
+                //   its own — never self-indicate; only its embedded controls do.
+                // - ACTIONABLE ROW/TILE: encloses no controls (MyHome's AXCell
+                //   sidebar rows). Clicking it means something — self-indicate.
                 let container = containing.sorted { area($0.0) < area($1.0) }.first!.0
+                let wrapsControls = candidates.contains {
+                    $0.tier == .firstClass && container.rect.contains($0.rect)
+                        && $0.rect != container.rect
+                }
                 let inside = filtered
                     .filter { $0.0.tier == .firstClass && container.rect.contains($0.0.rect) }
                     .sorted { $0.1 < $1.1 }
-                pool = inside.isEmpty ? [(container, 0)] : inside
+                pool = wrapsControls ? inside : (inside.isEmpty ? [(container, 0)] : inside)
             }
         } else {
             let fc = filtered.filter { $0.0.tier == .firstClass }.sorted { $0.1 < $1.1 }
