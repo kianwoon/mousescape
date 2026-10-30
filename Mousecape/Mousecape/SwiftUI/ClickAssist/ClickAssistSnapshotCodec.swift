@@ -1,0 +1,170 @@
+// baseline-guard:allow new pure wire codec, no prior baseline possible
+//
+//  ClickAssistSnapshotCodec.swift
+//  Shared by the resolver XPC service and the agent client, and compiled by the
+//  headless suite. Pure value/JSON logic only: no AX, no AppKit, no timers.
+//
+
+import CoreGraphics
+import Foundation
+
+/// Wire form of the resolver's published evidence. Every payload is versioned
+/// JSON with an `epoch` identifying the service process instance.
+struct SnapshotWire: Codable, Equatable, Sendable {
+    static let version = 1
+
+    var version: Int
+    var epoch: String
+    var generation: UInt64
+    /// Monotonic seconds (CACurrentMediaTime) at publish. Shared system-wide, so
+    /// the client can compute age against its own monotonic clock.
+    var publishedAt: Double
+    /// Policy constant: maximum accepted evidence age in milliseconds.
+    var ageMs: Double
+    var pid: Int32
+    var valid: Bool
+    var reason: String
+    var targets: [SnapshotWireTarget]
+
+    init(epoch: String, generation: UInt64, publishedAt: Double,
+         ageMs: Double = ClickAssistSnapshotCodec.evidenceMaxAgeMs,
+         pid: Int32 = 0,
+         valid: Bool = true,
+         reason: String = "fresh",
+         targets: [SnapshotWireTarget]) {
+        self.version = SnapshotWire.version
+        self.epoch = epoch
+        self.generation = generation
+        self.publishedAt = publishedAt
+        self.ageMs = ageMs
+        self.pid = pid
+        self.valid = valid
+        self.reason = reason
+        self.targets = targets
+    }
+}
+
+struct SnapshotWireRect: Codable, Equatable, Sendable {
+    var x: Double
+    var y: Double
+    var w: Double
+    var h: Double
+
+    init(_ r: CGRect) {
+        x = Double(r.origin.x)
+        y = Double(r.origin.y)
+        w = Double(r.size.width)
+        h = Double(r.size.height)
+    }
+
+    var cgRect: CGRect { CGRect(x: x, y: y, width: w, height: h) }
+}
+
+struct SnapshotWireTarget: Codable, Equatable, Sendable {
+    var key: String
+    var role: String
+    var label: String
+    var rect: SnapshotWireRect
+    var inset: Double
+    var tier: Int
+    var chromeEligible: Bool
+    var verdict: String
+    var evidenceGeneration: UInt64
+
+    init(_ t: CachedTarget) {
+        key = t.key
+        role = t.role
+        label = t.label
+        rect = SnapshotWireRect(t.rect)
+        inset = Double(t.inset)
+        tier = t.tier == .firstClass ? 1 : 2
+        chromeEligible = t.chromeEligible
+        verdict = t.verdict.rawValue
+        evidenceGeneration = t.evidenceGeneration
+    }
+
+    var cachedTarget: CachedTarget {
+        CachedTarget(key: key, role: role, label: label, rect: rect.cgRect,
+                     inset: CGFloat(inset),
+                     tier: tier == 1 ? .firstClass : .secondClass,
+                     verdict: ClickAssistVerdict(rawValue: verdict) ?? .unknown,
+                     chromeEligible: chromeEligible,
+                     evidenceGeneration: evidenceGeneration)
+    }
+}
+
+enum ClickAssistSnapshotCodec {
+    /// Hard payload ceiling. Larger payloads are rejected (and logged by the
+    /// service), never truncated.
+    static let maxPayloadBytes = 256 * 1024
+    static let evidenceMaxAgeMs: Double = 400
+
+    enum Reject: String, Error, Sendable, Equatable {
+        case oversize
+        case malformed
+        case versionMismatch = "version-mismatch"
+        case staleEpoch = "stale-epoch"
+        case oldGeneration = "old-generation"
+        case expired
+    }
+
+    struct Decoded: Equatable, Sendable {
+        let wire: SnapshotWire
+        let ageMs: Double
+    }
+
+    static func encode(_ wire: SnapshotWire) -> Data? {
+        guard let data = try? JSONEncoder().encode(wire) else { return nil }
+        guard data.count <= maxPayloadBytes else { return nil }
+        return data
+    }
+
+    /// Validate a published payload against the client's local state.
+    /// - `expectedEpoch`: nil accepts and adopts the first epoch seen.
+    /// - `currentGeneration`: nil means no prior snapshot in this epoch.
+    /// - `now`: local monotonic seconds.
+    static func decode(_ data: Data, expectedEpoch: String?,
+                       currentGeneration: UInt64?, now: Double) -> Result<Decoded, Reject> {
+        guard data.count <= maxPayloadBytes else { return .failure(.oversize) }
+        guard let wire = try? JSONDecoder().decode(SnapshotWire.self, from: data) else {
+            return .failure(.malformed)
+        }
+        guard wire.version == SnapshotWire.version else { return .failure(.versionMismatch) }
+        if let expectedEpoch, wire.epoch != expectedEpoch {
+            return .failure(.staleEpoch)
+        }
+        if let currentGeneration, wire.generation <= currentGeneration {
+            return .failure(.oldGeneration)
+        }
+        let ageMs = max(0, (now - wire.publishedAt) * 1000)
+        guard ageMs <= evidenceMaxAgeMs else { return .failure(.expired) }
+        return .success(Decoded(wire: wire, ageMs: ageMs))
+    }
+}
+
+extension SnapshotWire {
+    init(snapshot: CacheSnapshot, epoch: String) {
+        self.init(epoch: epoch,
+                  generation: snapshot.generation,
+                  publishedAt: snapshot.stamp,
+                  pid: snapshot.pid,
+                  valid: snapshot.valid,
+                  reason: snapshot.reason,
+                  targets: snapshot.targets.map(SnapshotWireTarget.init))
+    }
+
+    /// Materialize the local immutable snapshot the tap/overlay consume. `stamp`
+    /// stays the service publish time so the tap's age math is end-to-end.
+    func cacheSnapshot() -> CacheSnapshot {
+        CacheSnapshot(generation: generation,
+                      targets: targets.map(\.cachedTarget),
+                      valid: valid,
+                      reason: reason,
+                      stamp: publishedAt,
+                      resolverMs: 0,
+                      pointer: .zero,
+                      appName: "-",
+                      pid: pid,
+                      epoch: epoch)
+    }
+}

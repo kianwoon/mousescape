@@ -1,29 +1,6 @@
 // baseline-guard:allow new standalone prototype file, no prior baseline possible
-import ApplicationServices
 import CoreGraphics
-
-/// The one frame reader. Every AX geometry read in Click Assist goes through
-/// here, so a non-finite frame (±infinity / NaN) can never reach centerPoint →
-/// event.location (inf − inf = NaN traps the overlay's main-thread render).
-/// Callers own their messaging-timeout policy; this reader sets none.
-enum AXGeometry {
-    static func frame(_ el: AXUIElement) -> CGRect? {
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let posRef, let sizeRef,
-              CFGetTypeID(posRef) == AXValueGetTypeID(),
-              CFGetTypeID(sizeRef) == AXValueGetTypeID() else { return nil }
-        var origin = CGPoint.zero
-        var size = CGSize.zero
-        guard AXValueGetValue(posRef as! AXValue, .cgPoint, &origin),
-              AXValueGetValue(sizeRef as! AXValue, .cgSize, &size) else { return nil }
-        let rect = CGRect(origin: origin, size: size)
-        guard GeometryPolicy.isValidFrame(rect) else { return nil }
-        return rect
-    }
-}
+import Foundation
 
 /// What a admitted element IS (drives tier and delivery).
 enum CandidateClass: String {
@@ -231,4 +208,23 @@ enum GeometryPolicy {
         case .wideThin, .row, .tile: return .secondClass
         }
     }
+}
+
+// MARK: - Screen space conversion (shared by resolver / tap / overlay)
+
+/// Coordinate conversions: Cocoa screen space (origin bottom-left of main display,
+/// y up) <-> CGEvent/AX global display space (origin top-left of main display, y down).
+enum ScreenSpace {
+    static var mainHeight: CGFloat { CGDisplayBounds(CGMainDisplayID()).height }
+
+    static func cgPoint(fromCocoaScreen p: NSPoint) -> CGPoint {
+        CGPoint(x: p.x, y: mainHeight - p.y)
+    }
+
+    static func cgRect(fromCocoaScreen r: NSRect) -> CGRect {
+        CGRect(x: r.minX, y: mainHeight - r.maxY, width: r.width, height: r.height)
+    }
+
+    static func fmt(_ p: CGPoint) -> String { String(format: "(%.1f,%.1f)", p.x, p.y) }
+    static func fmt(_ v: CGVector) -> String { String(format: "(%.1f,%.1f)", v.dx, v.dy) }
 }

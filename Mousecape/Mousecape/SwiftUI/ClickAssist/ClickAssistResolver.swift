@@ -1,7 +1,33 @@
-// baseline-guard:allow new standalone prototype file, no prior baseline possible
+// baseline-guard:allow service-side AX element side table (never compiled into the agent)
 import AppKit
 import ApplicationServices
 import CoreGraphics
+
+/// Thread-safe side table of live AX element references, keyed by owning pid and
+/// published target key. Lives ONLY in the resolver XPC service process.
+final class AXElementTable: @unchecked Sendable {
+    private let lock = NSLock()
+    private var map: [pid_t: [String: AXUIElement]] = [:]
+
+    func set(_ elements: [String: AXUIElement], pid: pid_t) {
+        lock.lock()
+        map = [pid: elements]
+        lock.unlock()
+    }
+
+    func clear() {
+        lock.lock()
+        map.removeAll()
+        lock.unlock()
+    }
+
+    func element(for key: String, pid: pid_t) -> AXUIElement? {
+        lock.lock()
+        defer { lock.unlock() }
+        return map[pid]?[key]
+    }
+}
+
 
 /// Accessibility-driven candidate resolver. Runs entirely OFF the tap callback:
 /// a serial background queue walks the AX tree of the app owning the window under
@@ -28,6 +54,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// resolver queue (background) — never from the tap callback.
     private let legitimacy: LegitimacyPolicy?
     private let queue = DispatchQueue(label: "clickassist.resolver", qos: .utility)
+    /// Live AX element references, service-process only. The agent never sees
+    /// these; it receives published snapshot evidence over XPC instead.
+    let elements = AXElementTable()
 
     private let stateLock = NSLock()
     private var refreshSuspended = false
@@ -123,6 +152,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var lastMovementAt: CFTimeInterval = 0
     private var lastWalkAt: CFTimeInterval = 0
     private var cadenceIdle = false
+    /// Candidates within the assist radius in the last published cycle (cadence
+    /// input: a resting pointer over a control must keep the fast cadence).
+    private var lastNearPointerCount = 0
     /// A published target survives this long without being re-seen. Large Chromium
     /// trees need several slices to complete one pass, so this must exceed a pass
     /// (typically <2 s at 600 nodes/150 ms). Trade-off: a control that truly
@@ -353,7 +385,14 @@ final class AccessibilityResolver: @unchecked Sendable {
         lastCyclePointer = pointer
         if moved { lastMovementAt = now }
 
+        // An idle pointer is only truly idle when NOTHING is in assist range.
+        // Evidence has a 400 ms expiry (ClickAssistEvidence.maxAgeMs) while the
+        // idle cadence is 700 ms, so a resting pointer that HAS a candidate in
+        // range would otherwise see its evidence expire between walks — rings and
+        // assists would die exactly where the user is aiming. Keep the fast
+        // cadence while the previous cycle had candidates near the pointer.
         let idle = !moved && (now - lastMovementAt) > Self.idleMovementWindow
+            && lastNearPointerCount == 0
         if idle != cadenceIdle {
             cadenceIdle = idle
             log(String(format: "RESOLVER_CADENCE %@ interval_ms=%.0f reason=%@",
@@ -390,7 +429,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  reason: reason, stamp: CACurrentMediaTime(), resolverMs: 0,
                                  pointer: pointer, appName: prev.appName, pid: prev.pid)
         elementRefs.removeAll()
-        cache.clearElements()
+        elements.clear()
         cache.publish(snap)
         log("RESOLVER_INVALIDATE gen=\(snap.generation) reason=\(reason) action=pass-through-until-refresh")
     }
@@ -681,6 +720,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         elementRefs = elementRefs.filter { liveKeys.contains($0.key) }
 
         let near = out.filter { Self.boundaryDistance(pointer, $0.rect) <= 80 }.count
+        lastNearPointerCount = near
         let ms = (CACurrentMediaTime() - t0) * 1000
         let visited = Self.nodeBudget - budget
         let gen = nextGeneration()
@@ -713,7 +753,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         let snap = CacheSnapshot(generation: gen, targets: out, valid: true, reason: "fresh",
                                  stamp: CACurrentMediaTime(), resolverMs: ms, pointer: pointer,
                                  appName: appName, pid: pid)
-        cache.setElements(elementRefs, pid: pid)
+        elements.set(elementRefs, pid: pid)
         cache.publish(snap)
 
         let rej = rejCounts.isEmpty ? "-"
@@ -760,7 +800,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  stamp: CACurrentMediaTime(), resolverMs: (CACurrentMediaTime() - t0) * 1000,
                                  pointer: currentPointer(), appName: "-", pid: 0)
         elementRefs.removeAll()
-        cache.clearElements()
+        elements.clear()
         cache.publish(snap)
         log("RESOLVER_UNAVAILABLE gen=\(gen) reason=\(reason) action=pass-through")
     }
@@ -773,7 +813,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  resolverMs: (CACurrentMediaTime() - t0) * 1000,
                                  pointer: currentPointer(), appName: "self", pid: getpid())
         elementRefs.removeAll()
-        cache.clearElements()
+        elements.clear()
         cache.publish(snap)
         log("RESOLVER_SELF_APP gen=\(gen) pid=\(getpid()) axQueries=0 action=pass-through")
     }
@@ -1472,6 +1512,16 @@ final class AccessibilityResolver: @unchecked Sendable {
         let dx = max(r.minX - p.x, 0, p.x - r.maxX)
         let dy = max(r.minY - p.y, 0, p.y - r.maxY)
         return sqrt(dx * dx + dy * dy)
+    }
+
+    // MARK: - Service accessors (XPC host)
+
+    /// Latest published snapshot (service-side, blocking is off the tap path).
+    func currentSnapshot() -> CacheSnapshot { cache.current() }
+
+    /// The live AX element behind a published target key.
+    func element(for key: String, pid: pid_t) -> AXUIElement? {
+        elements.element(for: key, pid: pid)
     }
 }
 

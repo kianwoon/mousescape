@@ -22,21 +22,12 @@ final class ClickAssistEngine {
     static let shared = ClickAssistEngine()
 
     let cache = CacheStore()
-    /// One legitimacy policy shared by the tap (click decisions) and the overlay
-    /// (ring decisions): the renderer's hit-test is the single source of truth.
-    let legitimacy = LegitimacyPolicy()
     let prefs = ClickAssistPreferences()
 
     private(set) var config: ClickAssistConfig
     private(set) var tap: AssistTap?
-    private(set) var resolver: AccessibilityResolver?
+    private(set) var serviceClient: ClickAssistServiceClient?
     private(set) var overlay: TargetingOverlay?
-    /// Embedded ClickAssistResolver.xpc connection. Nil until a probe starts; a
-    /// failure here is diagnostic only and never touches the tap/resolver.
-    private var xpcConnection: NSXPCConnection?
-    /// Bundle identifier of the embedded service, which is also the launchd Mach
-    /// service name registered from its Info.plist `XPCService > ServiceName`.
-    static let xpcServiceName = "com.sdmj76.ClickAssistResolver"
 
     /// When false the engine never auto-prompts for Accessibility; permission must
     /// be requested by an explicit user action (the persistent agent uses this).
@@ -154,7 +145,7 @@ final class ClickAssistEngine {
         if !config.enabled { return .pausedDisabled }
         if !AXIsProcessTrusted() { return .pausedAccessibility }
         if tap == nil { return .tapFailed }
-        if resolver == nil { return .resolverUnavailable }
+        if serviceClient == nil { return .resolverUnavailable }
         return .active
     }
 
@@ -193,34 +184,33 @@ final class ClickAssistEngine {
             debugLog("[ClickAssist] ENGINE_PAUSED reason=accessibility-untrusted status=\"\(runtimeStatus.text)\"")
             return
         }
-        // Tap creation is cheap and must happen on the main run loop; the AX walk
-        // never runs here (the resolver's first refresh is queued off-main).
+        // Tap creation is cheap and must happen on the main run loop; ALL AX work
+        // now lives in the resolver XPC service.
+        let client = ClickAssistServiceClient(cache: cache) { line in
+            debugLog("[ClickAssist] \(line)")
+        }
+        serviceClient = client
         let t = AssistTap(tolerance: config.tolerancePoints) { line in
             debugLog("[ClickAssist] \(line)")
         }
-        t.targetSource = .cache(cache)
+        t.targetSource = .cache(client.cache)
+        t.activationSink = { [weak client] request in
+            client?.activate(request)
+        }
         guard t.start(point: .cghidEventTap) else {
             debugLog("[ClickAssist] ENGINE_PAUSED reason=tap-create-failed")
+            client.stop()
+            serviceClient = nil
             return
         }
         tap = t
-        let r = AccessibilityResolver(cache: cache, legitimacy: legitimacy) { line in
-            debugLog("[ClickAssist] \(line)")
-        }
-        resolver = r
-        r.start()
-        startXPCProbe()
+        client.start()
         if config.indicatorEnabled { startOverlay() }
     }
 
     private func stopEngine() {
-        if let xpcConnection {
-            xpcConnection.invalidate()
-            debugLog("[ClickAssist] XPC_INVALIDATED reason=engine-stop")
-            self.xpcConnection = nil
-        }
-        resolver?.stop()
-        resolver = nil
+        serviceClient?.stop()
+        serviceClient = nil
         tap?.stop()
         tap = nil
         stopOverlay()
@@ -229,45 +219,8 @@ final class ClickAssistEngine {
     private func applyToleranceChange(from old: CGFloat) {
         tap?.setTolerance(config.tolerancePoints)
         overlay?.setTolerance(config.tolerancePoints)
-        // No queue.sync here: invalidate only publishes an invalid snapshot and
-        // schedules the refresh on the resolver queue.
-        resolver?.invalidate(reason: "tolerance-change", prefixStale: false)
         debugLog(String(format: "[ClickAssist] TOLERANCE_APPLY from=%.1f to=%.1f",
                         old, config.tolerancePoints))
-    }
-
-    // MARK: - XPC service probe (A1a: structural only)
-
-    /// Opens one connection to the embedded service and asks for its identity.
-    /// Every failure path only logs: the engine, tap and resolver keep running
-    /// exactly as before. No reconnect policy yet (A1b).
-    private func startXPCProbe() {
-        let conn = NSXPCConnection(serviceName: Self.xpcServiceName)
-        conn.remoteObjectInterface = NSXPCInterface(with: ClickAssistXPCProtocol.self)
-        conn.interruptionHandler = {
-            debugLog("[ClickAssist] XPC_INVALIDATED reason=interrupted")
-        }
-        conn.invalidationHandler = {
-            debugLog("[ClickAssist] XPC_INVALIDATED reason=invalidated")
-        }
-        conn.resume()
-        xpcConnection = conn
-        let issued = CACurrentMediaTime()
-        guard let proxy = conn.remoteObjectProxyWithErrorHandler({ error in
-            debugLog("[ClickAssist] XPC_UNAVAILABLE reason=proxy-error detail=\"\(error.localizedDescription)\"")
-        }) as? ClickAssistXPCProtocol else {
-            debugLog("[ClickAssist] XPC_UNAVAILABLE reason=proxy-unavailable")
-            return
-        }
-        proxy.serviceInfo { data in
-            let latencyUs = (CACurrentMediaTime() - issued) * 1_000_000
-            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
-            let version = obj["version"] as? String ?? "-"
-            let pid = (obj["pid"] as? NSNumber)?.intValue ?? 0
-            let epoch = obj["epoch"] as? String ?? "-"
-            debugLog(String(format: "[ClickAssist] XPC_SERVICE_INFO version=%@ pid=%d epoch=%@ latency_us=%.0f",
-                           version, pid, epoch, latencyUs))
-        }
     }
 
     private func startOverlay() {
@@ -275,7 +228,6 @@ final class ClickAssistEngine {
         let o = TargetingOverlay(tolerance: config.tolerancePoints) { line in
             debugLog("[ClickAssist] \(line)")
         }
-        o.legitimacy = legitimacy
         overlay = o
         // One permanent forwarder: overlay identity changes, observer count stays 1.
         if !cacheObserverInstalled {

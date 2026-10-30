@@ -20,6 +20,18 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     private var statusController: AgentStatusController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // SINGLE INSTANCE: this agent owns a system-wide event tap and (through
+        // its XPC service) the Accessibility resolver. Two instances mean two
+        // taps, two resolvers and duplicated activations — observed when the login
+        // item and an explicit `open` both launched it. Newest wins: if any other
+        // process with this bundle id is already running, exit immediately.
+        let running = NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "")
+            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        if !running.isEmpty {
+            NSLog("[ClickAssist] AGENT_EXIT reason=already-running peers=%d", running.count)
+            NSApp.terminate(nil)
+            return
+        }
         NSApp.setActivationPolicy(.accessory)
         statusController = AgentStatusController(engine: engine)
         // Onboarding is explicit: only the "Grant Accessibility…" menu action prompts.

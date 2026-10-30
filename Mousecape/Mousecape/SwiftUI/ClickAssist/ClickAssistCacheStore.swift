@@ -1,5 +1,4 @@
 // baseline-guard:allow new standalone prototype file, no prior baseline possible
-import ApplicationServices
 import CoreGraphics
 import Foundation
 import os
@@ -19,7 +18,7 @@ struct CachedTarget: Sendable {
     let tier: DecisionCore.Tier
     /// Published evidence (resolver background queue, top-3 nearest only). The tap
     /// consumes these values; it never refreshes them with an AX call.
-    var verdict: LegitimacyPolicy.Verdict = .unknown
+    var verdict: ClickAssistVerdict = .unknown
     var chromeEligible: Bool = false
     var evidenceGeneration: UInt64 = 0
 }
@@ -36,6 +35,9 @@ struct CacheSnapshot: Sendable {
     let pointer: CGPoint
     let appName: String
     let pid: pid_t
+    /// Service epoch that produced this snapshot. An empty value means the
+    /// snapshot was produced locally (static harness / tests).
+    var epoch: String = "-"
 
     static let empty = CacheSnapshot(generation: 0, targets: [], valid: false,
                                      reason: "unavailable:not-started", stamp: 0,
@@ -56,13 +58,6 @@ final class CacheStore: @unchecked Sendable {
     /// with the same immutable struct the tap router reads: a slow or dead observer
     /// can never block the tap callback, which only ever calls `current()`.
     private var observers: [(CacheSnapshot) -> Void] = []
-    /// Delivery-side table: the live AX element reference for each admitted
-    /// candidate key, keyed by owning pid. Populated by the resolver each publish
-    /// cycle, replaced wholesale, and cleared on invalidation. Deliberately NOT
-    /// part of the Sendable snapshot: AXUIElement is only valid in this process
-    /// and is not a value type, so it lives behind this lock as a side table.
-    private var axElements: [pid_t: [String: AXUIElement]] = [:]
-
     func publish(_ s: CacheSnapshot) {
         os_unfair_lock_lock(&lock)
         snapshot = s
@@ -112,24 +107,4 @@ final class CacheStore: @unchecked Sendable {
         return _snapshotTrylockMiss
     }
 
-    /// Replace the element side table for `pid` (one publish cycle's worth).
-    func setElements(_ map: [String: AXUIElement], pid: pid_t) {
-        os_unfair_lock_lock(&lock)
-        axElements = [pid: map]
-        os_unfair_lock_unlock(&lock)
-    }
-
-    func clearElements() {
-        os_unfair_lock_lock(&lock)
-        axElements.removeAll()
-        os_unfair_lock_unlock(&lock)
-    }
-
-    /// The element reference for a candidate key, or nil when the resolver did not
-    /// (or can no longer) supply one. Read by the tap at delivery time only.
-    func element(for key: String, pid: pid_t) -> AXUIElement? {
-        os_unfair_lock_lock(&lock)
-        defer { os_unfair_lock_unlock(&lock) }
-        return axElements[pid]?[key]
-    }
 }

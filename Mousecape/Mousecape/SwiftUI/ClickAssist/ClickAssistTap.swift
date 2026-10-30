@@ -1,5 +1,4 @@
 // baseline-guard:allow new standalone prototype file, no prior baseline possible
-import ApplicationServices
 import Carbon.HIToolbox
 import CoreGraphics
 import Foundation
@@ -47,24 +46,12 @@ final class AssistTap: @unchecked Sendable {
     /// gesture stays a passthrough: a gesture that began unsupported stays
     /// unsupported end-to-end.
     private var gestureUnsupported = false
-    /// Serial worker for AXPress activation. AX runs HERE, never on the callback.
-    private let axWorker = DispatchQueue(label: "clickassist.axpress.worker",
-                                         qos: .userInitiated)
-    /// Bounded in-flight press accounting + last-activation dedup, all under one
-    /// short O(1) lock (held on the callback only for counter updates).
-    private let pressLock = NSLock()
-    private var pendingPresses = 0
-    private var lastPressTarget: String?
-    private var lastPressIssuedAt: CFTimeInterval?
+    /// Off-callback activation transport (XPC to the resolver service). The tap
+    /// hands ownership to the service; the reply is advisory only.
+    var activationSink: ((AXPressRequest) -> Void)?
     /// The callback's own last successfully read snapshot: the non-blocking read
     /// path returns it when the publish lock is contended.
     private var lastSnapshot = CacheSnapshot.empty
-
-    /// Sendable carrier for an AX element reference crossing to the worker queue.
-    private final class AXElementHandle: @unchecked Sendable {
-        let element: AXUIElement
-        init(_ element: AXUIElement) { self.element = element }
-    }
 
     var assistEnabled = true
     private(set) var tolerance: CGFloat
@@ -214,10 +201,7 @@ final class AssistTap: @unchecked Sendable {
             case rejected
         }
         let kind: Kind
-        /// The live element behind the candidate, when the resolver supplied one
-        /// (nil: static harness, or the entry was dropped).
-        let element: AXUIElement?
-        let verdict: LegitimacyPolicy.Verdict
+        let verdict: ClickAssistVerdict
         /// Passthrough token when evidence is missing/expired/failed.
         let rejectReason: String?
     }
@@ -236,34 +220,33 @@ final class AssistTap: @unchecked Sendable {
                                  requiresConfirmation: Bool = true,
                                  allowsSynthetic: Bool) -> DeliveryPlan {
         let isStatic = res.source == "static"
-        let element = cacheStoreForDelivery?.element(for: candidate.key, pid: res.pid)
         let evidence = isStatic
             ? ClickAssistEvidence.State.fresh
             : ClickAssistEvidence.state(evidenceGeneration: candidate.evidenceGeneration,
                                         currentGeneration: res.generation,
                                         ageMs: res.ageMs)
         if requiresConfirmation, evidence != .fresh {
-            return DeliveryPlan(kind: .rejected, element: element, verdict: candidate.verdict,
+            return DeliveryPlan(kind: .rejected, verdict: candidate.verdict,
                                 rejectReason: evidence == .missing
                                     ? "evidence-missing" : "evidence-expired")
         }
-        let verdict: LegitimacyPolicy.Verdict = requiresConfirmation
+        let verdict: ClickAssistVerdict = requiresConfirmation
             ? candidate.verdict : .confirmed
         let chromeEligible = !isStatic && candidate.chromeEligible
         let evidenceOK = !requiresConfirmation
             || verdict == .confirmed || verdict == .confirmedWeak
-        if evidenceOK, chromeEligible, let el = element {
-            return DeliveryPlan(kind: .axPress(destination), element: el, verdict: verdict,
+        if evidenceOK, chromeEligible {
+            return DeliveryPlan(kind: .axPress(destination), verdict: verdict,
                                 rejectReason: nil)
         }
         // Strong evidence only: a synthetic click aimed at a weak answer is unsafe.
         // A chrome-eligible target with missing/expired evidence never degrades to
         // synthetic — it was refused above or stays unavailable here.
         if requiresConfirmation, verdict == .confirmed, allowsSynthetic, !chromeEligible {
-            return DeliveryPlan(kind: .synthetic(destination), element: element,
+            return DeliveryPlan(kind: .synthetic(destination),
                                 verdict: verdict, rejectReason: nil)
         }
-        return DeliveryPlan(kind: .rejected, element: element, verdict: verdict,
+        return DeliveryPlan(kind: .rejected, verdict: verdict,
                             rejectReason: evidenceOK ? "evidence-missing"
                                                      : "legitimacy-\(verdict.rawValue)")
     }
@@ -431,8 +414,8 @@ final class AssistTap: @unchecked Sendable {
                                                destination: DecisionCore.centerPoint(into: hit.rect),
                                                res: res, requiresConfirmation: false,
                                                allowsSynthetic: false)
-                if case .axPress(let dest) = selfPlan.kind, let el = selfPlan.element,
-                   performAXPressDelivery(element: el, best: hit,
+                if case .axPress(let dest) = selfPlan.kind,
+                   performAXPressDelivery(best: hit,
                                           corrected: dest,
                                           snap: DecisionCore.snapMode(for: hit),
                                           dist: 0, cands: 1, res: res, label: label,
@@ -449,8 +432,8 @@ final class AssistTap: @unchecked Sendable {
                     let plan = resolveDelivery(for: promoted,
                                                destination: DecisionCore.centerPoint(into: promoted.rect),
                                                res: res, allowsSynthetic: false)
-                    if case .axPress(let dest) = plan.kind, let el = plan.element {
-                        if performAXPressDelivery(element: el, best: promoted,
+                    if case .axPress(let dest) = plan.kind {
+                        if performAXPressDelivery(best: promoted,
                                                   corrected: dest,
                                                   snap: DecisionCore.snapMode(for: promoted),
                                                   dist: DecisionCore.boundaryDistance(original, promoted.rect),
@@ -501,8 +484,8 @@ final class AssistTap: @unchecked Sendable {
                     let plan = resolveDelivery(for: promoted,
                                                destination: DecisionCore.centerPoint(into: promoted.rect),
                                                res: res, allowsSynthetic: false)
-                    if case .axPress(let dest) = plan.kind, let el = plan.element,
-                       performAXPressDelivery(element: el, best: promoted,
+                    if case .axPress(let dest) = plan.kind,
+                       performAXPressDelivery(best: promoted,
                                               corrected: dest,
                                               snap: DecisionCore.snapMode(for: promoted),
                                               dist: DecisionCore.boundaryDistance(original, promoted.rect),
@@ -528,7 +511,7 @@ final class AssistTap: @unchecked Sendable {
                                                             candidates: res.candidates,
                                                             tolerance: tolerance, limit: 3)
                 var confirmed: [(DecisionCore.ScoredCandidate, CGPoint, DecisionCore.Snap, DeliveryPlan)] = []
-                var firstFailure: (String, LegitimacyPolicy.Verdict, String?)?
+                var firstFailure: (String, ClickAssistVerdict, String?)?
                 for choice in scored {
                     let snap = DecisionCore.snapMode(for: choice.candidate)
                     let dest = snap == .center
@@ -557,19 +540,14 @@ final class AssistTap: @unchecked Sendable {
                 let snap = winner.2
                 let plan = winner.3
                 let weakEvidence = plan.verdict == .confirmedWeak
-                // Delivery side table: the live element behind this candidate, when
-                // the resolver supplied one. nil (static harness, or dropped entry)
-                // keeps the exact legacy synthetic path below.
-                let element = plan.element
-
                 // Frame evidence is the PUBLISHED cached rect; the resolver checks
                 // movement/continuity on its own queue. Never refresh here.
                 let corrected = winner.1
 
                 // Chrome-button delivery: structural gate, then EXACTLY ONE
                 // AXPress. Synthetic CGEvents are ignored by Chromium chrome.
-                if case .axPress = plan.kind, let element,
-                   performAXPressDelivery(element: element, best: best, corrected: corrected,
+                if case .axPress = plan.kind,
+                   performAXPressDelivery(best: best, corrected: corrected,
                                           snap: snap, dist: winner.0.dist,
                                           cands: confirmed.count, res: res, label: label,
                                           original: original, started: started,
@@ -631,15 +609,15 @@ final class AssistTap: @unchecked Sendable {
 
     // MARK: - AXPress delivery gate (chrome only)
 
-    /// Delivers one gesture via AXPress: exactly one perform, then latch the
+    /// Delivers one gesture via AXPress: exactly one service request, then latch the
     /// per-gesture token so the matching up (and any drag) is swallowed by the
     /// top-of-handle guard. Shared by the redirect and direct-hit promotion paths.
-    /// Takes ownership NOW (token + consume the down) and dispatches the AXPress
-    /// to the serial worker. The callback performs no AX: the worker re-checks
-    /// expiry, generation and element identity before activating. Returns true
-    /// (the down is consumed) as soon as ownership is taken.
+    /// Takes ownership NOW (token + consume the down) and dispatches the request
+    /// over XPC. The service re-checks deadline, generation and element identity
+    /// before activating. Returns true (the down is consumed) as soon as
+    /// ownership is taken; the service reply is advisory only.
     @discardableResult
-    private func performAXPressDelivery(element: AXUIElement, best: Candidate,
+    private func performAXPressDelivery(best: Candidate,
                                         corrected: CGPoint, snap: DecisionCore.Snap,
                                         dist: Double, cands: Int, res: Resolution,
                                         label: String, original: CGPoint,
@@ -653,78 +631,15 @@ final class AssistTap: @unchecked Sendable {
         emit("MUTATE", type: label, original: original, mutated: corrected,
              reason: "redirect", res: res, started: started,
              extra: "target=\(best.key) dist=\(String(format: "%.1f", dist)) snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(cands) winner=1 \(extra)mode=axpress request=\(request.requestID.uuidString)")
-        dispatchAXPress(request: request, element: element)
+        dispatchAXPress(request: request)
         return true
     }
 
-    /// Off-callback activation. Admission (queue bound + dedup) is decided BEFORE
-    /// enqueue; the worker releases its slot on every exit path. NEVER retries via
-    /// a synthetic event; a rejected request logs and dies (ownership already
-    /// consumed the gesture).
-    private func dispatchAXPress(request: AXPressRequest, element: AXUIElement) {
-        pressLock.lock()
-        let decision = AXPressAdmission.evaluate(
-            targetKey: request.targetKey, now: request.issuedAt,
-            lastTarget: lastPressTarget, lastIssuedAt: lastPressIssuedAt,
-            pending: pendingPresses)
-        var pendingAfter = pendingPresses
-        if decision == nil {
-            lastPressTarget = request.targetKey
-            lastPressIssuedAt = request.issuedAt
-            pendingPresses += 1
-            pendingAfter = pendingPresses
-        }
-        pressLock.unlock()
-        if let decision {
-            log(String(format: "AXPRESS_REJECTED reason=%@ target=%@ request=%@ pending=%d dt_ms=%.1f",
-                       decision.rejection.rawValue as NSString,
-                       request.targetKey as NSString,
-                       request.requestID.uuidString as NSString,
-                       pendingAfter, decision.dtMs))
-            return
-        }
-        let handle = AXElementHandle(element)
-        axWorker.async { [weak self] in
-            defer { self?.releasePressSlot() }
-            guard let self else { return }
-            var seen = CacheSnapshot.empty
-            let snap = self.cacheStoreForDelivery?.current(else: &seen)
-            let currentGeneration = snap?.generation ?? 0
-            let currentElement = self.cacheStoreForDelivery?.element(for: request.targetKey,
-                                                                      pid: request.pid)
-            let identityMatches = currentElement.map { CFEqual($0, handle.element) } ?? false
-            let now = CACurrentMediaTime()
-            if let reject = AXPressGate.rejection(request: request,
-                                                  currentGeneration: currentGeneration,
-                                                  identityMatches: identityMatches,
-                                                  now: now) {
-                let ageMs = (now - request.issuedAt) * 1000
-                self.log(String(format: "AXPRESS_REJECTED reason=%@ target=%@ request=%@ gen=%llu now_gen=%llu age_ms=%.1f",
-                                reject.rawValue as NSString, request.targetKey as NSString,
-                                request.requestID.uuidString as NSString,
-                                request.generation, currentGeneration, ageMs))
-                return
-            }
-            // Absolute deadline re-evaluated AT EXECUTION: a request that aged
-            // while queued is rejected here, never renewed.
-            let execNow = CACurrentMediaTime()
-            if AXPressGate.executionExpired(request, now: execNow) {
-                let ageMs = (execNow - request.issuedAt) * 1000
-                self.log(String(format: "AXPRESS_REJECTED reason=%@ target=%@ request=%@ age_ms=%.1f",
-                                AXPressGate.Rejection.expiredAtExecution.rawValue as NSString,
-                                request.targetKey as NSString,
-                                request.requestID.uuidString as NSString, ageMs))
-                return
-            }
-            let result = AXUIElementPerformAction(handle.element, "AXPress" as CFString)
-            self.log("AXPRESS_DONE target=\(request.targetKey) request=\(request.requestID.uuidString) success=\(result == .success ? 1 : 0) code=\(result.rawValue)")
-        }
-    }
-
-    private func releasePressSlot() {
-        pressLock.lock()
-        if pendingPresses > 0 { pendingPresses -= 1 }
-        pressLock.unlock()
+    /// Off-callback activation. Ownership is already taken; the service owns all
+    /// validation and AXPress execution. The reply is advisory: the callback never
+    /// waits for it, and a rejection never retries or synthesizes.
+    private func dispatchAXPress(request: AXPressRequest) {
+        activationSink?(request)
     }
 
     /// Finds the nearest chrome button contained in a direct-hit candidate and

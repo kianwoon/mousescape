@@ -110,10 +110,6 @@ final class TargetingOverlay {
     private var lastDrawnMode = ""
     private var lastDrawnTolerance: CGFloat = -1
     private var lastDrawnDim: Bool = false
-    /// The ONE legitimacy policy, shared with the tap. The overlay carries no
-    /// visibility heuristics of its own: a ring is drawn only when the renderer
-    /// confirms the destination point.
-    var legitimacy: LegitimacyPolicy?
     private var lastSuppressLog: [String: CFTimeInterval] = [:]
     private static let suppressLogInterval: CFTimeInterval = 5
 
@@ -172,36 +168,42 @@ final class TargetingOverlay {
     private func render(_ s: CacheSnapshot) {
         guard !dead else { return }
         let ageMs = (CACurrentMediaTime() - s.stamp) * 1000
-        let fresh = s.valid && ageMs <= DecisionCore.cacheMaxAge * 1000
+        // Render ONLY from published evidence. Stale/missing evidence (including
+        // a snapshot from a replaced service epoch) shows nothing.
+        let fresh = s.valid && ageMs <= ClickAssistEvidence.maxAgeMs
+            && s.epoch != ""
         let pointer = CGEvent(source: nil)?.location ?? .zero
         var action = "none"
         var reason = s.valid ? String(format: "stale:age(%.0fms)", ageMs) : s.reason
         var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool, tier: Int, named: Bool, weakVerdict: Bool)?
         var secondary: (key: String, rect: CGRect, tier: Int, named: Bool)?
         var confirmedCount = 0
-        var suppressed: (key: String, verdict: LegitimacyPolicy.Verdict)?
+        var suppressed: (key: String, verdict: ClickAssistVerdict)?
         if fresh {
             let cands = s.targets.map { DecisionCore.Candidate(key: $0.key, rect: $0.rect,
                                                                inset: $0.inset, tier: $0.tier,
-                                                               role: $0.role, label: $0.label) }
+                                                               role: $0.role, label: $0.label,
+                                                               verdict: $0.verdict,
+                                                               chromeEligible: $0.chromeEligible,
+                                                               evidenceGeneration: $0.evidenceGeneration) }
             // Up to three nearest in-tolerance first-class candidates, validated
             // at their own destination points (fail-closed). Every confirmed one
             // is indicated; the nearest wins the click.
             let scored = DecisionCore.displayCandidates(point: pointer, candidates: cands,
                                                         tolerance: tolerance, limit: 3)
-            var confirmed: [(DecisionCore.ScoredCandidate, CGPoint, LegitimacyPolicy.Verdict)] = []
+            var confirmed: [(DecisionCore.ScoredCandidate, CGPoint, ClickAssistVerdict)] = []
             for choice in scored {
                 let snap = DecisionCore.snapMode(for: choice.candidate)
                 let dest = snap == .center
                     ? DecisionCore.centerPoint(into: choice.candidate.rect)
                     : DecisionCore.clampPoint(pointer, into: choice.candidate.rect,
                                               inset: choice.candidate.inset)
-                let verdict = legitimacy?.validate(
-                    pid: s.pid, generation: s.generation, key: choice.candidate.key,
-                    candidate: choice.candidate.rect,
-                    candidateRole: choice.candidate.role, destination: dest,
-                    siblings: cands.filter { $0.key != choice.candidate.key && $0.tier == .firstClass }
-                                   .map { $0.rect }) ?? .confirmed
+                let evidence = ClickAssistEvidence.state(
+                    evidenceGeneration: choice.candidate.evidenceGeneration,
+                    currentGeneration: s.generation,
+                    ageMs: ageMs)
+                let verdict: ClickAssistVerdict = evidence == .fresh
+                    ? choice.candidate.verdict : .unknown
                 if verdict == .confirmed || verdict == .confirmedWeak {
                     confirmed.append((choice, dest, verdict))
                 } else if suppressed == nil {
@@ -331,23 +333,4 @@ final class TargetingOverlay {
         view.needsDisplay = true
         if !panel.isVisible { panel.orderFrontRegardless() }   // never activates, never keys
     }
-}
-
-// MARK: - Screen space conversion (shared by resolver / tap / overlay)
-
-/// Coordinate conversions: Cocoa screen space (origin bottom-left of main display,
-/// y up) <-> CGEvent/AX global display space (origin top-left of main display, y down).
-enum ScreenSpace {
-    static var mainHeight: CGFloat { CGDisplayBounds(CGMainDisplayID()).height }
-
-    static func cgPoint(fromCocoaScreen p: NSPoint) -> CGPoint {
-        CGPoint(x: p.x, y: mainHeight - p.y)
-    }
-
-    static func cgRect(fromCocoaScreen r: NSRect) -> CGRect {
-        CGRect(x: r.minX, y: mainHeight - r.maxY, width: r.width, height: r.height)
-    }
-
-    static func fmt(_ p: CGPoint) -> String { String(format: "(%.1f,%.1f)", p.x, p.y) }
-    static func fmt(_ v: CGVector) -> String { String(format: "(%.1f,%.1f)", v.dx, v.dy) }
 }

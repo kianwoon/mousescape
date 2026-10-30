@@ -120,6 +120,14 @@
 		D1A0000000000000000000C8 /* ClickAssistOverlay.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A6 /* ClickAssistOverlay.swift */; };
 		D1A0000000000000000000C9 /* ClickAssistEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A7 /* ClickAssistEngine.swift */; };
 		D1A0000000000000000000CA /* ClickAssistGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A8 /* ClickAssistGeometry.swift */; };
+		F1A0000000000000000000C5 /* ClickAssistLegitimacy.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A9 /* ClickAssistLegitimacy.swift */; };
+		F1A0000000000000000000C6 /* ClickAssistAXGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000AA /* ClickAssistAXGeometry.swift */; };
+		F1A0000000000000000000C7 /* ClickAssistSnapshotCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000AB /* ClickAssistSnapshotCodec.swift */; };
+		F1A0000000000000000000C8 /* ClickAssistActivationGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000AC /* ClickAssistActivationGate.swift */; };
+		D1A0000000000000000000CB /* ClickAssistSnapshotCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000AB /* ClickAssistSnapshotCodec.swift */; };
+		D1A0000000000000000000CC /* ClickAssistCircuitBreaker.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000AD /* ClickAssistCircuitBreaker.swift */; };
+		D1A0000000000000000000CD /* ClickAssistServiceClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D1A0000000000000000000B3 /* ClickAssistServiceClient.swift */; };
+		D1A0000000000000000000CE /* ClickAssistActivationGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000AC /* ClickAssistActivationGate.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -207,6 +215,12 @@
 		C1A0000000000000000000A6 /* ClickAssistOverlay.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistOverlay.swift; sourceTree = "<group>"; };
 		C1A0000000000000000000A7 /* ClickAssistEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistEngine.swift; sourceTree = "<group>"; };
 		C1A0000000000000000000A8 /* ClickAssistGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistGeometry.swift; sourceTree = "<group>"; };
+		C1A0000000000000000000A9 /* ClickAssistLegitimacy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistLegitimacy.swift; sourceTree = "<group>"; };
+		C1A0000000000000000000AA /* ClickAssistAXGeometry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistAXGeometry.swift; sourceTree = "<group>"; };
+		C1A0000000000000000000AB /* ClickAssistSnapshotCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistSnapshotCodec.swift; sourceTree = "<group>"; };
+		C1A0000000000000000000AC /* ClickAssistActivationGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistActivationGate.swift; sourceTree = "<group>"; };
+		C1A0000000000000000000AD /* ClickAssistCircuitBreaker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistCircuitBreaker.swift; sourceTree = "<group>"; };
+		D1A0000000000000000000B3 /* ClickAssistServiceClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistServiceClient.swift; sourceTree = "<group>"; };
 		7A5B757C0780EA0A10BF1469 /* main.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		CF122E4B298E5744EE9F0578 /* mousecloak-Bridging-Header.h */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.c.h; path = "mousecloak-Bridging-Header.h"; sourceTree = "<group>"; };
 		DE27927C2F61D93200CCEBD3 /* UserPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserPreferences.swift; sourceTree = "<group>"; };
@@ -381,6 +395,7 @@
 			children = (
 				D1A0000000000000000000B1 /* AgentMain.swift */,
 				D1A0000000000000000000B2 /* AgentLog.swift */,
+				D1A0000000000000000000B3 /* ClickAssistServiceClient.swift */,
 			);
 			path = ClickAssistAgent;
 			sourceTree = "<group>";
@@ -406,6 +421,11 @@
 				C1A0000000000000000000A6 /* ClickAssistOverlay.swift */,
 				C1A0000000000000000000A7 /* ClickAssistEngine.swift */,
 				C1A0000000000000000000A8 /* ClickAssistGeometry.swift */,
+				C1A0000000000000000000A9 /* ClickAssistLegitimacy.swift */,
+				C1A0000000000000000000AA /* ClickAssistAXGeometry.swift */,
+				C1A0000000000000000000AB /* ClickAssistSnapshotCodec.swift */,
+				C1A0000000000000000000AC /* ClickAssistActivationGate.swift */,
+				C1A0000000000000000000AD /* ClickAssistCircuitBreaker.swift */,
 			);
 			path = ClickAssist;
 			sourceTree = "<group>";
@@ -914,6 +934,14 @@
 			files = (
 				F1A0000000000000000000C1 /* main.swift in Sources */,
 				F1A0000000000000000000C2 /* ClickAssistXPCProtocol.swift in Sources */,
+				D1A0000000000000000000C4 /* ClickAssistDecisionCore.swift in Sources */,
+				D1A0000000000000000000C5 /* ClickAssistCacheStore.swift in Sources */,
+				D1A0000000000000000000C7 /* ClickAssistResolver.swift in Sources */,
+				D1A0000000000000000000CA /* ClickAssistGeometry.swift in Sources */,
+				F1A0000000000000000000C5 /* ClickAssistLegitimacy.swift in Sources */,
+				F1A0000000000000000000C6 /* ClickAssistAXGeometry.swift in Sources */,
+				F1A0000000000000000000C7 /* ClickAssistSnapshotCodec.swift in Sources */,
+				F1A0000000000000000000C8 /* ClickAssistActivationGate.swift in Sources */,
 			);
 		};
 		D1A0000000000000000000A4 /* Sources */ = {
@@ -925,11 +953,14 @@
 				D1A0000000000000000000C4 /* ClickAssistDecisionCore.swift in Sources */,
 				D1A0000000000000000000C5 /* ClickAssistCacheStore.swift in Sources */,
 				D1A0000000000000000000C6 /* ClickAssistTap.swift in Sources */,
-				D1A0000000000000000000C7 /* ClickAssistResolver.swift in Sources */,
 				D1A0000000000000000000C8 /* ClickAssistOverlay.swift in Sources */,
 				D1A0000000000000000000C9 /* ClickAssistEngine.swift in Sources */,
 				D1A0000000000000000000CA /* ClickAssistGeometry.swift in Sources */,
 				F1A0000000000000000000C3 /* ClickAssistXPCProtocol.swift in Sources */,
+				D1A0000000000000000000CB /* ClickAssistSnapshotCodec.swift in Sources */,
+				D1A0000000000000000000CC /* ClickAssistCircuitBreaker.swift in Sources */,
+				D1A0000000000000000000CD /* ClickAssistServiceClient.swift in Sources */,
+				D1A0000000000000000000CE /* ClickAssistActivationGate.swift in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */
