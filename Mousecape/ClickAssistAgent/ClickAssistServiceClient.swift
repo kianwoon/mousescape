@@ -56,6 +56,11 @@ final class ClickAssistServiceClient: @unchecked Sendable {
     private var evidenceMarkedInvalid = false
     private var silenceHandled = false
     private var repliedRequests: Set<String> = []
+    /// Publication-gap measurement: interval between accepted snapshots that
+    /// carried usable evidence. Fixed ring, written only on the client queue.
+    private let snapGapRing = LatencyRing(capacity: 2048)
+    private var lastUsableSnapshotAt: CFTimeInterval = 0
+    private var lastSnapGapLogAt: CFTimeInterval = 0
 
     /// No successful snapshot for this long ⇒ evidence is invalid immediately.
     private static let snapshotSilenceLimit: CFTimeInterval = 1.0
@@ -120,6 +125,8 @@ final class ClickAssistServiceClient: @unchecked Sendable {
         currentEpoch = nil
         currentGeneration = 0
         lastSnapshotAt = 0
+        lastUsableSnapshotAt = 0
+        lastSnapGapLogAt = 0
         evidenceMarkedInvalid = false
         silenceHandled = false
         log("XPC_CONNECTING service=\(Self.serviceName)")
@@ -256,6 +263,25 @@ final class ClickAssistServiceClient: @unchecked Sendable {
             log(String(format: "XPC_SNAPSHOT_RX targets=%d bytes=%d epoch=%@ age_ms=%.1f",
                        decoded.wire.targets.count, data.count,
                        decoded.wire.epoch as NSString, decoded.ageMs))
+            // Usable = at least one target carried an actual verdict.
+            let usable = decoded.wire.targets.contains {
+                !$0.verdict.isEmpty && $0.verdict != ClickAssistVerdict.unknown.rawValue
+            }
+            if usable {
+                if lastUsableSnapshotAt > 0 {
+                    snapGapRing.record((now - lastUsableSnapshotAt) * 1_000_000)
+                }
+                lastUsableSnapshotAt = now
+                if lastSnapGapLogAt == 0 { lastSnapGapLogAt = now }
+                if now - lastSnapGapLogAt >= 5 {
+                    let g = snapGapRing.snapshotAndReset()
+                    if g.count > 0 {
+                        log(String(format: "SNAP_GAP samples=%d p50_ms=%.0f p95_ms=%.0f max_ms=%.0f",
+                                   g.count, g.p50Us / 1000, g.p95Us / 1000, g.maxUs / 1000))
+                    }
+                    lastSnapGapLogAt = now
+                }
+            }
         }
     }
 

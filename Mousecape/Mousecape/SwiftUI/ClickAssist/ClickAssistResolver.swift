@@ -403,8 +403,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         if moved { lastMovementAt = now }
 
         // An idle pointer is only truly idle when NOTHING is in assist range.
-        // Evidence has a 400 ms expiry (ClickAssistEvidence.maxAgeMs) while the
-        // idle cadence is 700 ms, so a resting pointer that HAS a candidate in
+        // Evidence has a 700 ms display window (ClickAssistEvidence.displayMaxAgeMs)
+        // while the idle cadence is 700 ms, so a resting pointer that HAS a candidate in
         // range would otherwise see its evidence expire between walks — rings and
         // assists would die exactly where the user is aiming. Keep the fast
         // cadence while the previous cycle had candidates near the pointer.
@@ -694,10 +694,22 @@ final class AccessibilityResolver: @unchecked Sendable {
         // refreshing last-seen for anything seen now and expiring only targets
         // stale beyond the freshness window.
         let now = CACurrentMediaTime()
+        let priorByKey: [String: CachedTarget] =
+            Dictionary(unionTargets.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
         var order: [String] = []
         var byKey: [String: CachedTarget] = [:]
         for t in out where byKey[t.key] == nil {
-            byKey[t.key] = t
+            // A walk that did not re-validate this target carries its LAST
+            // evidence (and collection timestamp) forward; only the geometry is
+            // new. Evidence age is therefore never renewed by publication.
+            var merged = t
+            if let prior = priorByKey[t.key], prior.collectedAt > 0 {
+                merged.verdict = prior.verdict
+                merged.chromeEligible = prior.chromeEligible
+                merged.evidenceGeneration = prior.evidenceGeneration
+                merged.collectedAt = prior.collectedAt
+            }
+            byKey[t.key] = merged
             order.append(t.key)
             lastSeen[t.key] = now
             coverageKeys.insert(t.key)
@@ -741,6 +753,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         let ms = (CACurrentMediaTime() - t0) * 1000
         let visited = Self.nodeBudget - budget
         let gen = nextGeneration()
+        var validatedKeys: Set<String> = []
         // Publish evidence for the THREE targets nearest the pointer — the same
         // set the router can consider. Bounded: at most 3 hit-tests + 3 ancestry
         // walks per cycle; everything else publishes without evidence.
@@ -765,8 +778,18 @@ final class AccessibilityResolver: @unchecked Sendable {
                     siblings: siblings.filter { $0 != target.rect })
                 out[idx].chromeEligible = chromeEligible(el, role: target.role)
                 out[idx].evidenceGeneration = gen
+                out[idx].collectedAt = CACurrentMediaTime()
+                validatedKeys.insert(target.key)
             }
         }
+        // Carried evidence stays usable until its COLLECTION age expires (the
+        // display/activation windows), not because a later cycle republished.
+        for idx in out.indices where out[idx].collectedAt > 0 {
+            out[idx].evidenceGeneration = gen
+        }
+        let partialNoRenew = partial
+            ? out.filter { $0.collectedAt > 0 && !validatedKeys.contains($0.key) }.count
+            : 0
         let snap = CacheSnapshot(generation: gen, targets: out, valid: true, reason: "fresh",
                                  stamp: CACurrentMediaTime(), resolverMs: ms, pointer: pointer,
                                  appName: appName, pid: pid)
@@ -776,7 +799,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         let rej = rejCounts.isEmpty ? "-"
             : rejCounts.sorted { $0.key < $1.key }
                 .map { "\($0.key):\($0.value)" }.joined(separator: ",")
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d tileTooWide=%d deduped=%d rej=%@ pwinMode=%@ pidSrc=%@",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -787,7 +810,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                    pwinStats.guidedFallback ? 1 : 0,
                    (pwinStats.guidedFallbackReason ?? "-") as NSString,
                    rotationSkipped ? 1 : 0, rowTooLarge,
-                   tileTooSmall, tileTooLarge, tileTooWide, dedupedCount, rej as NSString,
+                   tileTooSmall, tileTooLarge, tileTooWide, dedupedCount, partialNoRenew, rej as NSString,
                    pwinMode as NSString,
                    pidSrc as NSString))
 

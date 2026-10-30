@@ -167,10 +167,11 @@ final class TargetingOverlay {
 
     private func render(_ s: CacheSnapshot) {
         guard !dead else { return }
-        let ageMs = (CACurrentMediaTime() - s.stamp) * 1000
+        let now = CACurrentMediaTime()
+        let ageMs = (now - s.stamp) * 1000
         // Render ONLY from published evidence. Stale/missing evidence (including
         // a snapshot from a replaced service epoch) shows nothing.
-        let fresh = s.valid && ageMs <= ClickAssistEvidence.maxAgeMs
+        let fresh = s.valid && ageMs <= ClickAssistEvidence.displayMaxAgeMs
             && s.epoch != ""
         let pointer = CGEvent(source: nil)?.location ?? .zero
         var action = "none"
@@ -185,7 +186,8 @@ final class TargetingOverlay {
                                                                role: $0.role, label: $0.label,
                                                                verdict: $0.verdict,
                                                                chromeEligible: $0.chromeEligible,
-                                                               evidenceGeneration: $0.evidenceGeneration) }
+                                                               evidenceGeneration: $0.evidenceGeneration,
+                                                               collectedAt: $0.collectedAt) }
             // Up to three nearest in-tolerance first-class candidates, validated
             // at their own destination points (fail-closed). Every confirmed one
             // is indicated; the nearest wins the click.
@@ -198,10 +200,12 @@ final class TargetingOverlay {
                     ? DecisionCore.centerPoint(into: choice.candidate.rect)
                     : DecisionCore.clampPoint(pointer, into: choice.candidate.rect,
                                               inset: choice.candidate.inset)
-                let evidence = ClickAssistEvidence.state(
+                let evidence = ClickAssistEvidence.displayState(
                     evidenceGeneration: choice.candidate.evidenceGeneration,
                     currentGeneration: s.generation,
-                    ageMs: ageMs)
+                    ageMs: choice.candidate.collectedAt > 0
+                        ? (now - choice.candidate.collectedAt) * 1000
+                        : ageMs)
                 let verdict: ClickAssistVerdict = evidence == .fresh
                     ? choice.candidate.verdict : .unknown
                 if verdict == .confirmed || verdict == .confirmedWeak {

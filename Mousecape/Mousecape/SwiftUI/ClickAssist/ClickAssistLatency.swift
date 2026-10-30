@@ -26,6 +26,7 @@ final class LatencyRing: @unchecked Sendable {
         var count: Int
         var maxUs: Double
         var p50Us: Double
+        var p95Us: Double
         var p99Us: Double
         var p99_9Us: Double
         var dropped: UInt64
@@ -84,6 +85,7 @@ final class LatencyRing: @unchecked Sendable {
         return Stats(count: n,
                      maxUs: values.last.map(Double.init) ?? 0,
                      p50Us: Self.nearestRank(values, 50),
+                     p95Us: Self.nearestRank(values, 95),
                      p99Us: Self.nearestRank(values, 99),
                      p99_9Us: Self.nearestRank(values, 99.9),
                      dropped: dropped,

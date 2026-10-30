@@ -21,6 +21,9 @@ struct CachedTarget: Sendable {
     var verdict: ClickAssistVerdict = .unknown
     var chromeEligible: Bool = false
     var evidenceGeneration: UInt64 = 0
+    /// Monotonic CACurrentMediaTime when this evidence was COLLECTED/VALIDATED.
+    /// 0 means no evidence. Publication/encode time never refreshes this.
+    var collectedAt: CFTimeInterval = 0
 }
 
 /// Immutable snapshot published by the background resolver and read by the tap.

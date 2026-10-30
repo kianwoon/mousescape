@@ -75,6 +75,10 @@ struct SnapshotWireTarget: Codable, Equatable, Sendable {
     var chromeEligible: Bool
     var verdict: String
     var evidenceGeneration: UInt64
+    /// Per-target COLLECTION time (CACurrentMediaTime seconds). Kept separate
+    /// from the snapshot's `publishedAt` so encode/send latency cannot make
+    /// evidence look younger than it is.
+    var collectedAt: Double
 
     init(_ t: CachedTarget) {
         key = t.key
@@ -86,6 +90,7 @@ struct SnapshotWireTarget: Codable, Equatable, Sendable {
         chromeEligible = t.chromeEligible
         verdict = t.verdict.rawValue
         evidenceGeneration = t.evidenceGeneration
+        collectedAt = t.collectedAt
     }
 
     var cachedTarget: CachedTarget {
@@ -94,7 +99,8 @@ struct SnapshotWireTarget: Codable, Equatable, Sendable {
                      tier: tier == 1 ? .firstClass : .secondClass,
                      verdict: ClickAssistVerdict(rawValue: verdict) ?? .unknown,
                      chromeEligible: chromeEligible,
-                     evidenceGeneration: evidenceGeneration)
+                     evidenceGeneration: evidenceGeneration,
+                     collectedAt: collectedAt)
     }
 }
 

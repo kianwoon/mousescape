@@ -86,10 +86,14 @@ enum DecisionCore {
         let verdict: ClickAssistVerdict
         let chromeEligible: Bool
         let evidenceGeneration: UInt64
+        /// Collection time of the evidence (0 = none). Age is measured from here,
+        /// never from snapshot publish time.
+        let collectedAt: CFTimeInterval
 
         init(key: String, rect: CGRect, inset: CGFloat, tier: Tier, role: String = "",
              label: String = "", verdict: ClickAssistVerdict = .unknown,
-             chromeEligible: Bool = false, evidenceGeneration: UInt64 = 0) {
+             chromeEligible: Bool = false, evidenceGeneration: UInt64 = 0,
+             collectedAt: CFTimeInterval = 0) {
             self.key = key
             self.rect = rect
             self.inset = inset
@@ -99,6 +103,7 @@ enum DecisionCore {
             self.verdict = verdict
             self.chromeEligible = chromeEligible
             self.evidenceGeneration = evidenceGeneration
+            self.collectedAt = collectedAt
         }
     }
 
@@ -442,11 +447,14 @@ struct GestureLatch: Sendable {
     let edgeCore: Bool
 }
 
-/// Published-evidence freshness. ONE constant shared by resolver and tap: the
-/// resolver stamps evidence with the cycle generation, the tap only reads it.
+/// Published-evidence freshness. Display and activation have DIFFERENT windows:
+/// the ring may keep showing evidence across a slow cycle, but a redirect must
+/// act only on evidence that is still current enough to be safe.
 enum ClickAssistEvidence {
-    /// Evidence older than this, or from another generation, is unusable.
-    static let maxAgeMs: Double = 400
+    /// Ring/overlay may display evidence collected within this window.
+    static let displayMaxAgeMs: Double = 700
+    /// Redirect/AXPress may act only on evidence collected within this window.
+    static let activationMaxAgeMs: Double = 400
 
     enum State: String, Sendable {
         case fresh
@@ -456,11 +464,32 @@ enum ClickAssistEvidence {
     }
 
     static func state(evidenceGeneration: UInt64, currentGeneration: UInt64,
-                      ageMs: Double) -> State {
+                      ageMs: Double, maxAgeMs: Double) -> State {
         if evidenceGeneration == 0 { return currentGeneration == 0 ? .fresh : .missing }
         if evidenceGeneration != currentGeneration { return .wrongGeneration }
         if ageMs > maxAgeMs { return .stale }
         return .fresh
+    }
+
+    /// Ring display staleness (single site: overlay/render).
+    static func displayState(evidenceGeneration: UInt64, currentGeneration: UInt64,
+                             ageMs: Double) -> State {
+        state(evidenceGeneration: evidenceGeneration, currentGeneration: currentGeneration,
+              ageMs: ageMs, maxAgeMs: displayMaxAgeMs)
+    }
+
+    /// Redirect/AXPress staleness (single site: tap delivery gate).
+    static func activationState(evidenceGeneration: UInt64, currentGeneration: UInt64,
+                                ageMs: Double) -> State {
+        state(evidenceGeneration: evidenceGeneration, currentGeneration: currentGeneration,
+              ageMs: ageMs, maxAgeMs: activationMaxAgeMs)
+    }
+
+    /// Evidence age is COLLECTION time: a cycle that did not complete evidence for
+    /// a target must publish that target's previous timestamp untouched.
+    static func renewedCollectedAt(existing: CFTimeInterval,
+                                   validatedAt: CFTimeInterval?) -> CFTimeInterval {
+        validatedAt ?? existing
     }
 }
 

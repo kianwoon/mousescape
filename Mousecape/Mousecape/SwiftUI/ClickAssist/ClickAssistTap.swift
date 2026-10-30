@@ -130,7 +130,7 @@ final class AssistTap: @unchecked Sendable {
         log("TAP_ACTIVE mutable=defaultTap point=\(point == .cghidEventTap ? "hid" : "session") tolerance=\(tolerance) snapshotMiss=\(cacheStoreForDelivery?.snapshotTrylockMiss ?? 0)")
         // Runtime invariant marker: the callback is a pure snapshot consumer; AX
         // runs only on the resolver queue (evidence) and the serial worker (press).
-        log("TAP_AX_FREE invariant=callback-zero-ax evidenceMaxAgeMs=\(Int(ClickAssistEvidence.maxAgeMs)) pressExpiryMs=\(Int(AXPressGate.defaultExpiryMs))")
+        log("TAP_AX_FREE invariant=callback-zero-ax displayMaxAgeMs=\(Int(ClickAssistEvidence.displayMaxAgeMs)) activationMaxAgeMs=\(Int(ClickAssistEvidence.activationMaxAgeMs)) pressExpiryMs=\(Int(AXPressGate.defaultExpiryMs))")
         return true
     }
 
@@ -187,7 +187,8 @@ final class AssistTap: @unchecked Sendable {
                                                                      role: $0.role, label: $0.label,
                                                                      verdict: $0.verdict,
                                                                      chromeEligible: $0.chromeEligible,
-                                                                     evidenceGeneration: $0.evidenceGeneration) },
+                                                                     evidenceGeneration: $0.evidenceGeneration,
+                                                                     collectedAt: $0.collectedAt) },
                               valid: fresh, reason: reason, generation: s.generation,
                               ageMs: ageMs, source: "cache", pid: s.pid)
         }
@@ -225,9 +226,12 @@ final class AssistTap: @unchecked Sendable {
         let isStatic = res.source == "static"
         let evidence = isStatic
             ? ClickAssistEvidence.State.fresh
-            : ClickAssistEvidence.state(evidenceGeneration: candidate.evidenceGeneration,
-                                        currentGeneration: res.generation,
-                                        ageMs: res.ageMs)
+            : ClickAssistEvidence.activationState(
+                evidenceGeneration: candidate.evidenceGeneration,
+                currentGeneration: res.generation,
+                ageMs: candidate.collectedAt > 0
+                    ? (CACurrentMediaTime() - candidate.collectedAt) * 1000
+                    : res.ageMs)
         if requiresConfirmation, evidence != .fresh {
             return DeliveryPlan(kind: .rejected, verdict: candidate.verdict,
                                 rejectReason: evidence == .missing

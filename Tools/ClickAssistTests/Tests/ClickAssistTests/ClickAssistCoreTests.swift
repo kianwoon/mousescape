@@ -310,24 +310,24 @@ final class ClickAssistCoreTests: XCTestCase {
 
     // MARK: - H. published evidence / async AXPress policy
 
-    /// Fresh evidence: same generation, within the 400 ms window.
+    /// Fresh evidence: same generation, within the activation window.
     func testH1_evidenceFresh() {
-        XCTAssertEqual(ClickAssistEvidence.state(evidenceGeneration: 7, currentGeneration: 7,
-                                                 ageMs: 10), .fresh)
+        XCTAssertEqual(ClickAssistEvidence.activationState(evidenceGeneration: 7, currentGeneration: 7,
+                                                           ageMs: 10), .fresh)
     }
 
-    /// Evidence past maxAgeMs is stale (the tap must not refresh it synchronously).
+    /// Evidence past activationMaxAgeMs is stale (the tap must not refresh it synchronously).
     func testH2_evidenceStale() {
-        XCTAssertEqual(ClickAssistEvidence.state(evidenceGeneration: 7, currentGeneration: 7,
-                                                 ageMs: ClickAssistEvidence.maxAgeMs + 1), .stale)
+        XCTAssertEqual(ClickAssistEvidence.activationState(evidenceGeneration: 7, currentGeneration: 7,
+                                                           ageMs: ClickAssistEvidence.activationMaxAgeMs + 1), .stale)
     }
 
     /// Evidence from another publish cycle is unusable even if the clock is fresh.
     func testH3_evidenceWrongGeneration() {
-        XCTAssertEqual(ClickAssistEvidence.state(evidenceGeneration: 6, currentGeneration: 7,
-                                                 ageMs: 1), .wrongGeneration)
-        XCTAssertEqual(ClickAssistEvidence.state(evidenceGeneration: 0, currentGeneration: 7,
-                                                 ageMs: 1), .missing)
+        XCTAssertEqual(ClickAssistEvidence.activationState(evidenceGeneration: 6, currentGeneration: 7,
+                                                           ageMs: 1), .wrongGeneration)
+        XCTAssertEqual(ClickAssistEvidence.activationState(evidenceGeneration: 0, currentGeneration: 7,
+                                                           ageMs: 1), .missing)
     }
 
     /// The worker accepts a request inside 150 ms and rejects one past it.
@@ -405,7 +405,8 @@ final class ClickAssistCoreTests: XCTestCase {
 
     /// Evidence outlives a press request by design (400 ms vs 150 ms).
     func testI4_expiryRelationship() {
-        XCTAssertGreaterThan(ClickAssistEvidence.maxAgeMs, AXPressGate.defaultExpiryMs)
+        XCTAssertGreaterThan(ClickAssistEvidence.activationMaxAgeMs, AXPressGate.defaultExpiryMs)
+        XCTAssertGreaterThan(ClickAssistEvidence.displayMaxAgeMs, ClickAssistEvidence.activationMaxAgeMs)
         XCTAssertEqual(AXPressGate.defaultExpiryMs, 150)
         XCTAssertEqual(AXPressAdmission.maxPendingPresses, 4)
         XCTAssertEqual(AXPressAdmission.dedupeWindowMs, 250)
