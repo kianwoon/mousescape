@@ -190,6 +190,65 @@ final class AssistTap: @unchecked Sendable {
                                    destination: destination, siblings: siblings)
     }
 
+    /// What may be done with ONE candidate aimed at ONE destination point.
+    private struct DeliveryPlan {
+        enum Kind {
+            /// Exactly one AXPress on the plan's element, then consume the gesture.
+            case axPress(CGPoint)
+            /// Legacy synthetic delivery: mutate the event to this point.
+            case synthetic(CGPoint)
+            /// Nothing may be delivered; the caller takes its passthrough path.
+            case rejected
+        }
+        let kind: Kind
+        /// The live element behind the candidate, when the resolver supplied one
+        /// (nil: static harness, or the entry was dropped). Needed by the caller
+        /// for fresh-frame revalidation even when the plan is synthetic.
+        let element: AXUIElement?
+        let verdict: LegitimacyPolicy.Verdict
+        /// One token for a passthrough line: `unavailable=1` when the evidence was
+        /// confirmed but the live element/chrome gate could not be re-proven,
+        /// `verdict=<v>` when the evidence itself failed.
+        let reasonToken: String
+    }
+
+    /// THE single delivery decision. Given a candidate and the point we would aim
+    /// at, it looks up the live element, applies the structural AXPress gate
+    /// (`axPressEligible`), computes the ONE legitimacy verdict for that
+    /// destination, and returns what may be done. Weak evidence
+    /// (`.confirmedWeak`) is deliverable ONLY as AXPress — the chrome gate is what
+    /// makes it safe; it is never synthesised. A material frame move (> 24 pt)
+    /// still cancels inside `performAXPressDelivery`.
+    ///
+    /// `requiresConfirmation: false` is the direct-hit self path, which is
+    /// admitted by the router's own hit and delivers on structural eligibility
+    /// alone (no extra renderer hit-test, exactly as before).
+    private func resolveDelivery(for candidate: Candidate, destination: CGPoint,
+                                 res: Resolution,
+                                 requiresConfirmation: Bool = true,
+                                 allowsSynthetic: Bool) -> DeliveryPlan {
+        // Verdict first, in the same AX order as the pre-refactor branches.
+        let verdict: LegitimacyPolicy.Verdict = requiresConfirmation
+            ? legitimacyVerdict(for: candidate, destination: destination, res: res)
+            : .confirmed
+        let element = cacheStoreForDelivery?.element(for: candidate.key, pid: res.pid)
+        let axPressReady = element.map { AssistTap.axPressEligible($0, role: candidate.role) } ?? false
+        let evidenceOK = !requiresConfirmation
+            || verdict == .confirmed || verdict == .confirmedWeak
+        if evidenceOK, axPressReady, let el = element {
+            return DeliveryPlan(kind: .axPress(destination), element: el, verdict: verdict,
+                                reasonToken: "unavailable=0")
+        }
+        // Strong evidence only: a synthetic click aimed at a weak answer is unsafe.
+        if requiresConfirmation, verdict == .confirmed, allowsSynthetic {
+            return DeliveryPlan(kind: .synthetic(destination), element: element,
+                                verdict: verdict, reasonToken: "unavailable=0")
+        }
+        return DeliveryPlan(kind: .rejected, element: element, verdict: verdict,
+                            reasonToken: evidenceOK ? "unavailable=1"
+                                                    : "verdict=\(verdict.rawValue)")
+    }
+
     /// Diagnostics helper for the no-candidate branch only: the nearest
     /// `limit` eligible candidates with boundary distance, sorted ascending.
     /// Pure — reads the existing candidate array, allocates nothing else.
@@ -264,10 +323,13 @@ final class AssistTap: @unchecked Sendable {
                 // AXButton (e.g. the real 16x16 tab-close glyph), a synthetic
                 // click is ignored by Chromium. AXPress acts on the element, so
                 // deliver it directly. Web surfaces fail the gate (AXWebArea).
-                if let el = cacheStoreForDelivery?.element(for: hit.key, pid: res.pid),
-                   AssistTap.axPressEligible(el, role: hit.role),
+                let selfPlan = resolveDelivery(for: hit,
+                                               destination: DecisionCore.centerPoint(into: hit.rect),
+                                               res: res, requiresConfirmation: false,
+                                               allowsSynthetic: false)
+                if case .axPress(let dest) = selfPlan.kind, let el = selfPlan.element,
                    performAXPressDelivery(element: el, best: hit,
-                                          corrected: DecisionCore.centerPoint(into: hit.rect),
+                                          corrected: dest,
                                           snap: DecisionCore.snapMode(for: hit),
                                           dist: 0, cands: 1, res: res, label: label,
                                           original: original, started: started,
@@ -280,33 +342,31 @@ final class AssistTap: @unchecked Sendable {
                 // be promoted, so web content keeps the untouched direct-hit path.
                 var promotionFailure: String?
                 if let promoted = promotedTarget(res: res, point: original, containedIn: hit.rect) {
-                    let promotedDest = DecisionCore.centerPoint(into: promoted.rect)
-                    let promotedVerdict = legitimacyVerdict(for: promoted, destination: promotedDest,
-                                                             res: res)
-                    if promotedVerdict == .confirmed || promotedVerdict == .confirmedWeak {
-                        if let el = cacheStoreForDelivery?.element(for: promoted.key, pid: res.pid),
-                           AssistTap.axPressEligible(el, role: promoted.role) {
-                            if performAXPressDelivery(element: el, best: promoted,
-                                                      corrected: promotedDest,
-                                                      snap: DecisionCore.snapMode(for: promoted),
-                                                      dist: DecisionCore.boundaryDistance(original, promoted.rect),
-                                                      cands: 1, res: res, label: label,
-                                                      original: original, started: started,
-                                                      extra: "promoted=1 from=\(hit.key) ") {
-                                return nil
-                            }
+                    let plan = resolveDelivery(for: promoted,
+                                               destination: DecisionCore.centerPoint(into: promoted.rect),
+                                               res: res, allowsSynthetic: false)
+                    if case .axPress(let dest) = plan.kind, let el = plan.element {
+                        if performAXPressDelivery(element: el, best: promoted,
+                                                  corrected: dest,
+                                                  snap: DecisionCore.snapMode(for: promoted),
+                                                  dist: DecisionCore.boundaryDistance(original, promoted.rect),
+                                                  cands: 1, res: res, label: label,
+                                                  original: original, started: started,
+                                                  extra: "promoted=1 from=\(hit.key) ") {
+                            return nil
                         }
-                        // Fail closed: eligibility could not be re-proven at
-                        // delivery, so this click is NOT redirected. Fall through
+                        // Fail closed: the gate re-check at delivery lost the
+                        // target, so this click is NOT redirected. Fall through
                         // to the normal direct-hit passthrough (which computes the
                         // hit's own verdict and logs the other= diagnostics).
                         promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) unavailable=1"
                     } else {
-                        promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) verdict=\(promotedVerdict.rawValue)"
+                        promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) \(plan.reasonToken)"
                     }
                 }
-                let verdict = legitimacyVerdict(for: hit, destination: original, res: res)
-                var extra = "element=\(hit.key) boundary=0.0 action=passthrough legitimacy=\(verdict.rawValue)"
+                let hitPlan = resolveDelivery(for: hit, destination: original, res: res,
+                                              allowsSynthetic: false)
+                var extra = "element=\(hit.key) boundary=0.0 action=passthrough legitimacy=\(hitPlan.verdict.rawValue)"
                 if let promotionFailure { extra += " " + promotionFailure }
                 if let other = others.first { extra += " other=\(other.key) other_dist=\(String(format: "%.1f", other.dist))" }
                 emit("PASSTHROUGH", type: label, original: original, mutated: nil,
@@ -329,14 +389,12 @@ final class AssistTap: @unchecked Sendable {
                 // candidate passing the structural AXPress gate wins if its own
                 // legitimacy confirms. Everything else below is untouched.
                 if let promoted = promotedTarget(res: res, point: original, containedIn: nil) {
-                    let promotedDest = DecisionCore.centerPoint(into: promoted.rect)
-                    let promotedVerdict = legitimacyVerdict(for: promoted,
-                                                            destination: promotedDest, res: res)
-                    if promotedVerdict == .confirmed || promotedVerdict == .confirmedWeak,
-                       let el = cacheStoreForDelivery?.element(for: promoted.key, pid: res.pid),
-                       AssistTap.axPressEligible(el, role: promoted.role),
+                    let plan = resolveDelivery(for: promoted,
+                                               destination: DecisionCore.centerPoint(into: promoted.rect),
+                                               res: res, allowsSynthetic: false)
+                    if case .axPress(let dest) = plan.kind, let el = plan.element,
                        performAXPressDelivery(element: el, best: promoted,
-                                              corrected: promotedDest,
+                                              corrected: dest,
                                               snap: DecisionCore.snapMode(for: promoted),
                                               dist: DecisionCore.boundaryDistance(original, promoted.rect),
                                               cands: 1, res: res, label: label,
@@ -360,7 +418,7 @@ final class AssistTap: @unchecked Sendable {
                 let scored = DecisionCore.displayCandidates(point: original,
                                                             candidates: res.candidates,
                                                             tolerance: tolerance, limit: 3)
-                var confirmed: [(DecisionCore.ScoredCandidate, CGPoint, DecisionCore.Snap, Bool)] = []
+                var confirmed: [(DecisionCore.ScoredCandidate, CGPoint, DecisionCore.Snap, DeliveryPlan)] = []
                 var firstFailure: (String, LegitimacyPolicy.Verdict)?
                 for choice in scored {
                     let snap = DecisionCore.snapMode(for: choice.candidate)
@@ -368,25 +426,15 @@ final class AssistTap: @unchecked Sendable {
                         ? DecisionCore.centerPoint(into: choice.candidate.rect)
                         : DecisionCore.clampPoint(original, into: choice.candidate.rect,
                                                   inset: choice.candidate.inset)
-                    let verdict = legitimacyVerdict(for: choice.candidate,
-                                                    destination: dest, res: res)
-                    if verdict == .confirmed {
-                        confirmed.append((choice, dest, snap, false))
-                    } else if verdict == .confirmedWeak {
-                        // Weak evidence is deliverable ONLY for chrome-gated
-                        // targets: AXPress acts on the element itself, so the
-                        // coordinate hit-test weakness that makes Chromium chrome
-                        // answers weak is immaterial. Web candidates never pass
-                        // the gate, so weak web evidence stays passthrough.
-                        if let el = cacheStoreForDelivery?.element(for: choice.candidate.key,
-                                                                   pid: res.pid),
-                           AssistTap.axPressEligible(el, role: choice.candidate.role) {
-                            confirmed.append((choice, dest, snap, true))
-                        } else if firstFailure == nil {
-                            firstFailure = (choice.candidate.key, verdict)
+                    let plan = resolveDelivery(for: choice.candidate, destination: dest,
+                                               res: res, allowsSynthetic: true)
+                    switch plan.kind {
+                    case .axPress, .synthetic:
+                        confirmed.append((choice, dest, snap, plan))
+                    case .rejected:
+                        if firstFailure == nil {
+                            firstFailure = (choice.candidate.key, plan.verdict)
                         }
-                    } else if firstFailure == nil {
-                        firstFailure = (choice.candidate.key, verdict)
                     }
                 }
                 guard let winner = confirmed.first else {
@@ -398,11 +446,12 @@ final class AssistTap: @unchecked Sendable {
                 }
                 let best = winner.0.candidate
                 let snap = winner.2
-                let weakEvidence = winner.3
+                let plan = winner.3
+                let weakEvidence = plan.verdict == .confirmedWeak
                 // Delivery side table: the live element behind this candidate, when
                 // the resolver supplied one. nil (static harness, or dropped entry)
                 // keeps the exact legacy synthetic path below.
-                let element = cacheStoreForDelivery?.element(for: best.key, pid: res.pid)
+                let element = plan.element
 
                 // Fresh-frame revalidation: never aim at a moved target. Any AX
                 // failure falls back to the cached rect; a material move (> 24 pt
@@ -422,7 +471,7 @@ final class AssistTap: @unchecked Sendable {
 
                 // Chrome-button delivery: structural gate, then EXACTLY ONE
                 // AXPress. Synthetic CGEvents are ignored by Chromium chrome.
-                if let element, AssistTap.axPressEligible(element, role: best.role),
+                if case .axPress = plan.kind, let element,
                    performAXPressDelivery(element: element, best: best, corrected: corrected,
                                           snap: snap, dist: winner.0.dist,
                                           cands: confirmed.count, res: res, label: label,
