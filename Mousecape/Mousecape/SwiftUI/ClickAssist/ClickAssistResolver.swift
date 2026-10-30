@@ -59,6 +59,13 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// 120 000 pt² (≈ 346 × 346): same spirit as the row guard; a 204×290 thumbnail
     /// (59 160) passes, a 1466×944 container (1 383 904) does not.
     private static let tileMaxArea: CGFloat = 120_000
+    /// USER INVARIANT: the dimension of a legitimate click cannot be too big.
+    /// Any non-track candidate larger than this area — or taller than this height —
+    /// is wrong for sure and is rejected outright, regardless of role, capability
+    /// (AXPress), or hit-test answers. Wide-thin track roles (AXSlider/AXScrollBar)
+    /// are exempt via isWideTrack (a seek bar legitimately spans the screen).
+    private static let maxControlArea: CGFloat = 150_000
+    private static let maxControlHeight: CGFloat = 600
     /// Two candidates whose frames overlap this completely are the SAME control
     /// exposed twice (e.g. AXImage + its AXGroup wrapper); the smaller area wins.
     private static let duplicateIoUThreshold: CGFloat = 0.85
@@ -199,6 +206,8 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// envelope (too small / too large) and near-identical duplicates merged, per
     /// cycle. Reset per refresh; published as `tileTooSmall=`/`tileTooLarge=`/`deduped=`.
     private var tileTooSmall = 0
+    /// Candidates rejected by the user size invariant (too big = wrong for sure).
+    private var oversized = 0
     private var tileTooLarge = 0
     private var dedupedCount = 0
 
@@ -1144,6 +1153,15 @@ final class AccessibilityResolver: @unchecked Sendable {
         guard let rect = frame(el), rect.width >= 4, rect.height >= 4,
               isWideTrack || (rect.width < 4000 && rect.height < 2000),
               rect.intersects(screenUnion) else {
+            return false
+        }
+        // USER INVARIANT (final): too big = wrong for sure. Applies to EVERY
+        // admitted path — role whitelist, row/tile envelope, capability admission —
+        // so no oversized wrapper can ever reach the ring.
+        if !isWideTrack, rect.width * rect.height > Self.maxControlArea
+            || rect.height > Self.maxControlHeight {
+            oversized += 1
+            noteRejectedNearPointer(el, role: role)
             return false
         }
         // Row-like roles pass the role filter only when row-sized; a page/sidebar
