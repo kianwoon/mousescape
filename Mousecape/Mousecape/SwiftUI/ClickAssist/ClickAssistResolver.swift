@@ -97,6 +97,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var lastResolvedPid: pid_t = 0
     private var running = false
     private var loggedSecure: Set<String> = []
+    private var loggedRowCapabilities: Set<String> = []
     /// Per-target last time the AX walk (or pointer seed) actually saw it. Used to
     /// keep a monotonic union across truncated walks.
     private var lastSeen: [String: CFTimeInterval] = [:]
@@ -1147,6 +1148,25 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// pointer-window priority entry point and for Chromium's unhelpful hit-testing.
     private func windowUnderPointer(windows: [AXUIElement], pointer: CGPoint,
                                     ownerPid: pid_t) -> (window: AXUIElement?, mode: String) {
+        // Overlapping windows from the same browser cannot be distinguished
+        // by frame containment. The live hit's AXWindow supplies that identity.
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.05)
+        var hit: AXUIElement?
+        if AXUIElementCopyElementAtPosition(system, Float(pointer.x), Float(pointer.y), &hit) == .success,
+           let hit, let hitFrame = frame(hit),
+           let rawWindow = attr(hit, kAXWindowAttribute),
+           CFGetTypeID(rawWindow) == AXUIElementGetTypeID() {
+            let window = rawWindow as! AXUIElement
+            var hitPID: pid_t = 0
+            AXUIElementGetPid(hit, &hitPID)
+            if let windowFrame = frame(window),
+               GeometryPolicy.hitWindowIsCoherent(expectedPID: ownerPid, hitPID: hitPID,
+                   hitFrame: hitFrame, windowFrame: windowFrame, pointer: pointer),
+               let kids = attr(window, kAXChildrenAttribute).flatMap(axArray), !kids.isEmpty {
+                return (window, "hit-window")
+            }
+        }
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                     kCGNullWindowID) as? [[String: Any]] else {
             // No CG list at all: AX frames are the only authority (see fallback).
@@ -1350,7 +1370,36 @@ final class AccessibilityResolver: @unchecked Sendable {
                 hasPressAction = (actions as? [String])?.contains("AXPress") == true
             }
         }
-        guard GeometryPolicy.isActionable(role: role, hasPressAction: hasPressAction),
+        var nativeSelectableRow = false
+        if GeometryPolicy.rowRoles.contains(role), !hasPressAction {
+            var selectionSettable = DarwinBoolean(false)
+            let selectedResult = AXUIElementIsAttributeSettable(el, kAXSelectedAttribute as CFString,
+                                                               &selectionSettable)
+            let rowName = stringAttr(el, kAXDescriptionAttribute) ?? stringAttr(el, kAXTitleAttribute) ?? "-"
+            if loggedRowCapabilities.insert("\(lastResolvedPid)|\(rowName)").inserted {
+                var rowActions: CFArray?
+                _ = AXUIElementCopyActionNames(el, &rowActions)
+                log("NATIVE_ROW_CAP name=\(rowName.replacingOccurrences(of: "\n", with: "/")) selectedResult=\(selectedResult.rawValue) settable=\(selectionSettable.boolValue) selected=\(String(describing: attr(el, kAXSelectedAttribute))) subrole=\(stringAttr(el, kAXSubroleAttribute) ?? "-") actions=\(String(describing: rowActions))")
+            }
+            if selectedResult == .success, selectionSettable.boolValue {
+                var node: AXUIElement? = el
+                var inList = false
+                var inWeb = false
+                for _ in 0..<24 {
+                    guard let current = node else { break }
+                    let ancestorRole = stringAttr(current, kAXRoleAttribute) ?? ""
+                    inList = inList || ancestorRole == "AXList" || ancestorRole == "AXOutline"
+                    inWeb = inWeb || ancestorRole == "AXWebArea"
+                    if inWeb || ancestorRole == "AXWindow" { break }
+                    guard let rawParent = attr(current, kAXParentAttribute),
+                          CFGetTypeID(rawParent) == AXUIElementGetTypeID() else { break }
+                    node = (rawParent as! AXUIElement)
+                }
+                nativeSelectableRow = GeometryPolicy.isNativeSelectableRow(role: role,
+                    selectionSettable: true, inNativeList: inList, inWebContent: inWeb)
+            }
+        }
+        guard GeometryPolicy.isActionable(role: role, hasPressAction: hasPressAction) || nativeSelectableRow,
               (attr(el, kAXEnabledAttribute) as? Bool) != false else { return false }
         // Secure text fields are never redirect candidates: a near miss must
         // pass through instead of being clamped into a password control.
@@ -1380,8 +1429,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         }
         guard let cls = verdict.candidateClass, rect.intersects(screenUnion) else { return false }
         // A press group is published as a group, not as a container role.
-        let admittedRole = hasPressAction && !GeometryPolicy.isActionable(role: role, hasPressAction: false)
-            ? "AXPressGroup" : role
+        let admittedRole = nativeSelectableRow ? "AXSelectableRow"
+            : (hasPressAction && !GeometryPolicy.isActionable(role: role, hasPressAction: false)
+                ? "AXPressGroup" : role)
         let ident = stringAttr(el, kAXIdentifierAttribute)
         let title = stringAttr(el, kAXTitleAttribute)
         // IDENTITY: a label alone is not an identity. "Close" names every tab

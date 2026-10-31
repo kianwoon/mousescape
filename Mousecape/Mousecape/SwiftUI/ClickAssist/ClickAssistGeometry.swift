@@ -48,7 +48,14 @@ enum GeometryPolicy {
     /// Names and rectangles do not prove that page furniture can be clicked.
     static func isActionable(role: String, hasPressAction: Bool) -> Bool {
         directRoles.contains(role) || admittedTrackRoles.contains(role)
-            || role == "AXPressGroup" || hasPressAction
+            || role == "AXPressGroup" || role == "AXSelectableRow" || hasPressAction
+    }
+
+    /// Selection is an explicit action for native sidebar rows even when they
+    /// expose no AXPress. Never infer this capability from a row's name/size.
+    static func isNativeSelectableRow(role: String, selectionSettable: Bool,
+                                       inNativeList: Bool, inWebContent: Bool) -> Bool {
+        rowRoles.contains(role) && selectionSettable && inNativeList && !inWebContent
     }
 
     /// Full-screen sliders may extend across letterboxing beyond their player's
@@ -56,6 +63,28 @@ enum GeometryPolicy {
     static func sliderHitCoversDestination(candidate: CGRect, hit: CGRect,
                                            destination: CGPoint) -> Bool {
         candidate.contains(destination) && hit.contains(destination)
+    }
+
+    /// A renderer's inner video surface and a real slider can be siblings.
+    /// Require an exact common-container frame in BOTH live ancestry chains,
+    /// and keep that container local to the hit surface (not the whole page).
+    static func hitWindowIsCoherent(expectedPID: pid_t, hitPID: pid_t,
+                                    hitFrame: CGRect, windowFrame: CGRect,
+                                    pointer: CGPoint) -> Bool {
+        expectedPID > 0 && expectedPID == hitPID && isValidFrame(hitFrame)
+            && isValidFrame(windowFrame) && hitFrame.contains(pointer)
+            && windowFrame.contains(pointer)
+    }
+
+    static func isSliderSharedContainer(candidateAncestor: CGRect, hitAncestor: CGRect,
+                                         hitSurface: CGRect, destination: CGPoint) -> Bool {
+        guard isValidFrame(candidateAncestor), isValidFrame(hitAncestor),
+              isValidFrame(hitSurface), hitSurface.width > 0, hitSurface.height > 0,
+              FrameContinuity.delta(candidateAncestor, hitAncestor) <= 1,
+              candidateAncestor.contains(destination), hitSurface.contains(destination),
+              candidateAncestor.insetBy(dx: -2, dy: -2).contains(hitSurface) else { return false }
+        return candidateAncestor.width <= hitSurface.width * 1.1 + 2
+            && candidateAncestor.height <= hitSurface.height * 1.1 + 2
     }
 
     static func confirmsSliderContainer(candidateRole: String, enabled: Bool,

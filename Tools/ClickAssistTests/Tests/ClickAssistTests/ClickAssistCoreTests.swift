@@ -207,6 +207,57 @@ final class ClickAssistCoreTests: XCTestCase {
         }
     }
 
+    func testResponsiveVideoSurfaceSharesItsLivePlayerWithSlider() {
+        let player = rect(3461, 687, 2152, 1190)
+        let video = rect(3480, 687, 2115, 1190)
+        let destination = CGPoint(x: 3837, y: 1824)
+        XCTAssertNotEqual(player, video)
+        XCTAssertTrue(GeometryPolicy.isSliderSharedContainer(candidateAncestor: player,
+            hitAncestor: player, hitSurface: video, destination: destination))
+        // Equal-looking surfaces alone are insufficient: both ancestry chains
+        // must lead to the same local player, below the document/window.
+        XCTAssertFalse(GeometryPolicy.isSliderSharedContainer(candidateAncestor: player,
+            hitAncestor: player.offsetBy(dx: 100, dy: 0), hitSurface: video,
+            destination: destination))
+        let page = rect(3400, 200, 2400, 3000)
+        XCTAssertFalse(GeometryPolicy.isSliderSharedContainer(candidateAncestor: page,
+            hitAncestor: page, hitSurface: video, destination: destination))
+        XCTAssertFalse(GeometryPolicy.isSliderSharedContainer(candidateAncestor: player,
+            hitAncestor: player, hitSurface: video, destination: CGPoint(x: 100, y: 100)))
+    }
+
+    func testLiveHitWindowMustMatchOwnerAndCoverThePointer() {
+        let hit = rect(3480, 687, 2115, 1190)
+        let playerWindow = rect(3461, 638, 2152, 1338)
+        let pointer = CGPoint(x: 4062, y: 1820)
+        XCTAssertTrue(GeometryPolicy.hitWindowIsCoherent(expectedPID: 1406, hitPID: 1406,
+            hitFrame: hit, windowFrame: playerWindow, pointer: pointer))
+        XCTAssertFalse(GeometryPolicy.hitWindowIsCoherent(expectedPID: 1406, hitPID: 123,
+            hitFrame: hit, windowFrame: playerWindow, pointer: pointer))
+        XCTAssertFalse(GeometryPolicy.hitWindowIsCoherent(expectedPID: 1406, hitPID: 1406,
+            hitFrame: rect(0, 0, 100, 30), windowFrame: playerWindow, pointer: pointer))
+        XCTAssertFalse(GeometryPolicy.hitWindowIsCoherent(expectedPID: 1406, hitPID: 1406,
+            hitFrame: hit, windowFrame: rect(0, 0, 100, 100), pointer: pointer))
+    }
+
+    func testNativeSidebarSelectionIsAnActionButWebFurnitureIsNot() {
+        XCTAssertTrue(GeometryPolicy.isNativeSelectableRow(role: "AXRow",
+            selectionSettable: true, inNativeList: true, inWebContent: false))
+        XCTAssertFalse(GeometryPolicy.isNativeSelectableRow(role: "AXRow",
+            selectionSettable: false, inNativeList: true, inWebContent: false))
+        XCTAssertFalse(GeometryPolicy.isNativeSelectableRow(role: "AXRow",
+            selectionSettable: true, inNativeList: true, inWebContent: true))
+        XCTAssertFalse(GeometryPolicy.isNativeSelectableRow(role: "AXGroup",
+            selectionSettable: true, inNativeList: true, inWebContent: false))
+        XCTAssertFalse(GeometryPolicy.isNativeSelectableRow(role: "AXRow",
+            selectionSettable: true, inNativeList: false, inWebContent: false))
+        let row = cand("Fans", rect(100,100,150,26), tier: .secondClass, role: "AXSelectableRow")
+        XCTAssertTrue(GeometryPolicy.isActionable(role: row.role, hasPressAction: false))
+        XCTAssertEqual(DecisionCore.snapMode(for: row), .edge)
+        XCTAssertEqual(DecisionCore.displayCandidates(point: CGPoint(x: 95, y: 110),
+            candidates: [row], tolerance: 16).first?.candidate.key, "Fans")
+    }
+
     // MARK: - A. geometry / zoom
 
     /// Guarded failure: the fullscreen video seek bar (7638x7) was rejected by a
