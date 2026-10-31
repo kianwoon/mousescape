@@ -284,7 +284,11 @@ final class TargetingOverlay {
             || secondary != lastDrawnSecondary || mode != lastDrawnMode || tolerance != lastDrawnTolerance
             || primaryDim != lastDrawnDim
         let pointerChanged = pointer != lastDrawnPointer
-        guard stateChanged || (action == "show" && pointerChanged) else { return }
+        // Keep the confirmed direct-hit (green) outline actively painted even
+        // when the pointer rests at the bullseye. Static-frame coalescing must
+        // not make that indicator disappear when the backing surface redraws.
+        let keepGreenVisible = action == "show" && mode == "direct-hit"
+        guard stateChanged || (action == "show" && pointerChanged) || keepGreenVisible else { return }
         lastDrawnAction = action
         lastDrawnFrame = frame
         lastDrawnSecondary = secondary

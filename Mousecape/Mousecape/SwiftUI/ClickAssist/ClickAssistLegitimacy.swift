@@ -109,6 +109,21 @@ final class LegitimacyPolicy: @unchecked Sendable {
         if sameFrame(candidate, hitFrame) || candidate.contains(hitFrame) {
             return .confirmed
         }
+        // OpenCode's clipped tab label extends beyond the link's AX bounds.
+        // Prove direct ownership by AX identity, rather than broadening geometry
+        // acceptance to unrelated text, enclosing groups, or covered controls.
+        if candidateRole == "AXLink", role(of: element) == "AXStaticText",
+           let parent = attr(element, kAXParentAttribute),
+           let liveFrame = axFrame(candidateElement),
+           GeometryPolicy.confirmsLinkTextHit(candidateRole: candidateRole,
+               hitRole: role(of: element),
+               enabled: (attr(candidateElement, kAXEnabledAttribute) as? Bool) != false
+                   && (attr(candidateElement, "AXHidden") as? Bool) != true,
+               frameMatches: sameFrame(candidate, liveFrame),
+               hitParentIsCandidate: CFEqual(parent, candidateElement),
+               destinationInsideCandidate: liveFrame.contains(destination)) {
+            return .confirmed
+        }
         // Browser chrome can answer an inner close button with its parent tab.
         // Require that parent to itself be an actionable sibling control.
         var actions: CFArray?
@@ -185,9 +200,10 @@ final class LegitimacyPolicy: @unchecked Sendable {
                 enabled: enabled, adjustable: adjustable, frameMatches: liveFrameMatches,
                 hitIsAncestor: hitIsAncestor) { return .confirmed }
         }
-        // Confirm the actual close button's live relationship to the tab hit,
+        // Confirm the actual tab control's live relationship to the tab hit,
         // even when the tab group itself has no control role or press action.
-        if candidateRole == "AXButton", hitFrame.contains(candidate),
+        if ["AXButton", "AXRadioButton", "AXTab"].contains(candidateRole),
+           hitFrame.contains(candidate),
            let liveFrame = axFrame(candidateElement), sameFrame(candidate, liveFrame) {
             var candidateActions: CFArray?
             let candidatePress = AXUIElementCopyActionNames(candidateElement, &candidateActions) == .success
@@ -208,7 +224,21 @@ final class LegitimacyPolicy: @unchecked Sendable {
                     GeometryPolicy.isTabHitProxy(ancestorRole: currentRole,
                         hitRole: role(of: element), ancestorFrame: $0, hitFrame: hitFrame)
                 } == true
-                hitIsAncestor = hitIsAncestor || CFEqual(current, element) || tabProxy
+                // Multi-tab Brave windows answer with a sibling AXGroup proxy
+                // of the live AXTabGroup, rather than an individual tab proxy.
+                // Require both identical strip bounds and the same actual parent.
+                let stripProxy: Bool
+                if currentRole == "AXTabGroup", let frame = axFrame(current),
+                   let parent = attr(current, kAXParentAttribute),
+                   let hitParent = attr(element, kAXParentAttribute) {
+                    stripProxy = GeometryPolicy.isTabStripHitProxy(
+                        ancestorRole: currentRole, hitRole: role(of: element),
+                        ancestorFrame: frame, hitFrame: hitFrame,
+                        sharesLiveParent: CFEqual(parent, hitParent))
+                } else {
+                    stripProxy = false
+                }
+                hitIsAncestor = hitIsAncestor || CFEqual(current, element) || tabProxy || stripProxy
                 if currentRole == "AXWindow" || hasWebArea { break }
                 guard let parent = attr(current, kAXParentAttribute),
                       CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }

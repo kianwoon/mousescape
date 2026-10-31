@@ -47,6 +47,45 @@ final class ClickAssistCoreTests: XCTestCase {
             hitRole: "AXGroup", ancestorFrame: tab, hitFrame: tab.offsetBy(dx: 10, dy: 0)))
     }
 
+    func testBraveMultiTabStripProxyRequiresLiveParentAndExactStripBounds() {
+        for width: CGFloat in [248, 740, 986] {
+            let strip = rect(521, 53, width, 40)
+            func proxy(role: String = "AXTabGroup", hit: String = "AXGroup",
+                       frame: CGRect? = nil, parent: Bool = true) -> Bool {
+                GeometryPolicy.isTabStripHitProxy(ancestorRole: role, hitRole: hit,
+                    ancestorFrame: strip, hitFrame: frame ?? strip, sharesLiveParent: parent)
+            }
+            XCTAssertTrue(proxy())
+            XCTAssertFalse(proxy(parent: false), "An unrelated covering group must not confirm")
+            XCTAssertFalse(proxy(role: "AXGroup"))
+            XCTAssertFalse(proxy(role: "AXWebArea"))
+            XCTAssertFalse(proxy(role: "AXWindow"))
+            XCTAssertFalse(proxy(hit: "AXWebArea"))
+            XCTAssertFalse(proxy(frame: strip.insetBy(dx: -10, dy: 0)))
+            XCTAssertFalse(proxy(frame: strip.offsetBy(dx: 2, dy: 0)))
+        }
+    }
+
+    func testOpenCodeOverflowingTabLabelRequiresItsActualLiveLink() {
+        func confirms(role: String = "AXLink", hit: String = "AXStaticText",
+                      enabled: Bool = true, frame: Bool = true,
+                      parent: Bool = true, inside: Bool = true) -> Bool {
+            GeometryPolicy.confirmsLinkTextHit(candidateRole: role, hitRole: hit,
+                enabled: enabled, frameMatches: frame, hitParentIsCandidate: parent,
+                destinationInsideCandidate: inside)
+        }
+        XCTAssertTrue(confirms())
+        XCTAssertFalse(confirms(parent: false), "Overlaid/unrelated text cannot confirm a link")
+        XCTAssertFalse(confirms(enabled: false))
+        XCTAssertFalse(confirms(frame: false), "Stale link geometry must not acquire evidence")
+        XCTAssertFalse(confirms(inside: false), "Label overflow is not a new click area")
+        XCTAssertFalse(confirms(hit: "AXGroup"))
+        XCTAssertFalse(confirms(hit: "AXWebArea"))
+        XCTAssertFalse(confirms(role: "AXSlider"))
+        XCTAssertFalse(confirms(role: "AXSelectableRow"))
+        XCTAssertFalse(confirms(role: "AXRadioButton"))
+    }
+
     func testTabCloseCanBeConfirmedByItsActualChromeAncestor() {
         func confirms(role: String = "AXButton", enabled: Bool = true,
                       press: Bool = true, ancestor: Bool = true,
@@ -55,6 +94,14 @@ final class ClickAssistCoreTests: XCTestCase {
                 hasPress: press, hitIsAncestor: ancestor, hasChrome: chrome, hasWebArea: web)
         }
         XCTAssertTrue(confirms())
+        for role in ["AXRadioButton", "AXTab"] {
+            XCTAssertTrue(confirms(role: role))
+            XCTAssertFalse(confirms(role: role, enabled: false))
+            XCTAssertFalse(confirms(role: role, press: false))
+            XCTAssertFalse(confirms(role: role, ancestor: false))
+            XCTAssertFalse(confirms(role: role, chrome: false))
+            XCTAssertFalse(confirms(role: role, web: true))
+        }
         XCTAssertFalse(confirms(role: "AXGroup"))
         XCTAssertFalse(confirms(enabled: false))
         XCTAssertFalse(confirms(press: false))

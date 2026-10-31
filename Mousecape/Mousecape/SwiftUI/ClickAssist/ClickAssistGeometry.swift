@@ -99,12 +99,33 @@ enum GeometryPolicy {
             && hitRole == "AXGroup" && FrameContinuity.delta(ancestorFrame, hitFrame) <= 1
     }
 
+    /// A link's clipped label can report bounds wider than its clickable area.
+    /// Only the actual text child can vouch for that live link, at an inside point.
+    static func confirmsLinkTextHit(candidateRole: String, hitRole: String,
+                                     enabled: Bool, frameMatches: Bool,
+                                     hitParentIsCandidate: Bool,
+                                     destinationInsideCandidate: Bool) -> Bool {
+        candidateRole == "AXLink" && hitRole == "AXStaticText" && enabled
+            && frameMatches && hitParentIsCandidate && destinationInsideCandidate
+    }
+
+    /// Brave can return a separate group representing the entire tab strip.
+    /// Equal bounds alone cannot distinguish that proxy from a covering surface.
+    static func isTabStripHitProxy(ancestorRole: String, hitRole: String,
+                                    ancestorFrame: CGRect, hitFrame: CGRect,
+                                    sharesLiveParent: Bool) -> Bool {
+        ancestorRole == "AXTabGroup" && hitRole == "AXGroup" && sharesLiveParent
+            && isValidFrame(ancestorFrame) && isValidFrame(hitFrame)
+            && FrameContinuity.delta(ancestorFrame, hitFrame) <= 1
+    }
+
     /// Chromium may hit-test a tab's group instead of its close button. This
     /// exception requires live ancestry and press capability, never frame alone.
     static func confirmsChromeDescendant(candidateRole: String, enabled: Bool,
                                           hasPress: Bool, hitIsAncestor: Bool,
                                           hasChrome: Bool, hasWebArea: Bool) -> Bool {
-        candidateRole == "AXButton" && enabled && hasPress && hitIsAncestor
+        ["AXButton", "AXRadioButton", "AXTab"].contains(candidateRole)
+            && enabled && hasPress && hitIsAncestor
             && hasChrome && !hasWebArea
     }
 
