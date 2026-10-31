@@ -149,7 +149,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
             let adjustable = canSetValue || (actions.contains("AXIncrement") && actions.contains("AXDecrement"))
             var node: AXUIElement? = candidateElement
             var hitIsAncestor = false
-            var groupAncestors: [CGRect] = []
+            var playerAncestors: [AXUIElement] = []
             for _ in 0..<24 {
                 guard let current = node else { break }
                 let currentRole = role(of: current)
@@ -157,7 +157,10 @@ final class LegitimacyPolicy: @unchecked Sendable {
                 // for a slider that a different surface covers.
                 if currentRole == "AXWebArea" || currentRole == "AXWindow" { break }
                 let currentFrame = currentRole == "AXGroup" ? axFrame(current) : nil
-                if let currentFrame { groupAncestors.append(currentFrame) }
+                if currentRole == "AXGroup",
+                   (attr(current, "AXDOMClassList") as? [String] ?? []).contains("html5-video-player") {
+                    playerAncestors.append(current)
+                }
                 if CFEqual(current, element) || (currentRole == "AXGroup"
                     && role(of: element) == "AXGroup"
                     && currentFrame.map { sameFrame($0, hitFrame) } == true) {
@@ -172,19 +175,19 @@ final class LegitimacyPolicy: @unchecked Sendable {
             // Trace the actual hit's ancestry too, rather than guessing that
             // its own rectangle must equal the slider's outer player wrapper.
             if !hitIsAncestor, role(of: element) == "AXGroup" {
+                let surfaceClasses = attr(element, "AXDOMClassList") as? [String] ?? []
+                let isVideoSurface = surfaceClasses.contains("html5-main-video")
+                    || surfaceClasses.contains("html5-video-container")
                 var hitNode: AXUIElement? = element
                 for _ in 0..<24 {
                     guard let current = hitNode else { break }
                     let hitRole = role(of: current)
                     if hitRole == "AXWebArea" || hitRole == "AXWindow" || hitRole == "AXScrollArea" { break }
-                    if hitRole == "AXGroup", let hitAncestorFrame = axFrame(current),
-                       groupAncestors.contains(where: {
-                           GeometryPolicy.isSliderSharedContainer(candidateAncestor: $0,
-                               hitAncestor: hitAncestorFrame, hitSurface: hitFrame,
-                               destination: destination)
-                       }) {
+                    let samePlayer = playerAncestors.contains { CFEqual($0, current) }
+                    if GeometryPolicy.confirmsSharedVideoPlayer(isVideoSurface: isVideoSurface,
+                        sameLivePlayer: samePlayer) {
                         hitIsAncestor = true
-                        diagnostic("SLIDER_SHARED_PLAYER frame=\(hitAncestorFrame)")
+                        diagnostic("SLIDER_SHARED_PLAYER identity=true videoSurface=true")
                         break
                     }
                     guard let parent = attr(current, kAXParentAttribute),

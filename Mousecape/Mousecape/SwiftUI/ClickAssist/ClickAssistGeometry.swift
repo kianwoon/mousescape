@@ -76,15 +76,10 @@ enum GeometryPolicy {
             && windowFrame.contains(pointer)
     }
 
-    static func isSliderSharedContainer(candidateAncestor: CGRect, hitAncestor: CGRect,
-                                         hitSurface: CGRect, destination: CGPoint) -> Bool {
-        guard isValidFrame(candidateAncestor), isValidFrame(hitAncestor),
-              isValidFrame(hitSurface), hitSurface.width > 0, hitSurface.height > 0,
-              FrameContinuity.delta(candidateAncestor, hitAncestor) <= 1,
-              candidateAncestor.contains(destination), hitSurface.contains(destination),
-              candidateAncestor.insetBy(dx: -2, dy: -2).contains(hitSurface) else { return false }
-        return candidateAncestor.width <= hitSurface.width * 1.1 + 2
-            && candidateAncestor.height <= hitSurface.height * 1.1 + 2
+    /// Video pixels and controls must belong to the same actual player.
+    /// Dimensions, aspect ratio and equal-looking ancestor bounds are not evidence.
+    static func confirmsSharedVideoPlayer(isVideoSurface: Bool, sameLivePlayer: Bool) -> Bool {
+        isVideoSurface && sameLivePlayer
     }
 
     static func confirmsSliderContainer(candidateRole: String, enabled: Bool,

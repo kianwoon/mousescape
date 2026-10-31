@@ -254,23 +254,15 @@ final class ClickAssistCoreTests: XCTestCase {
         }
     }
 
-    func testResponsiveVideoSurfaceSharesItsLivePlayerWithSlider() {
-        let player = rect(3461, 687, 2152, 1190)
-        let video = rect(3480, 687, 2115, 1190)
-        let destination = CGPoint(x: 3837, y: 1824)
-        XCTAssertNotEqual(player, video)
-        XCTAssertTrue(GeometryPolicy.isSliderSharedContainer(candidateAncestor: player,
-            hitAncestor: player, hitSurface: video, destination: destination))
-        // Equal-looking surfaces alone are insufficient: both ancestry chains
-        // must lead to the same local player, below the document/window.
-        XCTAssertFalse(GeometryPolicy.isSliderSharedContainer(candidateAncestor: player,
-            hitAncestor: player.offsetBy(dx: 100, dy: 0), hitSurface: video,
-            destination: destination))
-        let page = rect(3400, 200, 2400, 3000)
-        XCTAssertFalse(GeometryPolicy.isSliderSharedContainer(candidateAncestor: page,
-            hitAncestor: page, hitSurface: video, destination: destination))
-        XCTAssertFalse(GeometryPolicy.isSliderSharedContainer(candidateAncestor: player,
-            hitAncestor: player, hitSurface: video, destination: CGPoint(x: 100, y: 100)))
+    func testVideoSurfaceRequiresActualPlayerIdentityNotSizeSimilarity() {
+        XCTAssertTrue(GeometryPolicy.confirmsSharedVideoPlayer(
+            isVideoSurface: true, sameLivePlayer: true))
+        XCTAssertFalse(GeometryPolicy.confirmsSharedVideoPlayer(
+            isVideoSurface: true, sameLivePlayer: false), "Another player must not confirm this slider")
+        XCTAssertFalse(GeometryPolicy.confirmsSharedVideoPlayer(
+            isVideoSurface: false, sameLivePlayer: true), "A covering group inside the player is not the video surface")
+        XCTAssertFalse(GeometryPolicy.confirmsSharedVideoPlayer(
+            isVideoSurface: false, sameLivePlayer: false))
     }
 
     func testLiveHitWindowMustMatchOwnerAndCoverThePointer() {
