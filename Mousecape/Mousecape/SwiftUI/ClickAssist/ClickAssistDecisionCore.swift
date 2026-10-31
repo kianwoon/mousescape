@@ -3,6 +3,17 @@ import CoreGraphics
 import Foundation
 import QuartzCore
 
+/// Shared range for settings, resolver evidence, rings and click delivery.
+enum ClickAssistTolerance {
+    static let range: ClosedRange<CGFloat> = 8...32
+    static let defaultValue: CGFloat = 12
+
+    static func validated(_ value: CGFloat) -> CGFloat {
+        let finite = value.isFinite ? value : defaultValue
+        return min(max(finite, range.lowerBound), range.upperBound)
+    }
+}
+
 /// The single source of routing math. The CGEventTap router calls `route()` in its
 /// callback; the P2a targeting overlay calls the SAME `route()` on the SAME published
 /// snapshot. The overlay therefore renders the router's decision by construction and
@@ -18,8 +29,8 @@ enum ClickAssistVerdict: String, Sendable {
 }
 
 enum DecisionCore {
-    /// Two candidates closer than this in boundary distance are treated as ambiguous.
-    static let tieEpsilon: CGFloat = 2.0
+    /// Only an exact distance tie is ambiguous; a uniquely nearer target wins.
+    static let tieEpsilon: CGFloat = 0
     /// A cache snapshot older than this is treated as stale even if still marked valid.
     static let cacheMaxAge: CFTimeInterval = 1.0
     /// Fraction of each half-dimension treated as a control's "live core". A
@@ -136,7 +147,7 @@ enum DecisionCore {
     /// 1. in-tolerance, minus elements that enclose two or more others;
     /// 2. the element the pointer is INSIDE wins (first-class preferred, then the
     ///    smallest) — a row is indicated and clicked on itself;
-    /// 3. otherwise the nearest in-tolerance candidate, first-class preferred,
+    /// 3. otherwise the nearest in-tolerance candidate, regardless of category,
     ///    with a tie guard that is the same on both paths.
     static func resolve(point: CGPoint, candidates: [Candidate], tolerance: CGFloat,
                         tieEpsilon: CGFloat = DecisionCore.tieEpsilon) -> Resolution {
@@ -191,22 +202,18 @@ enum DecisionCore {
                 }
             }
         } else {
-            let fc = filtered.filter { $0.0.tier == .firstClass }.sorted { $0.1 < $1.1 }
-            if fc.isEmpty {
-                let sc = filtered.filter { $0.0.tier != .firstClass }.sorted { $0.1 < $1.1 }
-                guard let best = sc.first else { return .none }
-                if sc.count >= 2, sc[1].1 - best.1 <= tieEpsilon {
-                    return .ambiguous(scored: sc.prefix(3).map { ($0.0, $0.1) },
-                                      tie: sc[1].1 - best.1)
-                }
-                pool = [best]
-            } else {
-                if fc.count >= 2, fc[1].1 - fc[0].1 <= tieEpsilon {
-                    return .ambiguous(scored: fc.prefix(3).map { ($0.0, $0.1) },
-                                      tie: fc[1].1 - fc[0].1)
-                }
-                pool = fc
+            // Distance wins across control categories. A nearer selectable row
+            // must not lose to a farther first-class control.
+            let nearest = filtered.sorted {
+                if $0.1 != $1.1 { return $0.1 < $1.1 }
+                return $0.0.key < $1.0.key
             }
+            guard let best = nearest.first else { return .none }
+            if nearest.count >= 2, nearest[1].1 - best.1 <= tieEpsilon {
+                return .ambiguous(scored: nearest.prefix(3).map { ($0.0, $0.1) },
+                                  tie: nearest[1].1 - best.1)
+            }
+            pool = [best]
         }
 
         // Ordered candidates: the primary pool first (position decided by the
@@ -326,9 +333,9 @@ enum DecisionCore {
     /// (A symmetric inset does not move the midpoint; it documents the safety
     /// margin the redirect guarantees.)
     static func centerPoint(into rect: CGRect) -> CGPoint {
-        let inset = max(2, min(rect.width, rect.height) * 0.1)
-        let r = rect.insetBy(dx: inset, dy: inset)
-        return CGPoint(x: r.midX, y: r.midY)
+        // A symmetric inset cannot change the center, but can make a thin
+        // rectangle null. Read the original midpoint directly.
+        return CGPoint(x: rect.midX, y: rect.midY)
     }
 
     /// True when `point` is within `coreRadiusFraction` of the rect's
@@ -342,9 +349,13 @@ enum DecisionCore {
     }
 
     static func clampPoint(_ p: CGPoint, into rect: CGRect, inset: CGFloat) -> CGPoint {
-        let r = rect.insetBy(dx: inset, dy: inset)
-        return CGPoint(x: min(max(p.x, r.minX), r.maxX),
-                       y: min(max(p.y, r.minY), r.maxY))
+        // A track can be thinner than twice the requested inset. CGRect's
+        // insetBy then becomes null/infinite; clamp each axis toward its center
+        // instead, without ever constructing an empty rectangle.
+        let dx = min(max(inset, 0), rect.width / 2)
+        let dy = min(max(inset, 0), rect.height / 2)
+        return CGPoint(x: min(max(p.x, rect.minX + dx), rect.maxX - dx),
+                       y: min(max(p.y, rect.minY + dy), rect.maxY - dy))
     }
 
     /// A candidate plus its boundary distance, for multi-target indication.
@@ -356,47 +367,22 @@ enum DecisionCore {
     /// All in-tolerance candidates for indication, nearest first, tie-break
     /// smaller area. First-class only when any first-class is in range (a
     /// container never competes with a control); `limit` bounds validation work.
-    /// The winner of a click is always element 0.
-    /// Thin view over `resolve()` so the ring and the click can never pick
-    /// different winners. Order is the resolution order; the first is the winner.
-    ///
-    /// USER RULE (final arbiter): no shown ring may contain or be contained by
-    /// another shown ring — outer grouping wrappers (rect contains another
-    /// cached candidate) are dropped, AND inner secondaries (non-winner rects
-    /// inside the winner) are suppressed, with the winner always kept.
+    /// One indicated target: exactly the shared resolution winner. Never show
+    /// an alternate that delivery might not select, or silently fall back to it.
     static func displayCandidates(point: CGPoint, candidates: [Candidate],
                                   tolerance: CGFloat, limit: Int = 3) -> [ScoredCandidate] {
-        switch resolve(point: point, candidates: candidates, tolerance: tolerance) {
-        case .winner(let winner, let alternates):
-            let scored = ([winner] + alternates).prefix(limit).map {
-                ScoredCandidate(candidate: $0.candidate, dist: $0.dist)
-            }
-            // The shown set is an ANTICHAIN drawn from the scored set ONLY:
-            // element 0 (the winner) is never dropped, and an alternate is
-            // dropped when it nests — either way round — with the winner or with
-            // anything already kept. The wrapper test deliberately ignores the
-            // full `candidates` list: a cached ✕ inside the winning tab frame
-            // must not evict the tab the click actually hits.
-            guard let winnerEntry = scored.first else { return [] }
-            var kept: [ScoredCandidate] = [winnerEntry]
-            for cand in scored.dropFirst() {
-                let w = winnerEntry.candidate.rect
-                if isNested(w, cand.candidate.rect) || isNested(cand.candidate.rect, w) {
-                    continue
-                }
-                let nestsWithKept = kept.contains { entry in
-                    let r = entry.candidate.rect
-                    return isNested(r, cand.candidate.rect) || isNested(cand.candidate.rect, r)
-                }
-                if nestsWithKept { continue }
-                kept.append(cand)
-            }
-            // Safety: the winner is unconditional, so this can only fire if the
-            // scored set were empty — kept empty is impossible, fallback stays.
-            return kept.isEmpty ? Array(scored.prefix(1)) : Array(kept.prefix(limit))
-        case .ambiguous, .none:
-            return []
+        guard limit > 0 else { return [] }
+        if case .winner(let winner, _) = resolve(point: point, candidates: candidates,
+                                                 tolerance: tolerance) {
+            return [ScoredCandidate(candidate: winner.candidate, dist: winner.dist)]
         }
+        return []
+    }
+
+    /// Offset of the target by the same Euclidean radius used for routing.
+    static func toleranceOutline(rect: CGRect, tolerance: CGFloat) -> CGPath {
+        CGPath(roundedRect: rect.insetBy(dx: -tolerance, dy: -tolerance),
+               cornerWidth: tolerance, cornerHeight: tolerance, transform: nil)
     }
 
     static func boundaryDistance(_ p: CGPoint, _ r: CGRect) -> CGFloat {
@@ -473,18 +459,13 @@ struct GestureLatch: Sendable {
 /// act only on evidence that is still current enough to be safe.
 enum ClickAssistEvidence {
     /// Ring/overlay may display evidence collected within this window.
-    /// 700 ms is the review-order value: first-appearance LATENCY (a new pointer
-    /// waiting for the next publish + resolve), not a wider display window, is
-    /// the real problem. A wider window only hides the missing evidence.
-    /// Activation stays strict at 400 ms.
-    static let displayMaxAgeMs: Double = 700
-    /// Redirect/AXPress may act only on evidence collected within this window.
+    /// A shown ring must expire with the evidence required for its click.
     static let activationMaxAgeMs: Double = 400
+    static let displayMaxAgeMs: Double = activationMaxAgeMs
 
-    /// Position-specific evidence is capped at the SINGLE nearest candidate per
-    /// pointer generation: one hit-test + at most one ancestry walk per cycle.
-    /// Role/press/chrome classification is still collected for every target.
-    static let maxEvidenceCandidatesPerCycle = 1
+    /// Bound AX work per cycle while allowing proven mismatches to be removed
+    /// before confirming the nearest remaining target. Unknown results stop early.
+    static let maxEvidenceCandidatesPerCycle = 3
 
     enum State: String, Sendable {
         case fresh

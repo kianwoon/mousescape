@@ -110,9 +110,77 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertFalse(confirms(web: true))
     }
 
+    func testThinTargetsNeverProduceInfiniteClickDestinations() {
+        for size in [CGSize(width: 1601, height: 2), CGSize(width: 2, height: 100),
+                     CGSize(width: 3486, height: 7), CGSize(width: 1, height: 1)] {
+            let frame = CGRect(origin: CGPoint(x: 100, y: 100), size: size)
+            let center = DecisionCore.centerPoint(into: frame)
+            XCTAssertEqual(center, CGPoint(x: frame.midX, y: frame.midY))
+            XCTAssertTrue(center.x.isFinite && center.y.isFinite)
+            XCTAssertTrue(frame.contains(center))
+            for point in [CGPoint(x: 500, y: 90), CGPoint(x: 90, y: 500)] {
+                let destination = DecisionCore.clampPoint(point, into: frame, inset: 2)
+                XCTAssertTrue(destination.x.isFinite && destination.y.isFinite)
+                XCTAssertTrue(frame.contains(destination))
+            }
+        }
+    }
+
+    func testNearestTargetWinsAcrossTiersEvenWithSmallDistanceDifference() {
+        let row = cand("Fans", rect(100, 100, 100, 26), tier: .secondClass, role: "AXSelectableRow")
+        let button = cand("button", rect(100, 147, 100, 26))
+        let point = CGPoint(x: 150, y: 136)
+        for order in [[row, button], [button, row]] {
+            let shown = DecisionCore.displayCandidates(point: point, candidates: order, tolerance: 32)
+            XCTAssertEqual(shown.map(\.candidate.key), ["Fans"])
+            guard case .redirect(let clicked, _, _, _, _) = DecisionCore.route(
+                point: point, candidates: order, tolerance: 32) else { return XCTFail("Missing click") }
+            XCTAssertEqual(clicked.key, shown.first?.candidate.key)
+        }
+    }
+
+    func testDotted32PointOutlineMatchesClickDistanceIncludingCorners() {
+        let frame = rect(100, 100, 100, 30)
+        let path = DecisionCore.toleranceOutline(rect: frame, tolerance: 32)
+        let candidate = cand("target", frame)
+        for angle in stride(from: 0.0, to: Double.pi * 2, by: Double.pi / 24) {
+            let x: CGFloat = cos(angle) >= 0 ? frame.maxX : frame.minX
+            let y: CGFloat = sin(angle) >= 0 ? frame.maxY : frame.minY
+            for radius: CGFloat in [31.9, 32.1] {
+                let point = CGPoint(x: x + cos(angle) * radius, y: y + sin(angle) * radius)
+                let inside = DecisionCore.boundaryDistance(point, frame) <= 32
+                XCTAssertEqual(path.contains(point), inside)
+                XCTAssertEqual(!DecisionCore.displayCandidates(point: point,
+                    candidates: [candidate], tolerance: 32).isEmpty, inside)
+                if inside {
+                    guard case .redirect(let clicked, _, _, _, _) = DecisionCore.route(
+                        point: point, candidates: [candidate], tolerance: 32) else {
+                        return XCTFail("Inside outline must route")
+                    }
+                    XCTAssertEqual(clicked.key, "target")
+                } else if case .noCandidate = DecisionCore.route(
+                    point: point, candidates: [candidate], tolerance: 32) {} else {
+                    XCTFail("Outside outline must not route")
+                }
+            }
+        }
+    }
+
+    func testSharedToleranceSupports32AndRejectsInvalidValues() {
+        XCTAssertEqual(ClickAssistTolerance.range, 8...32)
+        for value: CGFloat in [8, 12, 16, 24, 32] {
+            XCTAssertEqual(ClickAssistTolerance.validated(value), value)
+        }
+        XCTAssertEqual(ClickAssistTolerance.validated(40), 32)
+        XCTAssertEqual(ClickAssistTolerance.validated(0), 8)
+        for value: CGFloat in [.nan, .infinity, -.infinity] {
+            XCTAssertEqual(ClickAssistTolerance.validated(value), 12)
+        }
+    }
+
     func testToleranceControlsBothRingAndClickBoundary() {
         let target = cand("button", rect(100, 100, 28, 28))
-        for tolerance: CGFloat in [8, 12, 16] {
+        for tolerance: CGFloat in [8, 12, 16, 24, 32] {
             let edge = CGPoint(x: 128 + tolerance, y: 114)
             let beyond = CGPoint(x: edge.x + 0.01, y: edge.y)
             guard case .redirect = DecisionCore.route(point: edge, candidates: [target],
@@ -170,12 +238,12 @@ final class ClickAssistCoreTests: XCTestCase {
             XCTAssertTrue(GeometryPolicy.isActionable(role: role, hasPressAction: false), role)
             XCTAssertTrue(classify(role, frame).accepted, role)
             let target = cand(role, frame, role: role)
-            let point = CGPoint(x: 210, y: 115)
+            let point = CGPoint(x: 226, y: 115)
             let displayed = DecisionCore.displayCandidates(point: point, candidates: [target],
-                                                            tolerance: 16)
+                                                            tolerance: 32)
             XCTAssertEqual(displayed.first?.candidate.key, role)
             guard case .redirect(let clicked, let destination, _, let snap, _) =
-                DecisionCore.route(point: point, candidates: [target], tolerance: 16) else {
+                DecisionCore.route(point: point, candidates: [target], tolerance: 32) else {
                 XCTFail("Missing assisted click for \(role)")
                 continue
             }
@@ -431,12 +499,12 @@ final class ClickAssistCoreTests: XCTestCase {
     }
 
     /// Guarded failure: over-eager dedupe dropped a genuinely separate neighbour.
-    func testC3_disjointCandidatesAreBothShown() {
+    func testC3_onlyTheClickWinnerIsShown() {
         let a = cand("a", rect(100, 100, 100, 100))
         let b = cand("b", rect(400, 100, 100, 100))
         let shown = DecisionCore.displayCandidates(point: CGPoint(x: 150, y: 150),
                                                    candidates: [a, b], tolerance: 400)
-        XCTAssertEqual(shown.map(\.candidate.key), ["a", "b"])
+        XCTAssertEqual(shown.map(\.candidate.key), ["a"])
     }
 
     /// Guarded failure: three nested containers produced three concentric rings
@@ -676,7 +744,7 @@ final class ClickAssistCoreTests: XCTestCase {
     /// Evidence outlives a press request by design (400 ms vs 150 ms).
     func testI4_expiryRelationship() {
         XCTAssertGreaterThan(ClickAssistEvidence.activationMaxAgeMs, AXPressGate.defaultExpiryMs)
-        XCTAssertGreaterThan(ClickAssistEvidence.displayMaxAgeMs, ClickAssistEvidence.activationMaxAgeMs)
+        XCTAssertEqual(ClickAssistEvidence.displayMaxAgeMs, ClickAssistEvidence.activationMaxAgeMs)
         XCTAssertEqual(AXPressGate.defaultExpiryMs, 150)
         XCTAssertEqual(AXPressAdmission.maxPendingPresses, 4)
         XCTAssertEqual(AXPressAdmission.dedupeWindowMs, 250)

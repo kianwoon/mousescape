@@ -7,25 +7,24 @@ import CoreGraphics
 /// partial-cycle non-renewal.
 final class ClickAssistFreshnessTests: XCTestCase {
 
-    func testWindowsAreDistinctAndActivationIsStricter() {
-        // Display is back to the review-order 700 ms; first-appearance LATENCY,
-        // not a wider window, is the real fix. Activation stays 400 ms.
-        XCTAssertEqual(ClickAssistEvidence.displayMaxAgeMs, 700)
+    func testDisplayAndActivationUseTheSameWindow() {
+        // A visible ring must not outlive the confirmation needed for a click.
+        XCTAssertEqual(ClickAssistEvidence.displayMaxAgeMs, 400)
         XCTAssertEqual(ClickAssistEvidence.activationMaxAgeMs, 400)
-        XCTAssertLessThan(ClickAssistEvidence.activationMaxAgeMs,
+        XCTAssertEqual(ClickAssistEvidence.activationMaxAgeMs,
                           ClickAssistEvidence.displayMaxAgeMs)
-        // Position-specific evidence is capped at ONE candidate per cycle.
-        XCTAssertEqual(ClickAssistEvidence.maxEvidenceCandidatesPerCycle, 1)
+        // AX work is bounded even when nearer mismatches must be rejected.
+        XCTAssertEqual(ClickAssistEvidence.maxEvidenceCandidatesPerCycle, 3)
     }
 
-    /// Stale for activation long before it is stale for display.
-    func testFiveHundredMsIsDisplayFreshButActivationStale() {
+    /// Evidence expires together for indication and activation.
+    func testExpiredClickEvidenceAlsoClearsTheRing() {
         let cases: [(ageMs: Double, display: ClickAssistEvidence.State,
                      activation: ClickAssistEvidence.State)] = [
             (399, .fresh, .fresh),
-            (401, .fresh, .stale),
-            (500, .fresh, .stale),
-            (699, .fresh, .stale),
+            (401, .stale, .stale),
+            (500, .stale, .stale),
+            (699, .stale, .stale),
             (701, .stale, .stale),
         ]
         for c in cases {

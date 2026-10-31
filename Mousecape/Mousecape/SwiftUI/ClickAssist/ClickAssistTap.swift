@@ -82,9 +82,9 @@ final class AssistTap: @unchecked Sendable {
         self.log = log
     }
 
-    /// P2b: runtime-configurable assist radius. Any value outside 8...16 is CLAMPED
+    /// P2b: runtime-configurable assist radius. Any value outside 8...32 is CLAMPED
     /// (logged); semantics stay boundary-distance <= tolerance inside DecisionCore.
-    static func clampTolerance(_ v: CGFloat) -> CGFloat { min(max(v, 8), 16) }
+    static func clampTolerance(_ v: CGFloat) -> CGFloat { ClickAssistTolerance.validated(v) }
 
     @discardableResult
     func setTolerance(_ v: CGFloat) -> CGFloat {
@@ -432,38 +432,9 @@ final class AssistTap: @unchecked Sendable {
                                           extra: "self=1 ") {
                     return nil
                 }
-                // Promotion: a near-miss can land INSIDE a container (e.g. a
-                // browser tab) whose nested chrome button is still within the
-                // assist radius. Only a structurally-eligible chrome button can
-                // be promoted, so web content keeps the untouched direct-hit path.
-                var promotionFailure: String?
-                if let promoted = promotedTarget(res: res, point: original, containedIn: hit.rect) {
-                    let plan = resolveDelivery(for: promoted,
-                                               destination: DecisionCore.centerPoint(into: promoted.rect),
-                                               res: res, allowsSynthetic: false)
-                    if case .axPress(let dest) = plan.kind {
-                        if performAXPressDelivery(best: promoted,
-                                                  corrected: dest,
-                                                  snap: DecisionCore.snapMode(for: promoted),
-                                                  dist: DecisionCore.boundaryDistance(original, promoted.rect),
-                                                  cands: 1, res: res, label: label,
-                                                  original: original, started: started,
-                                                  extra: "promoted=1 from=\(hit.key) ") {
-                            return nil
-                        }
-                        // Fail closed: the gate re-check at delivery lost the
-                        // target, so this click is NOT redirected. Fall through
-                        // to the normal direct-hit passthrough (which computes the
-                        // hit's own verdict and logs the other= diagnostics).
-                        promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) unavailable=1"
-                    } else {
-                        promotionFailure = "promoted=1 from=\(hit.key) target=\(promoted.key) \(plan.rejectReason ?? "unavailable=1")"
-                    }
-                }
                 let hitPlan = resolveDelivery(for: hit, destination: original, res: res,
                                               allowsSynthetic: false)
                 var extra = "element=\(hit.key) boundary=0.0 action=passthrough legitimacy=\(hitPlan.verdict.rawValue)"
-                if let promotionFailure { extra += " " + promotionFailure }
                 if let other = others.first { extra += " other=\(other.key) other_dist=\(String(format: "%.1f", other.dist))" }
                 emit("PASSTHROUGH", type: label, original: original, mutated: nil,
                      reason: "direct-hit", res: res, started: started, extra: extra)
@@ -479,31 +450,8 @@ final class AssistTap: @unchecked Sendable {
                      extra: "tol=\(tolerance) targets=\(res.candidates.count) nearest3=[\(nearest)]")
                 return Unmanaged.passUnretained(event)
             case .ambiguous(let scored, let tie):
-                // Ambiguity between duplicate surfaces (e.g. an AXTabGroup and its
-                // AXRadioButton sharing one frame) is not evidence against a nested
-                // chrome button. Promotion is SCOPED TO THE TIED SET: an ambiguous
-                // tie may only be resolved by evidence about the tied surfaces
-                // themselves — a third party merely in range (a tab strip next to
-                // two page sliders) is never a tie-breaker. A tied candidate that
-                // passes the structural AXPress gate wins if its own legitimacy
-                // confirms. Everything else below is untouched.
-                let tiedKeys = Set(scored.map { $0.candidate.key })
-                if let promoted = promotedTarget(res: res, point: original, containedIn: nil,
-                                                 restrictedTo: tiedKeys) {
-                    let plan = resolveDelivery(for: promoted,
-                                               destination: DecisionCore.centerPoint(into: promoted.rect),
-                                               res: res, allowsSynthetic: false)
-                    if case .axPress(let dest) = plan.kind,
-                       performAXPressDelivery(best: promoted,
-                                              corrected: dest,
-                                              snap: DecisionCore.snapMode(for: promoted),
-                                              dist: DecisionCore.boundaryDistance(original, promoted.rect),
-                                              cands: 1, res: res, label: label,
-                                              original: original, started: started,
-                                              extra: "promoted=1 from=ambiguous ") {
-                        return nil
-                    }
-                }
+                // An exact tie has no indicated winner and must not be promoted
+                // into a different click target by a delivery-only rule.
                 let listed = scored.prefix(3)
                     .map { "\($0.candidate.key):\(String(format: "%.1f", $0.dist))" }
                     .joined(separator: ",")
@@ -512,10 +460,8 @@ final class AssistTap: @unchecked Sendable {
                      extra: "cands=[\(listed)] tie=\(String(format: "%.1f", tie)) tol=\(tolerance)")
                 return Unmanaged.passUnretained(event)
             case .redirect:
-                // Multi-target, fail-closed: validate up to three nearest
-                // candidates at their own destinations; every confirmed one is a
-                // legitimate target, and the nearest wins the click. mismatch and
-                // unknown never become the winner and never move the event.
+                // Deliver only the shared indicated winner. Unknown/mismatched
+                // evidence never causes a redirect to a farther target.
                 let scored = DecisionCore.displayCandidates(point: original,
                                                             candidates: res.candidates,
                                                             tolerance: tolerance, limit: 3)

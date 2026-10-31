@@ -45,10 +45,9 @@ final class OverlayView: NSView {
             return
         }
         // Effective tolerance region: dashed ring outside the AX frame.
-        let ring = cgFrame.insetBy(dx: -tolerance, dy: -tolerance)
-        let ringRect = CGRect(x: local(ring.origin).x, y: local(ring.origin).y,
-                              width: ring.width, height: ring.height)
-        let ringPath = NSBezierPath(roundedRect: ringRect, xRadius: tolerance, yRadius: tolerance)
+        let localFrame = CGRect(origin: local(cgFrame.origin), size: cgFrame.size)
+        let ringPath = NSBezierPath(cgPath: DecisionCore.toleranceOutline(
+            rect: localFrame, tolerance: tolerance))
         ringPath.lineWidth = 1.5
         NSColor.systemOrange.setStroke()
         ringPath.setLineDash([6, 4], count: 2, phase: 0)
@@ -188,9 +187,8 @@ final class TargetingOverlay {
                                                                chromeEligible: $0.chromeEligible,
                                                                evidenceGeneration: $0.evidenceGeneration,
                                                                collectedAt: $0.collectedAt) }
-            // Up to three nearest in-tolerance first-class candidates, validated
-            // at their own destination points (fail-closed). Every confirmed one
-            // is indicated; the nearest wins the click.
+            // Indicate only the shared click winner, with fresh confirmation
+            // at its delivery point. Never substitute a farther confirmed target.
             let scored = DecisionCore.displayCandidates(point: pointer, candidates: cands,
                                                         tolerance: tolerance, limit: 3)
             var confirmed: [(DecisionCore.ScoredCandidate, CGPoint, ClickAssistVerdict)] = []

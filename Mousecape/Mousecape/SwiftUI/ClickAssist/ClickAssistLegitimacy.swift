@@ -95,8 +95,10 @@ final class LegitimacyPolicy: @unchecked Sendable {
         if candidateRole == "AXSlider" {
             diagnostic("SLIDER_HIT result=\(hitResult.rawValue) destination=\(destination) candidate=\(candidate) live=\(String(describing: axFrame(candidateElement))) hit=\(String(describing: answeredFrame)) role=\(element.map { role(of: $0) } ?? "-")")
         }
-        guard hitResult == .success, let element, let hitFrame = answeredFrame,
-              hitFrame.contains(destination) else { return .unknown }
+        guard hitResult == .success, let element, let hitFrame = answeredFrame else { return .unknown }
+        // A successful hit on a surface that does not cover the requested point
+        // is positive geometry disagreement, not a transport/timeout uncertainty.
+        guard hitFrame.contains(destination) else { return .mismatch }
         if let enabled = attr(element, kAXEnabledAttribute) as? Bool, !enabled {
             return .mismatch
         }

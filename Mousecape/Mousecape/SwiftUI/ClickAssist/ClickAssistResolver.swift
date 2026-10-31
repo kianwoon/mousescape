@@ -72,7 +72,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                                           "com.sdmj76.Mousecape" as CFString,
                                           kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
         let value = (raw as? NSNumber)?.doubleValue ?? 12
-        return CGFloat(value.isFinite ? min(max(value, 8), 16) : 12)
+        return ClickAssistTolerance.validated(CGFloat(value))
     }
 
     private let cache: CacheStore
@@ -830,31 +830,22 @@ final class AccessibilityResolver: @unchecked Sendable {
         let visited = Self.nodeBudget - budget
         let gen = nextGeneration()
         var validatedKeys: Set<String> = []
-        // Publish POSITION-SPECIFIC evidence for the SINGLE nearest target — one
-        // hit-test + at most one ancestry walk per cycle. Role, press capability
-        // and chrome ancestry classification stay collection-time data on every
-        // target (see `collect`); only the legitimacy hit-test is capped here.
+        // Confirm the nearest candidate. A proven mismatch is omitted from
+        // this snapshot, then the same shared selection runs again. Unknown AX
+        // answers stop the search; they never authorize a farther redirect.
         let evidenceStart = CACurrentMediaTime()
         if let legitimacy {
-            // Validate exactly the winner chosen by the overlay and tap, including
-            // tier and wrapper rules. Never spend the evidence slot off-radius.
-            let candidates = out.map {
-                DecisionCore.Candidate(key: $0.key, rect: $0.rect, inset: $0.inset,
-                                       tier: $0.tier, role: $0.role, label: $0.label)
-            }
-            let nearest: [Int]
-            if case .winner(let winner, _) = DecisionCore.resolve(
-                point: pointer, candidates: candidates,
-                tolerance: selectionTolerance),
-               let index = out.firstIndex(where: { $0.key == winner.candidate.key }) {
-                nearest = [index]
-            } else {
-                nearest = []
-            }
-            let siblings = out.filter { $0.tier == .firstClass }.map(\.rect)
-            for idx in nearest {
+            for _ in 0..<ClickAssistEvidence.maxEvidenceCandidatesPerCycle {
+                let candidates = out.map {
+                    DecisionCore.Candidate(key: $0.key, rect: $0.rect, inset: $0.inset,
+                                           tier: $0.tier, role: $0.role, label: $0.label)
+                }
+                guard case .winner(let winner, _) = DecisionCore.resolve(
+                    point: pointer, candidates: candidates, tolerance: selectionTolerance),
+                    let idx = out.firstIndex(where: { $0.key == winner.candidate.key }),
+                    let el = elementRefs[out[idx].key] else { break }
+                let siblings = out.filter { $0.tier == .firstClass }.map(\.rect)
                 let target = out[idx]
-                guard let el = elementRefs[target.key] else { continue }
                 let probe = DecisionCore.Candidate(key: target.key, rect: target.rect,
                                                    inset: target.inset, tier: target.tier,
                                                    role: target.role, label: target.label)
@@ -870,6 +861,12 @@ final class AccessibilityResolver: @unchecked Sendable {
                 out[idx].evidenceGeneration = gen
                 out[idx].collectedAt = CACurrentMediaTime()
                 validatedKeys.insert(target.key)
+                if out[idx].verdict == .mismatch {
+                    log("RESOLVER_REJECTED_WINNER key=\(target.key) verdict=mismatch")
+                    out.remove(at: idx)
+                    continue
+                }
+                break
             }
         }
         let evidenceMs = (CACurrentMediaTime() - evidenceStart) * 1000

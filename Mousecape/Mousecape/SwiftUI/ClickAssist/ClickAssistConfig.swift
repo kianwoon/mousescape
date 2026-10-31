@@ -13,7 +13,7 @@ import CoreGraphics
 //
 // Key                                  Type    Default   Validation
 // MCClickAssistEnabled                 Bool    false     bool (missing => false)
-// MCClickAssistTolerancePoints         Number  12        finite, clamped 8...16
+// MCClickAssistTolerancePoints         Number  12        finite, clamped 8...32
 // MCClickAssistIndicatorEnabled        Bool    true      bool (missing => true)
 //
 // Scope is deliberately one store: currentUser + anyHost, inside Mousecape's own
@@ -23,15 +23,13 @@ struct ClickAssistConfig: Equatable, Sendable {
     var tolerancePoints: CGFloat
     var indicatorEnabled: Bool
 
-    static let defaultTolerance: CGFloat = 12
-    static let toleranceRange: ClosedRange<CGFloat> = 8...16
+    static let defaultTolerance = ClickAssistTolerance.defaultValue
+    static let toleranceRange = ClickAssistTolerance.range
 
     static func validated(enabled: Bool, tolerancePoints raw: CGFloat,
                           indicatorEnabled: Bool) -> ClickAssistConfig {
-        let finite = raw.isFinite ? raw : defaultTolerance
         return ClickAssistConfig(enabled: enabled,
-                                 tolerancePoints: min(max(finite, toleranceRange.lowerBound),
-                                                      toleranceRange.upperBound),
+                                 tolerancePoints: ClickAssistTolerance.validated(raw),
                                  indicatorEnabled: indicatorEnabled)
     }
 }
