@@ -1,5 +1,7 @@
 // baseline-guard:allow new standalone prototype file, no prior baseline possible
 import Carbon.HIToolbox
+import AppKit
+import os.lock
 import CoreGraphics
 import Foundation
 import QuartzCore
@@ -46,6 +48,38 @@ final class AssistTap: @unchecked Sendable {
     /// gesture stays a passthrough: a gesture that began unsupported stays
     /// unsupported end-to-end.
     private var gestureUnsupported = false
+    private struct PendingBackgroundClick {
+        let down: CGEvent
+        let candidate: DecisionCore.Candidate
+        let pid: pid_t
+        let point: CGPoint
+    }
+    private var pendingBackgroundClick: PendingBackgroundClick?
+    private var focusObserver: NSObjectProtocol?
+    private var focusLock = os_unfair_lock_s()
+    private var foregroundPID: pid_t = 0
+
+    private func setForegroundPID(_ pid: pid_t) {
+        os_unfair_lock_lock(&focusLock)
+        foregroundPID = pid
+        os_unfair_lock_unlock(&focusLock)
+    }
+    private func currentForegroundPID() -> pid_t? {
+        guard os_unfair_lock_trylock(&focusLock) else { return nil }
+        defer { os_unfair_lock_unlock(&focusLock) }
+        return foregroundPID
+    }
+    private func captureBackgroundClick(_ candidate: DecisionCore.Candidate, res: Resolution,
+                                        original: CGPoint, destination: CGPoint, event: CGEvent) -> Bool {
+        guard activationSink != nil,
+              BackgroundClickPolicy.eligible(targetPID: res.pid, foregroundPID: currentForegroundPID(),
+                candidate: candidate, generation: res.generation, point: original, now: CACurrentMediaTime()),
+              let down = event.copy() else { return false }
+        pendingBackgroundClick = PendingBackgroundClick(down: down, candidate: candidate,
+            pid: res.pid, point: destination)
+        log("BACKGROUND_CLICK_CAPTURED target=\(candidate.key) pid=\(res.pid) original=consumed")
+        return true
+    }
     /// Off-callback activation transport (XPC to the resolver service). The tap
     /// hands ownership to the service; the reply is advisory only.
     var activationSink: ((AXPressRequest) -> Void)?
@@ -109,6 +143,12 @@ final class AssistTap: @unchecked Sendable {
     @discardableResult
     func start(point: CGEventTapLocation = .cghidEventTap) -> Bool {
         guard tap == nil else { return true }
+        setForegroundPID(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
+        focusObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) { [weak self] note in
+                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                self?.setForegroundPID(app?.processIdentifier ?? 0)
+            }
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         guard let port = CGEvent.tapCreate(
             tap: point,
@@ -135,6 +175,9 @@ final class AssistTap: @unchecked Sendable {
     }
 
     func stop() {
+        if let focusObserver { NSWorkspace.shared.notificationCenter.removeObserver(focusObserver) }
+        focusObserver = nil
+        pendingBackgroundClick = nil
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
         if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
         if let tap { CFMachPortInvalidate(tap) }
@@ -292,6 +335,9 @@ final class AssistTap: @unchecked Sendable {
     }
 
     private func handle(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if event.getIntegerValueField(.eventSourceUserData) == BackgroundClickPolicy.eventMarker {
+            return Unmanaged.passUnretained(event)
+        }
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             // A gesture interrupted by tap disablement can never be repaired: all
             // its state must die so no stale translation, swallowed up, or
@@ -303,6 +349,7 @@ final class AssistTap: @unchecked Sendable {
             unlatchedForDrag = false
             pressGestureToken = nil
             gestureUnsupported = false
+            pendingBackgroundClick = nil
             log("TAP_INTERRUPTED reason=\(reason) state=cleared")
             if type == .tapDisabledByUserInput, manuallyDisabled {
                 log("TAP_STAYSDISABLED reason=manual-p3-interruption")
@@ -332,6 +379,10 @@ final class AssistTap: @unchecked Sendable {
         // and secure input is the system-wide signal for it. Evaluated per event
         // (cheap), never polled.
         if IsSecureEventInputEnabled() {
+            if pendingBackgroundClick != nil {
+                pendingBackgroundClick = nil
+                pressGestureToken = UUID()
+            }
             if consumeAXPressOwned(isDown: isDown, isDrag: isDrag, isUp: isUp,
                                    label: label, original: original, observed: observed,
                                    started: started) { return nil }
@@ -354,6 +405,10 @@ final class AssistTap: @unchecked Sendable {
         let supported = button == 0 && gestureFlags.isEmpty && clicks <= 1
         let continuedUnsupported = gestureUnsupported && !isDown
         if !supported || continuedUnsupported {
+            if pendingBackgroundClick != nil {
+                pendingBackgroundClick = nil
+                pressGestureToken = UUID()
+            }
             if consumeAXPressOwned(isDown: isDown, isDrag: isDrag, isUp: isUp,
                                    label: label, original: original, observed: observed,
                                    started: started) { return nil }
@@ -365,6 +420,41 @@ final class AssistTap: @unchecked Sendable {
             return Unmanaged.passUnretained(event)
         }
         if isDown { gestureUnsupported = false }
+
+        if let pending = pendingBackgroundClick {
+            if isDrag {
+                // A drag is not an activation-click. Release the captured native
+                // down ahead of this drag, preserving the app's normal gesture.
+                pendingBackgroundClick = nil
+                pending.down.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
+                pending.down.tapPostEvent(proxy)
+                gestureUnsupported = true
+                return Unmanaged.passUnretained(event)
+            }
+            if isUp {
+                pendingBackgroundClick = nil
+                let latest = resolution()
+                if assistEnabled, latest.valid, latest.pid == pending.pid,
+                   let target = latest.candidates.first(where: { $0.key == pending.candidate.key }),
+                   FrameContinuity.delta(target.rect, pending.candidate.rect) <= 1,
+                   target.rect.contains(original),
+                   target.verdict == .confirmed,
+                   ClickAssistEvidence.activationState(evidenceGeneration: target.evidenceGeneration,
+                    currentGeneration: latest.generation,
+                    ageMs: (CACurrentMediaTime() - target.collectedAt) * 1000) == .fresh {
+                    var request = AXPressRequest(targetKey: target.key, pid: latest.pid,
+                        generation: latest.generation, issuedAt: CACurrentMediaTime(), expiryMs: 400)
+                    request.backgroundClick = BackgroundClickWire(x: pending.point.x, y: pending.point.y,
+                                                                  rect: target.rect)
+                    dispatchAXPress(request: request)
+                    log("BACKGROUND_CLICK_QUEUED target=\(target.key) request=\(request.requestID) original=consumed")
+                } else {
+                    log("BACKGROUND_CLICK_CANCELLED reason=target-or-evidence-changed original=consumed")
+                }
+                return nil
+            }
+            pendingBackgroundClick = nil
+        }
 
         // AXPress gesture consumption: the down that fired AXPress was swallowed,
         // so its drags and matching up must be swallowed too. Returning nil from
@@ -415,6 +505,9 @@ final class AssistTap: @unchecked Sendable {
 
             switch DecisionCore.route(point: original, candidates: res.candidates, tolerance: tolerance) {
             case .directHit(let hit, let others):
+                if captureBackgroundClick(hit, res: res, original: original, destination: original, event: event) {
+                    return nil
+                }
                 // Self delivery: when the hit element is ITSELF a chrome-gated
                 // AXButton (e.g. the real 16x16 tab-close glyph), a synthetic
                 // click is ignored by Chromium. AXPress acts on the element, so
@@ -498,6 +591,9 @@ final class AssistTap: @unchecked Sendable {
                 // Frame evidence is the PUBLISHED cached rect; the resolver checks
                 // movement/continuity on its own queue. Never refresh here.
                 let corrected = winner.1
+                if captureBackgroundClick(best, res: res, original: original, destination: corrected, event: event) {
+                    return nil
+                }
 
                 // Chrome-button delivery: structural gate, then EXACTLY ONE
                 // AXPress. Synthetic CGEvents are ignored by Chromium chrome.

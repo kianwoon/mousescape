@@ -362,12 +362,13 @@ final class ClickAssistServiceClient: @unchecked Sendable {
                 self.log("AXPRESS_OUTCOME_UNKNOWN request=\(requestID) reason=service-unavailable")
                 return
             }
-            let wire = ActivationRequestWire(requestID: requestID,
+            var wire = ActivationRequestWire(requestID: requestID,
                                              targetKey: request.targetKey,
                                              pid: request.pid,
                                              generation: request.generation,
                                              issuedAt: request.issuedAt,
                                              deadlineMs: request.expiryMs)
+            wire.backgroundClick = request.backgroundClick
             guard let data = try? JSONEncoder().encode(wire) else {
                 self.log("AXPRESS_OUTCOME_UNKNOWN request=\(requestID) reason=encode-error")
                 return

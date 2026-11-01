@@ -506,7 +506,33 @@ enum ClickAssistEvidence {
 
 /// One off-callback AXPress activation request. Pure value, testable. The
 /// deadline is ABSOLUTE at issue time and never renewed on receipt.
+/// A completed green-ring click, not a request to click an arbitrary point.
+struct BackgroundClickWire: Codable, Equatable, Sendable {
+    var x: Double
+    var y: Double
+    var rect: CGRect
+    var point: CGPoint { CGPoint(x: x, y: y) }
+}
+
+enum BackgroundClickPolicy {
+    static let eventMarker: Int64 = 0x4D434243
+    static func eligible(targetPID: Int32, foregroundPID: Int32?, candidate: DecisionCore.Candidate,
+                         generation: UInt64, point: CGPoint, now: Double) -> Bool {
+        guard let foregroundPID, foregroundPID > 0, targetPID > 0,
+              foregroundPID != targetPID, candidate.verdict == .confirmed,
+              candidate.rect.contains(point), candidate.collectedAt > 0 else { return false }
+        return ClickAssistEvidence.activationState(evidenceGeneration: candidate.evidenceGeneration,
+            currentGeneration: generation, ageMs: (now - candidate.collectedAt) * 1000) == .fresh
+    }
+    static func matches(_ click: BackgroundClickWire, rect: CGRect) -> Bool {
+        click.x.isFinite && click.y.isFinite && GeometryPolicy.isValidFrame(click.rect)
+            && click.rect.width > 0 && click.rect.height > 0 && rect.contains(click.point)
+            && FrameContinuity.delta(click.rect, rect) <= 1
+    }
+}
+
 struct AXPressRequest: Sendable {
+    var backgroundClick: BackgroundClickWire? = nil
     let requestID: UUID
     let targetKey: String
     let pid: pid_t

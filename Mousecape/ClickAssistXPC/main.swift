@@ -10,6 +10,8 @@
 
 import AppKit
 import Foundation
+import ApplicationServices
+import Carbon.HIToolbox
 
 /// The service must log where the AGENT logs: the resolver's diagnostics
 /// (RESOLVER_PUBLISH / rejections) are the only way to see why a candidate is
@@ -184,12 +186,28 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         let target = snapshot.targets.first { $0.key == request.targetKey }
         let expectedElement = resolver.element(for: request.targetKey, pid: request.pid)
         let pid = request.pid
+        let backgroundEligible: Bool
+        if let click = request.backgroundClick, let target {
+            backgroundEligible = snapshot.valid && snapshot.pid == pid && target.verdict == .confirmed
+                && BackgroundClickPolicy.matches(click, rect: target.rect)
+                && ClickAssistEvidence.activationState(evidenceGeneration: target.evidenceGeneration,
+                    currentGeneration: snapshot.generation,
+                    ageMs: (now - target.collectedAt) * 1000) == .fresh
+        } else {
+            backgroundEligible = false
+        }
+        if request.backgroundClick != nil, !backgroundEligible {
+            svcLog("BACKGROUND_CLICK_REJECTED reason=invalid-evidence request=\(request.requestID)")
+            reply(Self.reply(status: "rejected", reason: "invalid-background-evidence"))
+            return
+        }
 
         stateLock.lock()
         let rejection = ActivationGate.admit(
             request, now: now, currentGeneration: snapshot.generation,
             targetExists: target != nil && expectedElement != nil,
             chromeEligible: target?.chromeEligible == true,
+            backgroundEligible: backgroundEligible,
             state: &gate)
         stateLock.unlock()
 
@@ -213,7 +231,7 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
                 return
             }
             let currentSnapshot = self.cache.current()
-            guard currentSnapshot.generation == request.generation else {
+            guard request.backgroundClick != nil || currentSnapshot.generation == request.generation else {
                 svcLog("AXPRESS_REJECTED reason=\(ActivationRejection.staleGeneration.rawValue) target=\(request.targetKey) request=\(request.requestID)")
                 reply(Self.reply(status: "rejected", reason: ActivationRejection.staleGeneration.rawValue))
                 return
@@ -225,10 +243,112 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
                 return
             }
             AXUIElementSetMessagingTimeout(live, 0.05)
+            if let click = request.backgroundClick, let target {
+                let outcome = self.performBackgroundClick(request, click: click, target: target,
+                                                         element: live, snapshot: snapshot)
+                svcLog("BACKGROUND_CLICK_RESULT request=\(request.requestID) target=\(request.targetKey) delivered=\(outcome.delivered ? 1 : 0) reason=\(outcome.reason)")
+                reply(Self.reply(status: outcome.delivered ? "done" : "rejected", reason: outcome.reason))
+                return
+            }
             let result = AXUIElementPerformAction(live, "AXPress" as CFString)
             svcLog("AXPRESS_DONE target=\(request.targetKey) request=\(request.requestID) success=\(result == .success ? 1 : 0) code=\(result.rawValue)")
             reply(Self.reply(status: "done", reason: "axpress"))
         }
+    }
+
+    /// The original physical gesture is consumed before this request exists.
+    /// Never retry an AXPress or a posted pair: delivery has exactly one owner.
+    private func performBackgroundClick(_ request: ActivationRequestWire, click: BackgroundClickWire,
+                                        target: CachedTarget, element: AXUIElement,
+                                        snapshot: CacheSnapshot) -> (delivered: Bool, reason: String) {
+        func attribute(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(e, name as CFString, &value) == .success else { return nil }
+            return value
+        }
+        guard !IsSecureEventInputEnabled(),
+              let app = NSRunningApplication(processIdentifier: request.pid),
+              let rawWindow = attribute(element, kAXWindowAttribute),
+              CFGetTypeID(rawWindow) == AXUIElementGetTypeID(),
+              let before = AXGeometry.frame(element),
+              BackgroundClickPolicy.matches(click, rect: before) else { return (false, "target-changed") }
+        let window = rawWindow as! AXUIElement
+        AXUIElementSetMessagingTimeout(window, 0.05)
+        // An XPC worker is not the foreground application. Express the user's
+        // captured click through Accessibility as well as AppKit activation;
+        // an accepted AppKit request alone does not establish keyboard focus.
+        let axApp = AXUIElementCreateApplication(request.pid)
+        AXUIElementSetMessagingTimeout(axApp, 0.05)
+        let frontResult = AXUIElementSetAttributeValue(axApp, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
+        guard app.isActive || frontResult == .success || app.activate(options: []) else {
+            return (false, "activation-refused")
+        }
+        guard AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success else {
+            return (false, "window-raise-refused")
+        }
+        for name in [kAXMainAttribute, kAXFocusedAttribute] {
+            var settable = DarwinBoolean(false)
+            if AXUIElementIsAttributeSettable(window, name as CFString, &settable) == .success,
+               settable.boolValue {
+                _ = AXUIElementSetAttributeValue(window, name as CFString, kCFBooleanTrue)
+            }
+        }
+        // Focus changes are asynchronous. This wait is confined to the serial
+        // activation worker; the event tap and resolver remain unblocked.
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, 0.05)
+        var windowReady = false
+        while CACurrentMediaTime() < request.deadline, !IsSecureEventInputEnabled() {
+            if (attribute(axApp, kAXFrontmostAttribute) as? Bool) == true {
+                var hit: AXUIElement?
+                if let focusedWindow = attribute(axApp, kAXFocusedWindowAttribute), CFEqual(focusedWindow, window),
+                   AXUIElementCopyElementAtPosition(system, Float(click.x), Float(click.y), &hit) == .success,
+                   let hit, let hitWindow = attribute(hit, kAXWindowAttribute), CFEqual(hitWindow, window) {
+                    windowReady = true
+                    break
+                }
+            }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        guard windowReady, CACurrentMediaTime() < request.deadline, !IsSecureEventInputEnabled(),
+              (attribute(axApp, kAXFrontmostAttribute) as? Bool) == true else {
+            svcLog("BACKGROUND_CLICK_FOCUS_DIAG request=\(request.requestID) expectedPID=\(request.pid) frontPID=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0) liveFront=\(String(describing: attribute(axApp, kAXFrontmostAttribute))) windowReady=\(windowReady) axFront=\(frontResult.rawValue) elapsedMs=\(Int((CACurrentMediaTime()-request.issuedAt)*1000))")
+            return (false, "focus-not-established")
+        }
+        guard let frame = AXGeometry.frame(element), BackgroundClickPolicy.matches(click, rect: frame),
+              (attribute(element, kAXEnabledAttribute) as? Bool) != false,
+              (attribute(element, "AXHidden") as? Bool) != true else { return (false, "live-target-changed") }
+        // New policy instance forces a real post-activation hit-test; a cached
+        // pre-focus verdict cannot authorize this delivery.
+        let verdict = LegitimacyPolicy().validate(pid: request.pid, generation: request.generation,
+            key: request.targetKey, candidate: frame, candidateRole: target.role,
+            destination: click.point,
+            siblings: snapshot.targets.filter { $0.tier == .firstClass && $0.key != target.key }.map(\.rect),
+            candidateElement: element, diagnostic: { svcLog($0) })
+        guard verdict == .confirmed, CACurrentMediaTime() < request.deadline,
+              (attribute(axApp, kAXFrontmostAttribute) as? Bool) == true,
+              !IsSecureEventInputEnabled() else { return (false, "post-focus-validation-failed") }
+        if target.chromeEligible {
+            let result = AXUIElementPerformAction(element, "AXPress" as CFString)
+            return (result == .success, result == .success ? "axpress-once" : "axpress-failed-no-retry")
+        }
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
+                                 mouseCursorPosition: click.point, mouseButton: .left),
+              let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
+                               mouseCursorPosition: click.point, mouseButton: .left) else {
+            return (false, "event-allocation-failed")
+        }
+        for event in [down, up] {
+            event.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
+            event.setIntegerValueField(.mouseEventClickState, value: 1)
+            event.flags = []
+            // Use WindowServer's normal input path so controls see native
+            // mouse-button state/tracking. Direct-to-PID posting bypasses that
+            // state and can focus a control without completing its action.
+            event.post(tap: .cghidEventTap)
+        }
+        return (true, "mouse-pair-once")
     }
 
     private static func reply(status: String, reason: String) -> Data {

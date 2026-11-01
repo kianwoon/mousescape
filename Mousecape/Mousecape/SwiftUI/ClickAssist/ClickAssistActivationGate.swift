@@ -16,6 +16,7 @@ struct ActivationRequestWire: Codable, Equatable, Sendable {
     /// Monotonic seconds at issue time (shared system-wide clock).
     var issuedAt: Double
     var deadlineMs: Double
+    var backgroundClick: BackgroundClickWire? = nil
 
     var deadline: Double { issuedAt + deadlineMs / 1000 }
 }
@@ -50,12 +51,17 @@ enum ActivationGate {
                       currentGeneration: UInt64,
                       targetExists: Bool,
                       chromeEligible: Bool,
+                      backgroundEligible: Bool = false,
                       state: inout State) -> ActivationRejection? {
         prune(now, &state)
-        if request.generation != currentGeneration { return .staleGeneration }
+        // Background clicks are independently matched to the current fresh
+        // target/frame before admission, then hit-tested again after focus.
+        // An ordinary resolver refresh must not discard that same click.
+        if request.generation != currentGeneration,
+           !(backgroundEligible && request.generation < currentGeneration) { return .staleGeneration }
         if now >= request.deadline { return .expired }
         if !targetExists { return .unknownTarget }
-        if !chromeEligible { return .notChromeEligible }
+        if !chromeEligible && !backgroundEligible { return .notChromeEligible }
         if state.lastRequest[request.requestID] != nil { return .duplicateRequest }
         if let last = state.lastTarget[request.targetKey],
            (now - last) * 1000 < dedupeWindowMs {

@@ -8,11 +8,34 @@ import CoreGraphics
 /// Callers own their messaging-timeout policy; this reader sets none.
 enum AXGeometry {
     static func frame(_ el: AXUIElement) -> CGRect? {
-        var posRef: CFTypeRef?
-        var sizeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &posRef) == .success,
-              AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &sizeRef) == .success,
-              let posRef, let sizeRef,
+        readFrame(batch: {
+            var values: CFArray?
+            guard AXUIElementCopyMultipleAttributeValues(el,
+                [kAXPositionAttribute, kAXSizeAttribute] as CFArray,
+                AXCopyMultipleAttributeOptions(rawValue: 0), &values) == .success else { return nil }
+            return values
+        }, separate: {
+            var position: CFTypeRef?
+            var size: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(el, kAXPositionAttribute as CFString, &position) == .success,
+                  AXUIElementCopyAttributeValue(el, kAXSizeAttribute as CFString, &size) == .success,
+                  let position, let size else { return nil }
+            return [position, size] as CFArray
+        })
+    }
+
+    /// One live round trip on supporting apps. A partial/unsupported batch uses
+    /// the original reader, preserving apps with incomplete batch support.
+    /// Nothing is cached, and both paths use the same finite-frame validation.
+    static func readFrame(batch: () -> CFArray?, separate: () -> CFArray?) -> CGRect? {
+        decode(batch()) ?? decode(separate())
+    }
+
+    private static func decode(_ values: CFArray?) -> CGRect? {
+        guard let values, CFArrayGetCount(values) == 2 else { return nil }
+        let array = values as [CFTypeRef]
+        let posRef = array[0], sizeRef = array[1]
+        guard
               CFGetTypeID(posRef) == AXValueGetTypeID(),
               CFGetTypeID(sizeRef) == AXValueGetTypeID() else { return nil }
         var origin = CGPoint.zero
