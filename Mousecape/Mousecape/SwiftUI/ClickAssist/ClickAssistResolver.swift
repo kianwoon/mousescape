@@ -669,12 +669,48 @@ final class AccessibilityResolver: @unchecked Sendable {
         let seedHit = seedAtPointer(appEl, pointer: pointer, out: &out, budget: &budget,
                                     deadline: pointerDeadline, screenUnion: screenUnion)
 
+        // A direct seed still needs the SAME legitimacy proof as any published
+        // winner. Only current-cycle seed entries participate, never the union.
+        // Final union selection/validation below remains authoritative.
+        var directSeed = false
+        if seedHit, consecutiveLocalRotationSkips < 4, legitimacy != nil,
+           !out.contains(where: { GeometryPolicy.usesNativeRowAction($0.role) }) {
+            var seedCandidates = out.map {
+                DecisionCore.Candidate(key: $0.key, rect: $0.rect, inset: $0.inset,
+                    tier: $0.tier, role: $0.role, label: $0.label)
+            }
+            if case .winner(let winner, _) = DecisionCore.resolve(point: pointer,
+                candidates: seedCandidates, tolerance: selectionTolerance),
+               winner.dist == 0, winner.candidate.tier == .firstClass,
+               let index = seedCandidates.firstIndex(where: { $0.key == winner.candidate.key }),
+               let element = elementRefs[winner.candidate.key] {
+                let target = winner.candidate
+                let destination = DecisionCore.snapMode(for: target) == .center
+                    ? DecisionCore.centerPoint(into: target.rect)
+                    : DecisionCore.clampPoint(pointer, into: target.rect, inset: target.inset)
+                // Separate preliminary proof: it must not populate the final
+                // validator's cache before the full union/sibling set is known.
+                let seedVerdict = LegitimacyPolicy().validate(pid: pid, generation: generation + 1,
+                    key: target.key, candidate: target.rect, candidateRole: target.role,
+                    destination: destination,
+                    siblings: out.filter { $0.tier == .firstClass && $0.key != target.key }.map(\.rect),
+                    candidateElement: element, diagnostic: { _ in })
+                seedCandidates[index] = DecisionCore.Candidate(key: target.key, rect: target.rect,
+                    inset: target.inset, tier: target.tier, role: target.role, label: target.label,
+                    verdict: seedVerdict)
+                directSeed = DecisionCore.canDeferPointerWalk(point: pointer,
+                    freshCandidates: seedCandidates, tolerance: selectionTolerance,
+                    consecutiveLocalSkips: consecutiveLocalRotationSkips)
+            }
+        }
+
         // POINTER-WINDOW PRIORITY: Chromium web content often refuses AX hit-testing,
         // and the rotating global walk reaches a deep video-controls subtree only
         // every few cycles — so an already-seen control (e.g. the YouTube seek
         // slider) expires before it is seen again. Walk the AX window under the
         // pointer FIRST, every cycle, with its own budget, before any rotation.
-        let pwinResult = windowUnderPointer(windows: windows, pointer: pointer, ownerPid: pid)
+        let pwinResult = directSeed ? (window: Optional<AXUIElement>.none, mode: "confirmed-seed")
+            : windowUnderPointer(windows: windows, pointer: pointer, ownerPid: pid)
         let pwin: AXUIElement? = pwinResult.window
         let pwinMode = pwinResult.mode
         let keysBeforePwin = Set(out.map { $0.key })

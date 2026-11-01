@@ -262,6 +262,18 @@ enum DecisionCore {
         return true
     }
 
+    /// A current-cycle, strongly validated direct control can reach publication
+    /// before redundant window discovery. Never use union/cache entries here.
+    static func canDeferPointerWalk(point: CGPoint, freshCandidates: [Candidate],
+                                    tolerance: CGFloat, consecutiveLocalSkips: Int) -> Bool {
+        guard consecutiveLocalSkips < 4,
+              !freshCandidates.contains(where: { GeometryPolicy.usesNativeRowAction($0.role) }),
+              case .winner(let winner, _) = resolve(point: point,
+                candidates: freshCandidates, tolerance: tolerance) else { return false }
+        return winner.dist == 0 && winner.candidate.tier == .firstClass
+            && winner.candidate.verdict == .confirmed
+    }
+
     /// Click semantics layered on the shared resolution. Passthrough decisions
     /// (direct hits) are reported as such so the caller leaves the event alone.
     static func route(point: CGPoint, candidates: [Candidate], tolerance: CGFloat,
