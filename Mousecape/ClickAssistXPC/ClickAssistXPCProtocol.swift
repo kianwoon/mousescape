@@ -12,6 +12,8 @@
 import Foundation
 
 @objc protocol ClickAssistXPCProtocol {
+    /// Scheduling hint only; carries no target or permission to click.
+    func pointerMoved()
     /// Liveness probe. The service replies with a short token.
     func configure(_ json: Data, reply: @escaping (Bool) -> Void)
     func ping(reply: @escaping (String) -> Void)

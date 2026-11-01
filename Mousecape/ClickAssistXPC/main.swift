@@ -117,6 +117,8 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         svcLog("SERVICE_START epoch=\(epoch) pid=\(ProcessInfo.processInfo.processIdentifier)")
     }
 
+    func pointerMoved() { resolver.pointerMoved() }
+
     // MARK: publish
 
     private func publish(_ snapshot: CacheSnapshot) {

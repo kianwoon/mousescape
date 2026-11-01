@@ -10,11 +10,13 @@
 //
 
 import Foundation
+import AppKit
 import QuartzCore
 
 /// Exported object so the service can push snapshots one-way. Lives entirely on
 /// the client side; all methods other than `publishSnapshot` are inert here.
 private final class ClickAssistClientEndpoint: NSObject, ClickAssistXPCProtocol {
+    func pointerMoved() {}
     var onSnapshot: ((Data) -> Void)?
 
     func publishSnapshot(_ data: Data, reply: @escaping (Bool) -> Void) {
@@ -46,6 +48,9 @@ final class ClickAssistServiceClient: @unchecked Sendable {
     private var circuitOpen = false
     private var stopped = false
     private var watchdog: DispatchSourceTimer?
+    private var movementMonitor: Any?
+    private var movementSignal: DispatchSourceUserDataAdd?
+    private var lastMovementSent: CFTimeInterval = 0
 
     /// Epoch/generation are client-local so stale-epoch and old-generation
     /// payloads can be dropped without trusting the service to self-police.
@@ -89,6 +94,21 @@ final class ClickAssistServiceClient: @unchecked Sendable {
             guard let self, !self.stopped else { return }
             self.startWatchdog()
             self.connect()
+            let signal = DispatchSource.makeUserDataAddSource(queue: self.queue)
+            signal.setEventHandler { [weak self] in
+                guard let self, !self.stopped, !self.circuitOpen,
+                      CACurrentMediaTime() - self.lastMovementSent >= 0.05,
+                      let proxy = self.connection?.remoteObjectProxy as? ClickAssistXPCProtocol else { return }
+                self.lastMovementSent = CACurrentMediaTime()
+                proxy.pointerMoved()
+            }
+            signal.resume()
+            self.movementSignal = signal
+            DispatchQueue.main.async { [weak self] in
+                self?.movementMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved]) { _ in
+                    signal.add(data: 1)
+                }
+            }
         }
     }
 
@@ -98,6 +118,12 @@ final class ClickAssistServiceClient: @unchecked Sendable {
         queue.async { [weak self] in
             guard let self else { return }
             self.stopped = true
+            self.movementSignal?.cancel()
+            self.movementSignal = nil
+            DispatchQueue.main.async { [weak self] in
+                if let monitor = self?.movementMonitor { NSEvent.removeMonitor(monitor) }
+                self?.movementMonitor = nil
+            }
             self.watchdog?.cancel()
             self.watchdog = nil
             self.circuitOpen = false

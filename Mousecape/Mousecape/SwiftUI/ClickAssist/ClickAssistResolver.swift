@@ -90,6 +90,8 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var enabled = true
 
     private var timer: DispatchSourceTimer?
+    private var movementSource: DispatchSourceUserDataAdd?
+    private var movementRefreshPending = false
     private var observer: AXObserver?
     private var observedPid: pid_t = 0
     private var generation: UInt64 = 0
@@ -307,9 +309,27 @@ final class AccessibilityResolver: @unchecked Sendable {
         t.setEventHandler { [weak self] in self?.tick() }
         t.resume()
         timer = t
+        // Listen only: input is never modified here. Dispatch-source merging
+        // prevents high-rate mice from queuing one AX walk per mouse event.
+        let movement = DispatchSource.makeUserDataAddSource(queue: queue)
+        movement.setEventHandler { [weak self] in
+            guard let self, self.running, !self.movementRefreshPending else { return }
+            self.movementRefreshPending = true
+            let requestedAt = CACurrentMediaTime()
+            let delay = max(0, Self.fastCadence - (requestedAt - self.lastWalkAt))
+            self.queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self else { return }
+                self.movementRefreshPending = false
+                self.tick(movementRequestedAt: requestedAt)
+            }
+        }
+        movement.resume()
+        movementSource = movement
     }
 
     func stop() {
+        movementSource?.cancel()
+        movementSource = nil
         timer?.cancel()
         timer = nil
         running = false
@@ -325,6 +345,8 @@ final class AccessibilityResolver: @unchecked Sendable {
     }
 
     // MARK: - control surface
+
+    func pointerMoved() { movementSource?.add(data: 1) }
 
     /// Real-time invalidation: publish "do not route" immediately, refresh after.
     func invalidate(reason: String, prefixStale: Bool = true) {
@@ -409,7 +431,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// beat's, so the first beat after movement runs the fast path immediately
     /// (no added latency) — the idle interval is only ever entered after
     /// `idleMovementWindow` of stillness.
-    private func tick() {
+    private func tick(movementRequestedAt: CFTimeInterval? = nil) {
         guard running, isRefreshAllowed else { return }
         let now = CACurrentMediaTime()
         let pointer = currentPointer()
@@ -421,6 +443,10 @@ final class AccessibilityResolver: @unchecked Sendable {
         } else {
             moved = true   // first sample: behave as movement
         }
+        // A timer may already have serviced this movement while the coalesced
+        // request waited. Never add a duplicate walk or count another PID beat.
+        if movementRequestedAt != nil, !moved { return }
+        if movementRequestedAt != nil, now - lastWalkAt < Self.fastCadence { return }
         lastCyclePointer = pointer
         if moved { lastMovementAt = now }
 
@@ -442,6 +468,11 @@ final class AccessibilityResolver: @unchecked Sendable {
         // Idle: slow cadence, and skip the rotation slice (pointer window only).
         if idle, now - lastWalkAt < Self.idleCadence { return }
         lastWalkAt = now
+        if let requestedAt = movementRequestedAt {
+            timer?.schedule(deadline: .now() + Self.fastCadence,
+                            repeating: Self.fastCadence, leeway: .milliseconds(5))
+            log(String(format: "RESOLVER_MOVEMENT_TRIGGER wait_ms=%.2f", (now - requestedAt) * 1000))
+        }
         refresh(lastPointer: .zero, rotationAllowed: !idle)
     }
 
