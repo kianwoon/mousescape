@@ -73,6 +73,9 @@ enum DecisionCore {
     /// excludes some as containers — the semantics belong with the routing
     /// math, not the filter.
     static let positionSensitiveRoles: Set<String> = [
+        // Custom menu items can contain a horizontal strip of actions (e.g.
+        // reactions). Their item frame is not one position-agnostic button.
+        "AXMenuItem",
         "AXSlider", "AXScrollBar", "AXValueIndicator",
         "AXTextField", "AXTextArea", "AXSearchField", "AXComboBox",
         // Tabs and radio buttons carry position/drag semantics: a near-miss must
@@ -458,6 +461,9 @@ struct GestureLatch: Sendable {
 /// the ring may keep showing evidence across a slow cycle, but a redirect must
 /// act only on evidence that is still current enough to be safe.
 enum ClickAssistEvidence {
+    /// Shared with resolver pointer generations: sub-2pt motion is sensor drift,
+    /// not a new aim or a native sidebar drag.
+    static let pointerMoveEpsilon: CGFloat = 2
     /// Ring/overlay may display evidence collected within this window.
     /// A shown ring must expire with the evidence required for its click.
     static let activationMaxAgeMs: Double = 400
@@ -517,12 +523,21 @@ struct BackgroundClickWire: Codable, Equatable, Sendable {
 enum BackgroundClickPolicy {
     static let eventMarker: Int64 = 0x4D434243
     static func eligible(targetPID: Int32, foregroundPID: Int32?, candidate: DecisionCore.Candidate,
-                         generation: UInt64, point: CGPoint, now: Double) -> Bool {
+                         generation: UInt64, point: CGPoint, now: Double,
+                         nativeTolerance: CGFloat = 0) -> Bool {
         guard let foregroundPID, foregroundPID > 0, targetPID > 0,
-              foregroundPID != targetPID, candidate.verdict == .confirmed,
-              candidate.rect.contains(point), candidate.collectedAt > 0 else { return false }
+              (foregroundPID != targetPID || GeometryPolicy.usesNativeRowAction(candidate.role)),
+              candidate.verdict == .confirmed,
+              (candidate.rect.contains(point)
+                || (GeometryPolicy.usesNativeRowAction(candidate.role)
+                    && DecisionCore.boundaryDistance(point, candidate.rect) <= nativeTolerance)),
+              candidate.collectedAt > 0 else { return false }
         return ClickAssistEvidence.activationState(evidenceGeneration: candidate.evidenceGeneration,
             currentGeneration: generation, ageMs: (now - candidate.collectedAt) * 1000) == .fresh
+    }
+    static func isNativeRowPointerNoise(role: String, down: CGPoint, current: CGPoint) -> Bool {
+        GeometryPolicy.usesNativeRowAction(role)
+            && hypot(current.x - down.x, current.y - down.y) <= ClickAssistEvidence.pointerMoveEpsilon
     }
     static func matches(_ click: BackgroundClickWire, rect: CGRect) -> Bool {
         click.x.isFinite && click.y.isFinite && GeometryPolicy.isValidFrame(click.rect)

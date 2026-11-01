@@ -229,10 +229,10 @@ final class ClickAssistCoreTests: XCTestCase {
     /// selection gates; tightening page-furniture rules must not remove them.
     func testSupportedControlFamiliesKeepTheirRingsAndClickTargets() {
         let centerRoles = ["AXButton", "AXLink", "AXCheckBox", "AXMenuButton",
-            "AXMenuItem", "AXMenuBarItem", "AXPopUpButton", "AXSegmentedControl",
+            "AXMenuBarItem", "AXPopUpButton", "AXSegmentedControl",
             "AXDisclosureTriangle"]
         let edgeRoles = ["AXRadioButton", "AXTab", "AXComboBox", "AXTextField",
-            "AXSearchField", "AXSlider"]
+            "AXSearchField", "AXSlider", "AXMenuItem"]
         for role in centerRoles + edgeRoles {
             let frame = rect(100, 100, 100, 30)
             XCTAssertTrue(GeometryPolicy.isActionable(role: role, hasPressAction: false), role)

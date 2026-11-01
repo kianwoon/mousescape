@@ -283,8 +283,12 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         guard app.isActive || frontResult == .success || app.activate(options: []) else {
             return (false, "activation-refused")
         }
-        guard AXUIElementPerformAction(window, kAXRaiseAction as CFString) == .success else {
-            return (false, "window-raise-refused")
+        // Some native windows reject AXRaise even while already focused.
+        // The live focused-window + hit-window checks below are authoritative,
+        // not the return value of an attempted focus/raise request.
+        let raiseResult = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        if raiseResult != .success {
+            svcLog("BACKGROUND_CLICK_RAISE request=\(request.requestID) code=\(raiseResult.rawValue) awaiting-live-window-proof=1")
         }
         for name in [kAXMainAttribute, kAXFocusedAttribute] {
             var settable = DarwinBoolean(false)
@@ -328,6 +332,15 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         guard verdict == .confirmed, CACurrentMediaTime() < request.deadline,
               (attribute(axApp, kAXFrontmostAttribute) as? Bool) == true,
               !IsSecureEventInputEnabled() else { return (false, "post-focus-validation-failed") }
+        if GeometryPolicy.usesNativeRowAction(target.role) {
+            guard let action = NativeListActionDelivery.action(for: element, role: target.role) else {
+                return (false, "native-row-capability-changed")
+            }
+            let result = NativeListActionDelivery.perform(action, on: element)
+            let mode = action == .select ? "native-row-select-once" : "native-row-press-once"
+            svcLog("NATIVE_ROW_ACTION request=\(request.requestID) mode=\(mode) code=\(result.rawValue)")
+            return (result == .success, result == .success ? mode : "native-row-action-failed-no-retry")
+        }
         if target.chromeEligible {
             let result = AXUIElementPerformAction(element, "AXPress" as CFString)
             return (result == .success, result == .success ? "axpress-once" : "axpress-failed-no-retry")

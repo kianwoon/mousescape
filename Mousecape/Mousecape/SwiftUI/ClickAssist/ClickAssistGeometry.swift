@@ -48,7 +48,11 @@ enum GeometryPolicy {
     /// Names and rectangles do not prove that page furniture can be clicked.
     static func isActionable(role: String, hasPressAction: Bool) -> Bool {
         directRoles.contains(role) || admittedTrackRoles.contains(role)
-            || role == "AXPressGroup" || role == "AXSelectableRow" || hasPressAction
+            || role == "AXPressGroup" || role == "AXSelectableRow" || role == "AXNativeRowButton" || hasPressAction
+    }
+
+    static func usesNativeRowAction(_ role: String) -> Bool {
+        role == "AXSelectableRow" || role == "AXNativeRowButton"
     }
 
     /// Selection is an explicit action for native sidebar rows even when they

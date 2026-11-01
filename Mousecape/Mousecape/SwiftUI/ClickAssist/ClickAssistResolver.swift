@@ -180,7 +180,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     private static let idleCadence: TimeInterval = 0.4
     private static let idleMovementWindow: CFTimeInterval = 1.5
     /// Movement smaller than this is treated as noise (sub-pixel/drift).
-    private static let pointerMoveEpsilon: CGFloat = 2.0
+    private static let pointerMoveEpsilon: CGFloat = ClickAssistEvidence.pointerMoveEpsilon
     /// Increments only when the pointer moves beyond `pointerMoveEpsilon`.
     /// Carried through resolver -> wire -> client so first-appearance latency is
     /// attributable to ONE pointer position.
@@ -652,6 +652,7 @@ final class AccessibilityResolver: @unchecked Sendable {
             log("RESOLVER_EVENT app-switch-union prev=\(outgoing) new=\(pid) stash=\(restored ? "hit" : "miss") stashes=\(unionStashes.count)")
         }
 
+        let priorElementRefs = elementRefs
         let windows: [AXUIElement] = attr(appEl, kAXWindowsAttribute).flatMap(axArray) ?? []
         let menuBar: AXUIElement? = attr(appEl, kAXMenuBarAttribute).flatMap(axElement)
         // Open NSMenus are usually NOT in kAXWindowsAttribute; a dropdown belongs to
@@ -818,6 +819,25 @@ final class AccessibilityResolver: @unchecked Sendable {
         let dedupe = dedupeNearIdentical(out)
         out = dedupe.kept
         dedupedCount = dedupe.removed
+        // Native sidebar buttons can require AXPress instead of a relocated
+        // mouse event. Only inspect buttons inside an already-admitted native
+        // selectable row; browser controls keep their existing delivery path.
+        let nativeRows = out.filter { $0.role == "AXSelectableRow" }.map(\.rect)
+        for idx in out.indices where out[idx].role == "AXButton" {
+            let old = out[idx]
+            guard let element = elementRefs[old.key] else { continue }
+            // Keep only the delivery hint across transient AX failures, bound
+            // to the same live element. It is not permission to act: the worker
+            // always rechecks the native capability and actual hit after focus.
+            let sameNativeElement = priorByKey[old.key]?.role == "AXNativeRowButton"
+                && priorElementRefs[old.key].map { CFEqual($0, element) } == true
+            guard sameNativeElement || (nativeRows.contains(where: { $0.contains(old.rect) })
+                && NativeListActionDelivery.action(for: element, role: old.role) == .press) else { continue }
+            out[idx] = CachedTarget(key: old.key, role: "AXNativeRowButton", label: old.label,
+                rect: old.rect, inset: old.inset, tier: old.tier, verdict: old.verdict,
+                chromeEligible: false, evidenceGeneration: old.evidenceGeneration,
+                collectedAt: old.collectedAt)
+        }
         unionTargets = out
         // Drop element references for keys that did not survive this cycle's
         // union/dedupe — never leave a delivery aim pointing at a gone element.

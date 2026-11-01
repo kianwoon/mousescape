@@ -269,3 +269,81 @@ final class LegitimacyPolicy: @unchecked Sendable {
         lock.unlock()
     }
 }
+
+/// Direct native list actions. These capabilities are never inferred from a
+/// title or rectangle, and web ancestry can never authorize a native action.
+enum NativeListActionDelivery {
+    enum Action { case select, press }
+    static func action(for element: AXUIElement, role: String) -> Action? {
+        func attr(_ e: AXUIElement, _ key: String) -> CFTypeRef? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(e, key as CFString, &value) == .success else { return nil }
+            return value
+        }
+        guard (attr(element, kAXEnabledAttribute) as? Bool) != false,
+              (attr(element, "AXHidden") as? Bool) != true else { return nil }
+        let actualRole = attr(element, kAXRoleAttribute) as? String ?? ""
+        let action: Action
+        if role == "AXSelectableRow", GeometryPolicy.rowRoles.contains(actualRole) {
+            var settable = DarwinBoolean(false)
+            guard AXUIElementIsAttributeSettable(element, kAXSelectedAttribute as CFString, &settable) == .success,
+                  settable.boolValue else { return nil }
+            action = .select
+        } else if (role == "AXButton" || role == "AXNativeRowButton"), actualRole == "AXButton" {
+            var actions: CFArray?
+            guard AXUIElementCopyActionNames(element, &actions) == .success,
+                  (actions as? [String])?.contains("AXPress") == true else { return nil }
+            action = .press
+        } else { return nil }
+        var current: AXUIElement? = element
+        var selectableRow = false
+        var nativeList = false
+        for _ in 0..<64 {
+            guard let node = current else { return nil }
+            let nodeRole = attr(node, kAXRoleAttribute) as? String ?? ""
+            if nodeRole == "AXWebArea" { return nil }
+            if GeometryPolicy.rowRoles.contains(nodeRole) {
+                var settable = DarwinBoolean(false)
+                if AXUIElementIsAttributeSettable(node, kAXSelectedAttribute as CFString, &settable) == .success,
+                   settable.boolValue { selectableRow = true }
+            }
+            nativeList = nativeList || nodeRole == "AXList" || nodeRole == "AXOutline"
+            if nodeRole == "AXWindow" { return selectableRow && nativeList ? action : nil }
+            guard let parent = attr(node, kAXParentAttribute), CFGetTypeID(parent) == AXUIElementGetTypeID() else { return nil }
+            current = (parent as! AXUIElement)
+        }
+        return nil
+    }
+    static func perform(_ action: Action, on element: AXUIElement) -> AXError {
+        switch action {
+        case .select:
+            // AppKit outlines expose selection on the owning container even
+            // when a row advertises AXSelected but rejects writes to it.
+            var node = element
+            for _ in 0..<64 {
+                var parent: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(node, kAXParentAttribute as CFString, &parent) == .success,
+                      let parent, CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+                node = parent as! AXUIElement
+                var role: CFTypeRef?
+                _ = AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &role)
+                let name = role as? String ?? ""
+                if name == "AXWebArea" || name == "AXWindow" { break }
+                if name == "AXList" || name == "AXOutline" {
+                    var settable = DarwinBoolean(false)
+                    var rows: CFTypeRef?
+                    if AXUIElementIsAttributeSettable(node, kAXSelectedRowsAttribute as CFString, &settable) == .success,
+                       settable.boolValue,
+                       AXUIElementCopyAttributeValue(node, kAXRowsAttribute as CFString, &rows) == .success,
+                       let members = rows as? [AXUIElement], members.contains(where: { CFEqual($0, element) }) {
+                        return AXUIElementSetAttributeValue(node, kAXSelectedRowsAttribute as CFString,
+                                                            [element] as CFArray)
+                    }
+                    break
+                }
+            }
+            return AXUIElementSetAttributeValue(element, kAXSelectedAttribute as CFString, kCFBooleanTrue)
+        case .press: return AXUIElementPerformAction(element, "AXPress" as CFString)
+        }
+    }
+}

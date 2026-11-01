@@ -73,7 +73,8 @@ final class AssistTap: @unchecked Sendable {
                                         original: CGPoint, destination: CGPoint, event: CGEvent) -> Bool {
         guard activationSink != nil,
               BackgroundClickPolicy.eligible(targetPID: res.pid, foregroundPID: currentForegroundPID(),
-                candidate: candidate, generation: res.generation, point: original, now: CACurrentMediaTime()),
+                candidate: candidate, generation: res.generation, point: original, now: CACurrentMediaTime(),
+                nativeTolerance: tolerance),
               let down = event.copy() else { return false }
         pendingBackgroundClick = PendingBackgroundClick(down: down, candidate: candidate,
             pid: res.pid, point: destination)
@@ -423,6 +424,8 @@ final class AssistTap: @unchecked Sendable {
 
         if let pending = pendingBackgroundClick {
             if isDrag {
+                if BackgroundClickPolicy.isNativeRowPointerNoise(role: pending.candidate.role,
+                    down: pending.down.location, current: original) { return nil }
                 // A drag is not an activation-click. Release the captured native
                 // down ahead of this drag, preserving the app's normal gesture.
                 pendingBackgroundClick = nil
@@ -437,7 +440,9 @@ final class AssistTap: @unchecked Sendable {
                 if assistEnabled, latest.valid, latest.pid == pending.pid,
                    let target = latest.candidates.first(where: { $0.key == pending.candidate.key }),
                    FrameContinuity.delta(target.rect, pending.candidate.rect) <= 1,
-                   target.rect.contains(original),
+                   (target.rect.contains(original)
+                    || (GeometryPolicy.usesNativeRowAction(target.role)
+                        && DecisionCore.boundaryDistance(original, target.rect) <= tolerance)),
                    target.verdict == .confirmed,
                    ClickAssistEvidence.activationState(evidenceGeneration: target.evidenceGeneration,
                     currentGeneration: latest.generation,
