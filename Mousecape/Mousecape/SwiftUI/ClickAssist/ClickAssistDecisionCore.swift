@@ -525,7 +525,11 @@ enum BackgroundClickPolicy {
     static func eligible(targetPID: Int32, foregroundPID: Int32?, candidate: DecisionCore.Candidate,
                          generation: UInt64, point: CGPoint, now: Double,
                          nativeTolerance: CGFloat = 0) -> Bool {
-        guard let foregroundPID, foregroundPID > 0, targetPID > 0,
+        // An open menu already owns native mouse tracking, even when its
+        // application's PID differs from the foreground PID. It may have no
+        // AXWindow at all; consuming it for window activation loses the click.
+        guard candidate.role != "AXMenuItem",
+              let foregroundPID, foregroundPID > 0, targetPID > 0,
               (foregroundPID != targetPID || GeometryPolicy.usesNativeRowAction(candidate.role)),
               candidate.verdict == .confirmed,
               (candidate.rect.contains(point)

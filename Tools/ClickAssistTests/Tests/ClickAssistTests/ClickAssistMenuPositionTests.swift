@@ -39,4 +39,18 @@ final class ClickAssistMenuPositionTests: XCTestCase {
         XCTAssertEqual(DecisionCore.snapMode(for: DecisionCore.Candidate(key: "tab", rect: strip,
             inset: 2, tier: .firstClass, role: "AXLink")), .center)
     }
+
+    func testOpenMenuNeverEntersBackgroundWindowActivation() {
+        let target = DecisionCore.Candidate(key: "menu-command", rect: strip, inset: 2,
+            tier: .firstClass, role: "AXMenuItem", verdict: .confirmed,
+            evidenceGeneration: 7, collectedAt: 10)
+        for foreground: Int32? in [1, 2, nil] {
+            XCTAssertFalse(BackgroundClickPolicy.eligible(targetPID: 1, foregroundPID: foreground,
+                candidate: target, generation: 7, point: CGPoint(x: strip.midX, y: strip.midY), now: 10.1))
+        }
+        guard case .directHit = DecisionCore.route(point: CGPoint(x: strip.midX, y: strip.midY),
+            candidates: [target], tolerance: 32) else {
+            return XCTFail("The menu must retain its native click")
+        }
+    }
 }
