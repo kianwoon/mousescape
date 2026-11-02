@@ -1764,37 +1764,61 @@ final class AccessibilityResolver: @unchecked Sendable {
                     && (actions as? [String])?.contains("AXPress") == true
                 pressable = pressByAction
             }
-            // Only a control that would itself be a ring target counts: a
-            // same-box nested wrapper, hidden, disabled or off-screen node is
-            // not a reason to reject the card. Frame/state read only after
-            // the cheap role/action test.
-            if pressable {
-                if let f = frame(node),
-                   !(containerFrame.map { FrameContinuity.delta($0, f) <= 1 } ?? false),
-                   GeometryPolicy.classify(role: role, hasPressAction: pressByAction, rect: f,
-                                           displayBounds: cycleDisplayBounds,
-                                           windowBounds: cycleWindowBounds).accepted,
-                   attr(node, kAXEnabledAttribute) as? Bool != false,
-                   attr(node, "AXHidden") as? Bool != true {
-                    // real control: fall through to the found path below
-                } else {
-                    pressable = false
-                }
-            }
-            if pressable {
-                if knownContainers.count >= GeometryPolicy.containerCacheLimit { knownContainers.removeAll() }
-                knownContainers.insert(key)
-                if loggedProbes.insert("\(lastResolvedPid)|\(key)|1").inserted {
-                    log("CONTAINER_PROBE key=\(key) found=\(role) visited=\(visited) children=\(directChildren)")
-                }
-                return true
+            // Frame/state are read only after the cheap role/action test.
+            if pressable, isRealControl(node, role: role, pressByAction: pressByAction,
+                                        container: containerFrame) {
+                return markContainer(key, found: role, how: "walk visited=\(visited) children=\(directChildren)")
             }
             queue.append(contentsOf: attr(node, kAXChildrenAttribute).flatMap(axArray) ?? [])
+        }
+        // A long subtree (a chat transcript: its message buttons sit ~180 nodes
+        // deep) outruns the walk. Chromium answers a visible-controls search in
+        // one call (~2 ms live); each result gets the same real-target test.
+        if let box = containerFrame {
+            let query: [String: Any] = ["AXSearchKey": "AXControlSearchKey",
+                                        "AXResultsLimit": GeometryPolicy.containerProbeNodeBudget,
+                                        "AXDirection": "AXDirectionNext",
+                                        "AXImmediateDescendantsOnly": false,
+                                        "AXVisibleOnly": true]
+            var raw: CFTypeRef?
+            if AXUIElementCopyParameterizedAttributeValue(root, "AXUIElementsForSearchPredicate" as CFString,
+                                                          query as CFDictionary, &raw) == .success,
+               let found = (raw as? [AXUIElement])?.first(where: { node in
+                   guard let role = stringAttr(node, kAXRoleAttribute),
+                         GeometryPolicy.isActionable(role: role, hasPressAction: false),
+                         let f = frame(node), box.contains(f) else { return false }
+                   return isRealControl(node, role: role, pressByAction: false, container: box)
+               }) {
+                return markContainer(key, found: stringAttr(found, kAXRoleAttribute) ?? "?", how: "search")
+            }
         }
         if loggedProbes.insert("\(lastResolvedPid)|\(key)|0").inserted {
             log("CONTAINER_PROBE key=\(key) found=none visited=\(visited) children=\(directChildren) roles=\(seenRoles.joined(separator: ","))")
         }
         return false
+    }
+
+    /// A control counts only if it would itself be a ring target: a same-box
+    /// nested wrapper, hidden, disabled or off-screen node is not a reason to
+    /// reject the card.
+    private func isRealControl(_ node: AXUIElement, role: String, pressByAction: Bool,
+                               container: CGRect?) -> Bool {
+        guard let f = frame(node),
+              !(container.map { FrameContinuity.delta($0, f) <= 1 } ?? false),
+              GeometryPolicy.classify(role: role, hasPressAction: pressByAction, rect: f,
+                                      displayBounds: cycleDisplayBounds,
+                                      windowBounds: cycleWindowBounds).accepted else { return false }
+        return attr(node, kAXEnabledAttribute) as? Bool != false
+            && attr(node, "AXHidden") as? Bool != true
+    }
+
+    private func markContainer(_ key: String, found role: String, how: String) -> Bool {
+        if knownContainers.count >= GeometryPolicy.containerCacheLimit { knownContainers.removeAll() }
+        knownContainers.insert(key)
+        if loggedProbes.insert("\(lastResolvedPid)|\(key)|1").inserted {
+            log("CONTAINER_PROBE key=\(key) found=\(role) via=\(how)")
+        }
+        return true
     }
 
     /// The target app's window frames, read through Accessibility once per
