@@ -35,28 +35,29 @@ Delete and stop using:
 | `maxControlArea` / `maxControlHeight` | 150,000 / 600 | direct, non-track slider |
 | `pressMaxWidth` / `pressMaxHeight` | 420 / 220 | press-capable AXGroup |
 | `rowMaxHeight` / `rowMaxArea` | 200 / 120,000 | AXCell / AXRow / AXListItem |
-| `tileMaxArea` / `tileMaxAspect` | 120,000 / 3 | AXImage / AXGroup tile |
+| `tileMaxArea` | 120,000 | AXImage / AXGroup tile |
 | `trackMaxMinSide` | 200 | AXSlider |
 
-Rejection reasons `.pressTooLarge`, `.rowTooLarge`, `.tileTooLarge`,
-`.tileTooWide` are removed. `.oversized` is kept and re-meant as
-"fills its window" (see 2).
+Rejection reasons `.pressTooLarge`, `.rowTooLarge`, `.tileTooLarge` are
+removed. `.oversized` now means "does not fit its display, or fills its
+window" (see 2). New reason `.notTrackShaped` (see 3).
 
 ### 2. Add the window-fill rule
 
 New constant `GeometryPolicy.windowFillLimit: CGFloat = 0.9`.
 
-`classify` gains a parameter `referenceFrame: CGRect?`: the frame of the
-element's own AX window. For every class, after the display gate:
+`classify` gains a parameter `windowBounds: [CGRect]`: the on-screen window
+frames of the target app this cycle. For every class, after the display gate:
 
 ```
-reference = referenceFrame ?? allowed            // allowed = display gate bounds
+reference = smallest window containing the rect's centre
+            ?? union of the displays the rect intersects
 covered   = area(rect ∩ reference) / area(reference)
 if covered >= windowFillLimit -> reject .oversized
 ```
 
-When the window frame cannot be read, the element's display bounds are the
-reference, so a display-filling element is still rejected.
+When no window contains the element, its displays are the reference, so a
+display-filling element is still rejected.
 
 ### 3. Keep (visibility and shape, not size)
 
@@ -71,15 +72,21 @@ reference, so a display-filling element is still rejected.
   replaces the 200 pt absolute bound and the "non-track slider falls back to
   the bulk bound" path. It keeps a video player mis-exposed as a 2289 × 963
   AXSlider from ringing the whole player.
-  Accepted trade-off: a chunky non-track slider (e.g. 400 × 150) no longer
-  rings.
+  Rejection reason `.notTrackShaped`. Accepted trade-off: a chunky
+  non-track slider (e.g. 400 × 150) no longer rings.
+- Tile shape rule (user decision 2026-11-02): a tile (AXImage / AXGroup with no
+  press action) must have aspect ≤ `tileMaxAspect` (3). Shape, not size: it
+  keeps long no-press wrapper strips (1258 × 47, 1599 × 54) from ringing
+  instead of the button inside them.
 
 ### 4. Window frame lookup (`ClickAssistResolver.swift`)
 
-In `collect()`, before `classify`, read the element's `kAXWindowAttribute` and
-that window's frame. Cache per resolver cycle keyed by window element
-(`CFEqual`), cleared where `cycleDisplayBounds` is set (`:647`), so cost is one
-frame read per window per cycle. Lookup failure passes `nil` (rule 2 fallback).
+Once per resolver cycle, where `cycleDisplayBounds` is set (`:647`), read the
+target app's on-screen window frames with one `CGWindowListCopyWindowInfo`
+call (bounds need no Screen Recording permission; CG global coordinates match
+AX). No per-element AX calls. Pass them to `classify`. Remove the
+`rowTooLarge` / `tileTooLarge` diagnostic counters and their
+`RESOLVER_PUBLISH` fields.
 
 ## Unchanged
 
@@ -91,12 +98,12 @@ click path.
 
 - Rewrite `ClickAssistCoreTests.swift:421-447`:
   - 2289 × 963 AXSlider → rejected (not track-shaped).
-  - Former `tileTooLarge` / `tileTooWide` cases → admitted when below the
-    window-fill limit.
+  - 1466 × 944 page container in a 1470 × 956 window → `.oversized`.
+  - 1258 × 47 / 1599 × 54 wrappers → still `.tileTooWide`.
 - New `classify` cases:
   - A 1200 × 800 AXButton inside a 1440 × 900 window → admitted (74%).
   - A 1400 × 880 AXGroup with press inside a 1440 × 900 window → `.oversized`.
-  - Element 95% of its display with `referenceFrame == nil` → `.oversized`.
+  - Element ≥ 90% of its display with no containing window → `.oversized`.
   - A 600 × 300 AXRow and a 500 × 300 press AXGroup → admitted.
 - Update other references to removed constants/reasons
   (`ClickAssistCoreTests.swift:21`, `ClickAssistAXGeometryTests.swift:46`,
