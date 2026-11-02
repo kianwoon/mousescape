@@ -242,6 +242,13 @@ enum GeometryPolicy {
         return allowed.insetBy(dx: -dx, dy: -dy)
     }
 
+    /// A clickable box with another clickable target lying on it (YouTube's
+    /// progress bar over the video) is a container even when the page tree
+    /// puts that target in a sibling branch. Same-box duplicates do not count.
+    static func isVisualContainer(_ rect: CGRect, among others: [CGRect]) -> Bool {
+        others.contains { $0 != rect && rect.contains($0) && FrameContinuity.delta($0, rect) > 1 }
+    }
+
     /// The window an element lives in: the smallest window containing its centre.
     /// Prefers the smallest window that holds the WHOLE rect: with several
     /// overlapping windows of one app (8 stacked Brave windows observed), a

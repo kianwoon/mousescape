@@ -836,6 +836,17 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertEqual(classify("AXGroup", page, press: true, windows: [own, stacked]).rejection, .oversized)
     }
 
+    /// Live 2026-11-02: the YouTube video box ringed although its progress
+    /// bar (a sibling in the AX tree) lies on it.
+    func testVisualContainerHoldsAnotherTarget() {
+        let video = rect(1131, 269, 2027, 1140)
+        let seek = rect(1155, 1360, 1979, 10)
+        XCTAssertTrue(GeometryPolicy.isVisualContainer(video, among: [video, seek]))
+        XCTAssertFalse(GeometryPolicy.isVisualContainer(video, among: [video]))
+        XCTAssertFalse(GeometryPolicy.isVisualContainer(video, among: [rect(1131.5, 269, 2027, 1140)]))
+        XCTAssertFalse(GeometryPolicy.isVisualContainer(seek, among: [video, seek]))
+    }
+
     func testShapeRulesSurvive() {
         // Chunky non-track slider: accepted trade-off of the shape rule.
         XCTAssertEqual(classify("AXSlider", rect(0, 0, 400, 150)).rejection, .notTrackShaped)

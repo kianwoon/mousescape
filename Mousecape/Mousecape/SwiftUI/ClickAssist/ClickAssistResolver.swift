@@ -932,6 +932,11 @@ final class AccessibilityResolver: @unchecked Sendable {
         // Confirm the nearest candidate. A proven mismatch is omitted from
         // this snapshot, then the same shared selection runs again. Unknown AX
         // answers stop the search; they never authorize a farther redirect.
+        // Visual containers never ring: see GeometryPolicy.isVisualContainer.
+        let controlRects = out.filter { $0.tier == .firstClass }.map(\.rect)
+        let beforeContainers = out.count
+        out.removeAll { $0.role == "AXPressGroup" && GeometryPolicy.isVisualContainer($0.rect, among: controlRects) }
+        for _ in 0..<(beforeContainers - out.count) { record(.containsControls) }
         let evidenceStart = CACurrentMediaTime()
         if let legitimacy {
             for _ in 0..<ClickAssistEvidence.maxEvidenceCandidatesPerCycle {
