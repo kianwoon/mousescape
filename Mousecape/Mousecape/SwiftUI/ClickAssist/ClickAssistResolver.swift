@@ -187,6 +187,8 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Carried through resolver -> wire -> client so first-appearance latency is
     /// attributable to ONE pointer position.
     private var pointerGeneration: UInt64 = 0
+    /// Last hit-window focus answer, reused by seed cycles at the same pointer.
+    private var lastWindowFocus: (pid: pid_t, pointerGeneration: UInt64, focused: Bool)?
     private var lastPointerGenerationPoint: CGPoint?
     /// Queue-confined cadence state (resolver serial queue only).
     private var lastCyclePointer: CGPoint?
@@ -757,15 +759,22 @@ final class AccessibilityResolver: @unchecked Sendable {
         let pwin: AXUIElement? = pwinResult.window
         let pwinMode = pwinResult.mode
         // Focus fact for the tap's one-click policy, read only for a live
-        // hit-window (two cheap reads on elements already held). Seed, none and
-        // ax-contain cycles keep the default: focused.
+        // hit-window (two cheap reads on elements already held). A seed cycle
+        // reuses the last hit-window answer while the pointer has not moved
+        // (live: seed and hit-window cycles alternate, so a click often lands
+        // right after a seed cycle). None and ax-contain keep the default: focused.
         var pointerWindowFocused = true
+        if pwinMode == "confirmed-seed", let last = lastWindowFocus,
+           last.pid == pid, last.pointerGeneration == pointerGeneration {
+            pointerWindowFocused = last.focused
+        }
         if let pwin, pwinMode == "hit-window" {
             let isStandard = (attr(pwin, kAXSubroleAttribute) as? String) == (kAXStandardWindowSubrole as String)
             let focusedMatches = attr(appEl, kAXFocusedWindowAttribute)
                 .flatMap(axElement).map { CFEqual($0, pwin) }
             pointerWindowFocused = GeometryPolicy.pointerWindowFocused(mode: pwinMode,
                 isStandardWindow: isStandard, focusedMatches: focusedMatches)
+            lastWindowFocus = (pid, pointerGeneration, pointerWindowFocused)
         }
         let keysBeforePwin = Set(out.map { $0.key })
         var pwinSpent = 0
