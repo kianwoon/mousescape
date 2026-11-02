@@ -17,9 +17,11 @@ final class ClickAssistCoreTests: XCTestCase {
     }
 
     private func classify(_ role: String, _ r: CGRect, press: Bool = false,
-                          on displays: [CGRect]? = nil) -> GeometryVerdict {
+                          on displays: [CGRect]? = nil,
+                          windows: [CGRect] = []) -> GeometryVerdict {
         GeometryPolicy.classify(role: role, hasPressAction: press, rect: r,
-                                displayBounds: displays ?? self.displays)
+                                displayBounds: displays ?? self.displays,
+                                windowBounds: windows)
     }
 
     private func cand(_ key: String, _ r: CGRect, tier: DecisionCore.Tier = .firstClass,
@@ -419,11 +421,12 @@ final class ClickAssistCoreTests: XCTestCase {
     }
 
     /// Guarded failure: a mis-exposed 2289x963 player CONTAINER exposed as
-    /// AXSlider hijacked clicks meant for the real control.
-    func testA3_playerContainerIsRejectedOversized() {
+    /// AXSlider hijacked clicks meant for the real control. A slider must be
+    /// track-shaped (a shape rule, not a size cap).
+    func testA3_playerContainerIsNotTrackShaped() {
         let v = classify("AXSlider", rect(100, 200, 2289, 963))
         XCTAssertNil(v.candidateClass)
-        XCTAssertEqual(v.rejection, .oversized)
+        XCTAssertEqual(v.rejection, .notTrackShaped)
     }
 
     /// Guarded failure: the old table exempted "thin" tracks from ALL area
@@ -442,10 +445,12 @@ final class ClickAssistCoreTests: XCTestCase {
     }
 
     /// Guarded failure: a page container (1466x944) passed as a tile while a real
-    /// 204x290 thumbnail was rejected — exactly inverted.
+    /// 204x290 thumbnail was rejected — exactly inverted. The container fills
+    /// its window, so it is the page, not a control.
     func testA6_pageContainerVsThumbnail() {
-        XCTAssertEqual(classify("AXGroup", rect(0, 0, 1466, 944)).rejection, .tileTooLarge)
-        XCTAssertEqual(classify("AXImage", rect(500, 500, 204, 290)).candidateClass, .tile)
+        let window = rect(0, 0, 1470, 956)
+        XCTAssertEqual(classify("AXGroup", rect(0, 0, 1466, 944), windows: [window]).rejection, .oversized)
+        XCTAssertEqual(classify("AXImage", rect(500, 500, 204, 290), windows: [window]).candidateClass, .tile)
     }
 
     /// Guarded failure: the 16x16 tab-close glyph was filtered out as
@@ -784,6 +789,47 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertEqual(AXPressGate.defaultExpiryMs, 150)
         XCTAssertEqual(AXPressAdmission.maxPendingPresses, 4)
         XCTAssertEqual(AXPressAdmission.dedupeWindowMs, 250)
+    }
+
+    // MARK: - Window-fill rule (no fixed size caps)
+
+    func testLargeClickableBelowWindowFillIsAdmitted() {
+        let window = rect(0, 0, 1440, 900)
+        // 74 % of the window: a big control, still a control.
+        XCTAssertEqual(classify("AXButton", rect(100, 50, 1200, 800), windows: [window]).candidateClass, .direct)
+        // Former fixed caps: 600x300 row (area cap 120k), 500x300 press group (420x220 cap),
+        // 1000x700 image (area cap 120k).
+        XCTAssertEqual(classify("AXRow", rect(0, 0, 600, 300), windows: [window]).candidateClass, .row)
+        XCTAssertEqual(classify("AXGroup", rect(0, 0, 500, 300), press: true, windows: [window]).candidateClass, .pressGroup)
+        XCTAssertEqual(classify("AXImage", rect(0, 0, 1000, 700), windows: [window]).candidateClass, .tile)
+    }
+
+    func testWindowFillingElementIsOversized() {
+        let window = rect(0, 0, 1440, 900)
+        let v = classify("AXGroup", rect(20, 10, 1400, 880), press: true, windows: [window])
+        XCTAssertNil(v.candidateClass)
+        XCTAssertEqual(v.rejection, .oversized)
+    }
+
+    func testNoContainingWindowFallsBackToDisplay() {
+        // mainDisplay is 7680x2160; 7600x2100 covers 96 % of it.
+        XCTAssertEqual(classify("AXButton", rect(40, 30, 7600, 2100)).rejection, .oversized)
+        XCTAssertEqual(classify("AXButton", rect(40, 30, 3000, 1500)).candidateClass, .direct)
+    }
+
+    func testReferenceFrameIsSmallestWindowContainingCentre() {
+        let big = rect(0, 0, 2000, 1200)
+        let small = rect(100, 100, 400, 300)
+        XCTAssertEqual(GeometryPolicy.referenceFrame(for: rect(150, 150, 50, 20), windows: [big, small]), small)
+        XCTAssertEqual(GeometryPolicy.referenceFrame(for: rect(1500, 900, 50, 20), windows: [big, small]), big)
+        XCTAssertNil(GeometryPolicy.referenceFrame(for: rect(5000, 900, 50, 20), windows: [big, small]))
+    }
+
+    func testShapeRulesSurvive() {
+        // Chunky non-track slider: accepted trade-off of the shape rule.
+        XCTAssertEqual(classify("AXSlider", rect(0, 0, 400, 150)).rejection, .notTrackShaped)
+        // Long no-press wrapper strips still never ring (user decision 2026-11-02).
+        XCTAssertEqual(classify("AXGroup", rect(0, 100, 1258, 47)).rejection, .tileTooWide)
     }
 }
 

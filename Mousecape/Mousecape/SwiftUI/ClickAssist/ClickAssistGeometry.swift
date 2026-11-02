@@ -9,9 +9,13 @@ enum CandidateClass: String {
 
 /// Why an inspected element was NOT admitted (one bucket per policy row).
 enum RejectionReason: String {
-    case role, secure, nonFinite, degenerate, oversized
-    case pressTooLarge, thinGroupMismatch, rowTooLarge
-    case tileTooSmall, tileTooLarge, tileTooWide
+    case role, secure, nonFinite, degenerate
+    /// Does not fit inside its displays, or fills its own window (the page itself).
+    case oversized
+    /// An AXSlider that is not track-shaped (e.g. a player container).
+    case notTrackShaped
+    case thinGroupMismatch
+    case tileTooSmall, tileTooWide
     /// Rect intersects no known display: nothing can be clicked there.
     case offscreen
 }
@@ -26,22 +30,22 @@ struct GeometryVerdict {
 /// element can be a click target lives here, and `classify` is the only place
 /// they are combined. `collect()` reads one verdict per element.
 ///
-/// Table (first matching row wins; row 9 is the fallthrough). Row 2.5 is the
-/// DISPLAY GATE every class must pass: `allowed` is the union of the displays
-/// the rect intersects, inflated 1.05× per axis + 2 pt slack; a rect that
-/// intersects no display is `.offscreen`, and a rect outside `allowed` fails
-/// its class row's fit test. There is no fixed point cap any more.
+/// Table (first matching row wins; row 9 is the fallthrough). There is no
+/// fixed point-size cap: a ring marks what is clickable and visible. After a
+/// class row matches, every class passes the same FIT GATE: the rect must lie
+/// inside `allowed` (union of the displays it intersects, inflated 1.05× per
+/// axis + 2 pt) and must cover < `windowFillLimit` of its reference frame
+/// (smallest app window containing its centre, else its displays); otherwise
+/// `.oversized`. A rect that intersects no display is `.offscreen`.
 /// 1. any non-finite component                         -> .nonFinite
 /// 2. width < 4, or height < (width >= 300 ? 2 : 4)    -> .degenerate
-/// 3. direct roles: area ≤ 150k, h ≤ 600, inside allowed -> .direct / .oversized
-/// 4. track roles: minSide ≤ 200 AND (minSide ≤ 60 OR
-///    aspect ≥ 8) AND inside allowed                   -> .track / .oversized
-/// 5. AXGroup + AXPress, ≤ 420 × 220                   -> .pressGroup / .pressTooLarge
+/// 3. direct roles                                     -> .direct
+/// 4. AXSlider: minSide ≤ 60 OR aspect ≥ 8             -> .track / .notTrackShaped
+/// 5. AXGroup + AXPress                                -> .pressGroup
 /// 6. AXGroup, width ≥ 300, 2 ≤ height ≤ 6             -> .wideThin
 ///    (AXGroup thinner than a tile and not wide-thin)   -> .thinGroupMismatch
-/// 7. row roles: h < 200 AND area < 120k               -> .row / .rowTooLarge
-/// 8. tile roles: sides ≥ 30, area ≤ 120k, aspect ≤ 3  -> .tile / .tileTooSmall
-///                                                              / .tileTooLarge
+/// 7. row roles                                        -> .row
+/// 8. tile roles: sides ≥ 30, aspect ≤ 3               -> .tile / .tileTooSmall
 ///                                                              / .tileTooWide
 /// 9. otherwise                                        -> .role
 enum GeometryPolicy {
@@ -186,48 +190,56 @@ enum GeometryPolicy {
     /// and they must stay excluded (admitting them would ring every page scrollbar).
     static let admittedTrackRoles: Set<String> = ["AXSlider"]
     static var directRoles: Set<String> { eligibleRoles.subtracting(trackRoles) }
-    /// A track is thin in ABSOLUTE terms (a 2289 × 963 "slider" is a container)
-    /// and either sliver-thin or ≥ 8:1 (page zoom scales the control, so a
-    /// zoomed 3195 × 76 seek bar must stay admitted).
-    static let trackMaxMinSide: CGFloat = 200
+    /// A slider must be track-shaped: sliver-thin or ≥ 8:1 (page zoom scales
+    /// the control, so a zoomed 3195 × 76 seek bar stays admitted). A
+    /// 2289 × 963 "slider" is a player container, not a track.
     static let trackShortMinSide: CGFloat = 60
     static let trackMinAspect: CGFloat = 8
-    // Row 5 — press-capable generic AXGroup (flattened web button) envelope.
-    static let pressMaxWidth: CGFloat = 420
-    static let pressMaxHeight: CGFloat = 220
     // Row 6 — wide-thin group (zoomed web seek bar collapsed to 2 pt tall).
     static let wideThinMinWidth: CGFloat = 300
     static let wideThinMinHeight: CGFloat = 2
     static let wideThinMaxHeight: CGFloat = 6
     // Row 7 — row-like containers.
     static let rowRoles: Set<String> = ["AXCell", "AXRow", "AXListItem"]
-    static let rowMaxHeight: CGFloat = 200
-    static let rowMaxArea: CGFloat = 120_000
-    // Row 8 — tiles / thumbnails.
+    // Row 8 — tiles / thumbnails (no press action of their own). The aspect
+    // bound is a SHAPE rule: long wrapper strips (1258 × 47) are furniture.
     static let tileRoles: Set<String> = ["AXImage", "AXGroup"]
     static let tileMinDimension: CGFloat = 30
-    static let tileMaxArea: CGFloat = 120_000
     static let tileMaxAspect: CGFloat = 3
-    // Row 3 — bulk bounds for a control that is not track-shaped.
-    static let maxControlArea: CGFloat = 150_000
-    static let maxControlHeight: CGFloat = 600
+    // FIT GATE — an element covering this fraction of its reference frame is
+    // the page/panel itself, not a control.
+    static let windowFillLimit: CGFloat = 0.9
     // Row 2.5 — DISPLAY GATE. `allowed` = union of the displays this rect
     // intersects, inflated 1.05× on each dimension plus 2 pt of rounding slack.
     // All values are AX/CG points, so there is no Retina/pixel scaling here.
     static let displaySlackScale: CGFloat = 1.05
     static let displaySlackPoints: CGFloat = 2
 
+    /// Union of the displays `rect` intersects. nil when it intersects none.
+    static func displayUnion(for rect: CGRect, displayBounds: [CGRect]) -> CGRect? {
+        let hits = displayBounds.filter { $0.intersects(rect) }
+        guard var union = hits.first else { return nil }
+        for d in hits.dropFirst() { union = union.union(d) }
+        return union
+    }
+
     /// The display-derived admission envelope for `rect`: union of the displays
     /// it intersects, inflated. nil when it intersects no known display.
     static func allowedBounds(for rect: CGRect, displayBounds: [CGRect]) -> CGRect? {
-        let hits = displayBounds.filter { $0.intersects(rect) }
-        guard var allowed = hits.first else { return nil }
-        for d in hits.dropFirst() { allowed = allowed.union(d) }
+        guard let allowed = displayUnion(for: rect, displayBounds: displayBounds) else { return nil }
         // Centred so a control touching a display edge (or a 1 pt rounding
         // overhang) is not rejected: 1.05× total per axis, 2 pt total slack.
         let dx = (allowed.width * (displaySlackScale - 1) + displaySlackPoints) / 2
         let dy = (allowed.height * (displaySlackScale - 1) + displaySlackPoints) / 2
         return allowed.insetBy(dx: -dx, dy: -dy)
+    }
+
+    /// The window an element lives in: the smallest window containing its centre.
+    static func referenceFrame(for rect: CGRect, windows: [CGRect]) -> CGRect? {
+        let centre = CGPoint(x: rect.midX, y: rect.midY)
+        return windows
+            .filter { isValidFrame($0) && $0.width > 0 && $0.height > 0 && $0.contains(centre) }
+            .min { $0.width * $0.height < $1.width * $1.height }
     }
 
     /// The single finiteness test. Non-finite geometry is never testimony.
@@ -243,87 +255,63 @@ enum GeometryPolicy {
     }
 
     /// Classify one element. Pure: no AX calls, no logging, no side effects.
-    /// `displayBounds` is the per-cycle display list in AX/CG points.
+    /// `displayBounds` is the per-cycle display list and `windowBounds` the
+    /// target app's on-screen window frames, both in AX/CG points.
     static func classify(role: String, hasPressAction: Bool, rect: CGRect,
-                         displayBounds: [CGRect]) -> GeometryVerdict {
+                         displayBounds: [CGRect], windowBounds: [CGRect] = []) -> GeometryVerdict {
+        func reject(_ r: RejectionReason) -> GeometryVerdict {
+            GeometryVerdict(candidateClass: nil, rejection: r)
+        }
         // 1. Finiteness.
-        guard isValidFrame(rect) else { return GeometryVerdict(candidateClass: nil, rejection: .nonFinite) }
+        guard isValidFrame(rect) else { return reject(.nonFinite) }
         // 2. Frame floor (wide elements still admit a 2 pt sliver — zoomed bars).
         guard rect.width >= 4, rect.height >= (rect.width >= 300 ? 2 : 4) else {
-            return GeometryVerdict(candidateClass: nil, rejection: .degenerate)
+            return reject(.degenerate)
         }
-        // 2.5 Display gate: the rect must land on a real display, and every
-        // class below additionally has to fit inside `allowed`.
-        guard let allowed = allowedBounds(for: rect, displayBounds: displayBounds) else {
-            return GeometryVerdict(candidateClass: nil, rejection: .offscreen)
+        guard let allowed = allowedBounds(for: rect, displayBounds: displayBounds),
+              let displays = displayUnion(for: rect, displayBounds: displayBounds) else {
+            return reject(.offscreen)
         }
-        let onScreen = allowed.contains(rect)
-        let area = rect.width * rect.height
         let minSide = min(rect.width, rect.height)
-        let maxSide = max(rect.width, rect.height)
-        let aspect = maxSide / max(minSide, 1)
+        let aspect = max(rect.width, rect.height) / max(minSide, 1)
 
-        // 3. Genuine control roles.
+        // 3-9. What the element is (role + shape, never size).
+        let cls: CandidateClass
         if directRoles.contains(role) {
-            let fits = onScreen && area <= maxControlArea && rect.height <= maxControlHeight
-            return GeometryVerdict(candidateClass: fits ? .direct : nil,
-                                   rejection: fits ? nil : .oversized)
-        }
-        // 4. Tracks: thin in absolute terms AND sliver-thin or very wide, and
-        // wholly inside their displays. No area exemption: a 20000 × 200
-        // "slider" is thin but cannot fit a display, so it is oversized.
-        // A track-role control that is NOT track-shaped (e.g. a 400x150 volume
-        // slider) is still a real control: it falls to the same bulk bound as a
-        // direct role instead of being rejected for lacking a track shape —
-        // that is the pre-refactor behaviour and must not silently tighten.
-        if admittedTrackRoles.contains(role) {
-            let thin = minSide <= trackMaxMinSide
-                && (minSide <= trackShortMinSide || aspect >= trackMinAspect)
-            if thin, onScreen {
-                return GeometryVerdict(candidateClass: .track, rejection: nil)
+            cls = .direct
+        } else if admittedTrackRoles.contains(role) {
+            guard minSide <= trackShortMinSide || aspect >= trackMinAspect else {
+                return reject(.notTrackShaped)
             }
-            let fits = onScreen && area <= maxControlArea && rect.height <= maxControlHeight
-            return GeometryVerdict(candidateClass: fits ? .track : nil,
-                                   rejection: fits ? nil : .oversized)
-        }
-        // 5. Press-capable generic group = flattened web button.
-        if role == "AXGroup", hasPressAction {
-            let fits = onScreen && rect.width <= pressMaxWidth && rect.height <= pressMaxHeight
-            return GeometryVerdict(candidateClass: fits ? .pressGroup : nil,
-                                   rejection: fits ? nil : .pressTooLarge)
-        }
-        // 6. Wide-thin group = zoomed seek bar collapsed to 2-6 pt.
-        if role == "AXGroup" {
-            if onScreen, rect.width >= wideThinMinWidth,
-               rect.height >= wideThinMinHeight, rect.height <= wideThinMaxHeight {
-                return GeometryVerdict(candidateClass: .wideThin, rejection: nil)
-            }
+            cls = .track
+        } else if role == "AXGroup", hasPressAction {
+            cls = .pressGroup
+        } else if role == "AXGroup", rect.width >= wideThinMinWidth,
+                  rect.height >= wideThinMinHeight, rect.height <= wideThinMaxHeight {
+            cls = .wideThin
+        } else if role == "AXGroup", minSide < tileMinDimension {
             // A group too thin to be a tile and not wide-thin is a divider sliver.
-            if minSide < tileMinDimension {
-                return GeometryVerdict(candidateClass: nil, rejection: .thinGroupMismatch)
-            }
+            return reject(.thinGroupMismatch)
+        } else if rowRoles.contains(role) {
+            cls = .row
+        } else if tileRoles.contains(role) {
+            guard minSide >= tileMinDimension else { return reject(.tileTooSmall) }
+            guard aspect <= tileMaxAspect else { return reject(.tileTooWide) }
+            cls = .tile
+        } else {
+            // Everything else is page furniture.
+            return reject(.role)
         }
-        // 7. Row-like containers.
-        if rowRoles.contains(role) {
-            let fits = onScreen && rect.height < rowMaxHeight && area < rowMaxArea
-            return GeometryVerdict(candidateClass: fits ? .row : nil,
-                                   rejection: fits ? nil : .rowTooLarge)
+
+        // FIT GATE: visible on a real display, and not the window itself.
+        guard allowed.contains(rect) else { return reject(.oversized) }
+        let reference = referenceFrame(for: rect, windows: windowBounds) ?? displays
+        let covered = rect.intersection(reference)
+        if !covered.isNull,
+           covered.width * covered.height >= windowFillLimit * reference.width * reference.height {
+            return reject(.oversized)
         }
-        // 8. Tiles / thumbnails.
-        if tileRoles.contains(role) {
-            guard minSide >= tileMinDimension else {
-                return GeometryVerdict(candidateClass: nil, rejection: .tileTooSmall)
-            }
-            guard onScreen, area <= tileMaxArea else {
-                return GeometryVerdict(candidateClass: nil, rejection: .tileTooLarge)
-            }
-            guard aspect <= tileMaxAspect else {
-                return GeometryVerdict(candidateClass: nil, rejection: .tileTooWide)
-            }
-            return GeometryVerdict(candidateClass: .tile, rejection: nil)
-        }
-        // 9. Everything else is page furniture.
-        return GeometryVerdict(candidateClass: nil, rejection: .role)
+        return GeometryVerdict(candidateClass: cls, rejection: nil)
     }
 
     /// Tier mapping (unchanged from the pre-refactor guard chain).
