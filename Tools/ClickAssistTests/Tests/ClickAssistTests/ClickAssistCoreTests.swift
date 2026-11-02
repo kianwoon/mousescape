@@ -453,8 +453,6 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertEqual(classify("AXImage", rect(500, 500, 204, 290), windows: [window]).candidateClass, .tile)
     }
 
-    /// Guarded failure: the 16x16 tab-close glyph was filtered out as
-    /// "degenerate", so Chromium chrome buttons could never be assisted.
     /// Live 2026-11-02 23:29: clicks inside a 475x51 web press group that
     /// wraps a text input were re-aimed 160 pt to its center, so the caret
     /// always jumped to the same place.
@@ -470,6 +468,8 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertEqual(DecisionCore.snapMode(for: group), .edge)
     }
 
+    /// Guarded failure: the 16x16 tab-close glyph was filtered out as
+    /// "degenerate", so Chromium chrome buttons could never be assisted.
     func testA7_smallButtonIsDirect() {
         XCTAssertEqual(classify("AXButton", rect(10, 10, 16, 16)).candidateClass, .direct)
     }
