@@ -53,4 +53,28 @@ final class ClickAssistMenuPositionTests: XCTestCase {
             return XCTFail("The menu must retain its native click")
         }
     }
+    func testMenuBarIconPreservesNativeClickAcrossItsWholeFrame() {
+        let rect = CGRect(x: 6723, y: 3, width: 52, height: 24)
+        let target = DecisionCore.Candidate(key: "status-item", rect: rect, inset: 2,
+            tier: .firstClass, role: "AXMenuBarItem", verdict: .confirmed,
+            evidenceGeneration: 7, collectedAt: 10)
+        for point in [CGPoint(x: rect.minX + 1, y: rect.midY),
+                      CGPoint(x: rect.midX, y: rect.midY),
+                      CGPoint(x: rect.maxX - 1, y: rect.midY)] {
+            for foreground: Int32? in [1, 2, nil] {
+                XCTAssertFalse(BackgroundClickPolicy.eligible(targetPID: 1,
+                    foregroundPID: foreground, candidate: target, generation: 7,
+                    point: point, now: 10.1))
+            }
+            guard case .directHit = DecisionCore.route(point: point,
+                candidates: [target], tolerance: 32) else {
+                return XCTFail("Menu-bar clicks must remain native at center and edges")
+            }
+        }
+        guard case .redirect(_, let corrected, _, _, _) = DecisionCore.route(
+            point: CGPoint(x: rect.midX, y: rect.maxY + 5), candidates: [target], tolerance: 32)
+        else { return XCTFail("Confirmed near-miss should retain tolerance") }
+        XCTAssertTrue(rect.contains(corrected))
+    }
+
 }

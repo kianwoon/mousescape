@@ -75,7 +75,7 @@ enum DecisionCore {
     static let positionSensitiveRoles: Set<String> = [
         // Custom menu items can contain a horizontal strip of actions (e.g.
         // reactions). Their item frame is not one position-agnostic button.
-        "AXMenuItem",
+        "AXMenuItem", "AXMenuBarItem",
         "AXSlider", "AXScrollBar", "AXValueIndicator",
         "AXTextField", "AXTextArea", "AXSearchField", "AXComboBox",
         // Tabs and radio buttons carry position/drag semantics: a near-miss must
@@ -540,7 +540,7 @@ enum BackgroundClickPolicy {
         // An open menu already owns native mouse tracking, even when its
         // application's PID differs from the foreground PID. It may have no
         // AXWindow at all; consuming it for window activation loses the click.
-        guard candidate.role != "AXMenuItem",
+        guard candidate.role != "AXMenuItem", candidate.role != "AXMenuBarItem",
               let foregroundPID, foregroundPID > 0, targetPID > 0,
               (foregroundPID != targetPID || GeometryPolicy.usesNativeRowAction(candidate.role)),
               candidate.verdict == .confirmed,
