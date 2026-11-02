@@ -1130,49 +1130,17 @@ final class AccessibilityResolver: @unchecked Sendable {
         return sliceId
     }
 
-    /// System surfaces that own full-surface layer-0 windows and therefore used to
-    /// win the front-to-back scan (observed: app="Dock" while the pointer was far
-    /// from the Dock; app="Mousecape" pid=174 = WindowServer). Matched by identity
-    /// (name + bundle id) as well as by activation policy, because pid-based checks
-    /// and layer alone cannot distinguish these from a real app window.
-    private static let systemOwnerNames: Set<String> = [
-        "WindowServer", "Window Server", "Dock", "Control Center",
-        "Notification Center", "SystemUIServer", "loginwindow"
-    ]
-    private static let systemOwnerBundleIDs: Set<String> = [
-        "com.apple.WindowServer", "com.apple.dock", "com.apple.controlcenter",
-        "com.apple.notificationcenterui", "com.apple.systemuiserver",
-        "com.apple.loginwindow"
-    ]
-
-    /// Owning pid of the topmost on-screen window containing `pointer` that is a
-    /// GENUINE application window, in front-to-back window-server order. Rejected
-    /// candidates do not end the scan: the next window down is tried (bounded by
-    /// the window list), so a WindowServer/Dock surface cannot mask the app beneath.
-    ///
-    /// Filter chain per entry, in order:
-    ///  1. ANY CG window layer is accepted. Open NSMenus (pop-up menu level ~101)
-    ///     and panels live above layer 0; owner acceptability — never the layer —
-    ///     decides whether such a window is a legitimate app surface.
-    ///  2. non-empty bounds containing the pointer, and alpha > 0 (invisible
-    ///     windows must not capture the hover).
-    ///  3. our own non-GUI surfaces (non-zero layer) are skipped, so the overlay
-    ///     panel that follows the highlight never becomes the hovered window.
-    ///  4. the owner must be a regular or accessory NSRunningApplication (not a
-    ///     .prohibited system daemon), must not be a known system owner by name or
-    ///     bundle id, and must have a reachable AX application element.
-    /// Self windows at layer 0 are accepted here and caught by the self-RPC guard
-    /// in `refresh`, preserving the existing non-routable pass-through behaviour.
     /// Pointer ownership = real click routing. A system-wide AX hit test returns
     /// the element a click would actually reach, which follows the visible/clickable
     /// window rather than CG z-order — click-through capture overlays (Cua Driver,
-    /// cua-spacesd, screenshot/recording HUDs) are invisible to it. Falls back to
-    /// the historical CG-order scan only when the hit test fails or times out.
+    /// cua-spacesd, screenshot/recording HUDs) are invisible to it. This is the
+    /// ONLY source: CGWindowListCopyWindowInfo answers nil inside this XPC service
+    /// (logged 2026-11-02), so there is no window-list fallback.
     private func pointerOwnerPid(_ pointer: CGPoint) -> (pid: pid_t?, source: String) {
         if let hit = systemWideHitPid(pointer), hit > 0, !isExcluded(owner: hit) {
             return (hit, "ax-hit")
         }
-        return (pointerWindowOwnerPid(pointer), "cg-fallback")
+        return (nil, "ax-hit-failed")
     }
 
     /// `AXUIElementCopyElementAtPosition` on the SYSTEM-WIDE element: the same
@@ -1190,68 +1158,12 @@ final class AccessibilityResolver: @unchecked Sendable {
         return pid
     }
 
-    private func pointerWindowOwnerPid(_ pointer: CGPoint) -> pid_t? {
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                    kCGNullWindowID) as? [[String: Any]] else {
-            noteCGWindowList(site: "pointer-owner", count: -1)
-            return nil
-        }
-        noteCGWindowList(site: "pointer-owner", count: list.count)
-        let selfPid = getpid()
-        for entry in list {
-            guard let bounds = entry[kCGWindowBounds as String] as? [String: Any] else { continue }
-            var rect = CGRect.zero
-            guard CGRectMakeWithDictionaryRepresentation(bounds as CFDictionary, &rect),
-                  rect.width > 0, rect.height > 0, rect.contains(pointer) else { continue }
-            let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
-            if let alpha = (entry[kCGWindowAlpha as String] as? NSNumber)?.doubleValue, alpha <= 0 {
-                continue
-            }
-            guard let pidNum = entry[kCGWindowOwnerPID as String] as? NSNumber else { continue }
-            let owner = pid_t(truncating: pidNum)
-            if let wid = (entry[kCGWindowNumber as String] as? NSNumber)?.intValue {
-                exclusionLock.lock(); let skip = excludedWindowIDs.contains(wid); exclusionLock.unlock()
-                if skip { continue }
-            }
-            if owner != getpid(), isExcluded(owner: owner) { continue }
-            if owner == selfPid {
-                // Our own layer-0 GUI window is a legitimate hover target candidate
-                // (caught by the self-RPC guard in refresh). Our non-zero-layer
-                // surfaces (the overlay panel) are excluded here so they never mask
-                // the app beneath; the scan continues front-to-back.
-                if layer != 0 { continue }
-                return owner
-            }
-            guard acceptableWindowOwner(owner) else { continue }
-            return owner
-        }
-        return nil
-    }
-
-    /// Positive identity check for a window owner: a real, AX-reachable app. One
-    /// cheap attribute query per candidate (no tree walk), so the bounded fallback
-    /// over the window list stays cheap.
-    private func acceptableWindowOwner(_ pid: pid_t) -> Bool {
-        guard let app = NSRunningApplication(processIdentifier: pid) else { return false }
-        switch app.activationPolicy {
-        case .regular, .accessory: break
-        default: return false   // .prohibited: system daemons, WindowServer, loginwindow
-        }
-        let name = app.localizedName ?? ""
-        let bundle = app.bundleIdentifier ?? ""
-        if Self.systemOwnerNames.contains(name) || Self.systemOwnerBundleIDs.contains(bundle) {
-            return false
-        }
-        let appEl = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(appEl, 0.2)
-        var windows: CFTypeRef?
-        return AXUIElementCopyAttributeValue(appEl, kAXWindowsAttribute as CFString, &windows) == .success
-    }
-
-    /// The AX window of `ownerPid` that corresponds to the window-server window
-    /// under the pointer. Owner-constrained so another app's surface (Dock, panels)
-    /// can never be matched to this app's AX window. Used both as the per-cycle
-    /// pointer-window priority entry point and for Chromium's unhelpful hit-testing.
+    /// The AX window of `ownerPid` under the pointer. The live hit's AXWindow is
+    /// primary; AX frame containment is the fallback (CGWindowList answers nil
+    /// inside this service). Owner-constrained so another app's surface (Dock,
+    /// panels) can never be matched to this app's AX window. Used both as the
+    /// per-cycle pointer-window priority entry point and for Chromium's unhelpful
+    /// hit-testing.
     private func windowUnderPointer(windows: [AXUIElement], pointer: CGPoint,
                                     ownerPid: pid_t) -> (window: AXUIElement?, mode: String) {
         // Overlapping windows from the same browser cannot be distinguished
@@ -1273,58 +1185,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                 return (window, "hit-window")
             }
         }
-        guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                    kCGNullWindowID) as? [[String: Any]] else {
-            noteCGWindowList(site: "pointer-window", count: -1)
-            // No CG list at all: AX frames are the only authority (see fallback).
-            return axWindowContainingPointer(windows, pointer: pointer)
-        }
-        noteCGWindowList(site: "pointer-window", count: list.count,
-                         ownerCount: list.filter { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == ownerPid }.count)
-        for entry in list {
-            guard let pidNum = entry[kCGWindowOwnerPID as String] as? NSNumber,
-                  pid_t(truncating: pidNum) == ownerPid else { continue }
-            let layer = (entry[kCGWindowLayer as String] as? NSNumber)?.intValue ?? 0
-            guard layer == 0 else { continue }
-            guard let bounds = entry[kCGWindowBounds as String] as? [String: Any] else { continue }
-            var rect = CGRect.zero
-            guard CGRectMakeWithDictionaryRepresentation(bounds as CFDictionary, &rect),
-                  rect.contains(pointer) else { continue }
-            // AX frames use the same top-left global space as CGWindowBounds.
-            // A match must be usable: in macOS fullscreen Chromium lists hollow
-            // 40pt strips as layer-0 windows containing the pointer, which would
-            // starve the pointer-window walk. Accept only a window whose AX frame
-            // contains the pointer and that actually carries children; anything
-            // else falls through to the AX-containment search below.
-            if let exact = windows.first(where: { w in
-                frame(w).map { $0.equalTo(rect) } ?? false
-            }), let f = frame(exact), f.contains(pointer),
-               let kidsE = attr(exact, kAXChildrenAttribute).flatMap(axArray), !kidsE.isEmpty {
-                return (exact, "cg")
-            }
-            if let overlapping = windows.first(where: { w in
-                frame(w).map { $0.intersects(rect) } ?? false
-            }), let f = frame(overlapping), f.contains(pointer),
-               let kidsO = attr(overlapping, kAXChildrenAttribute).flatMap(axArray), !kidsO.isEmpty {
-                return (overlapping, "cg")
-            }
-            return axWindowContainingPointer(windows, pointer: pointer)
-        }
-        // CG matched no layer-0 window for this pid under the pointer (observed in
-        // macOS fullscreen: Chromium's CGWindowList reports hollow strips while
-        // the AX content window still carries the full tree). AX frames are
-        // authoritative then: the containing window, smallest area when nested.
         return axWindowContainingPointer(windows, pointer: pointer)
-    }
-
-    /// Diagnostics: whether CGWindowList answers inside this service at all
-    /// (the window-fill rule saw wins=0 from it). First few answers per site.
-    private var cgWindowListNotes: [String: Int] = [:]
-    private func noteCGWindowList(site: String, count: Int, ownerCount: Int = -1) {
-        let seen = cgWindowListNotes[site, default: 0]
-        guard seen < GeometryPolicy.cgWindowListNoteLimit else { return }
-        cgWindowListNotes[site] = seen + 1
-        log("CG_WINDOWLIST site=\(site) count=\(count) ownerCount=\(ownerCount)")
     }
 
     /// AX-containment fallback for `windowUnderPointer`: the smallest-area AX

@@ -217,8 +217,6 @@ enum GeometryPolicy {
     static let containerProbeNodeBudget = 48
     /// Bound on remembered containers per app before the memo resets.
     static let containerCacheLimit = 768
-    /// CG_WINDOWLIST diagnostic lines logged per call site per resolver run.
-    static let cgWindowListNoteLimit = 5
     // Row 2.5 — DISPLAY GATE. `allowed` = union of the displays this rect
     // intersects, inflated 1.05× on each dimension plus 2 pt of rounding slack.
     // All values are AX/CG points, so there is no Retina/pixel scaling here.
