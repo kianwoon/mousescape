@@ -725,7 +725,10 @@ final class AccessibilityResolver: @unchecked Sendable {
                     key: target.key, candidate: target.rect, candidateRole: target.role,
                     destination: destination,
                     siblings: out.filter { $0.tier == .firstClass && $0.key != target.key }.map(\.rect),
-                    candidateElement: element, diagnostic: { _ in })
+                    candidateElement: element, diagnostic: { msg in
+                        // Rejection reasons are always logged (diagnosing a flapping floating control).
+                        if msg.hasPrefix("VERDICT_REJECT") { self.log("SEED \(target.key.prefix(24)) \(msg)") }
+                    })
                 seedCandidates[index] = DecisionCore.Candidate(key: target.key, rect: target.rect,
                     inset: target.inset, tier: target.tier, role: target.role, label: target.label,
                     verdict: seedVerdict)
@@ -943,7 +946,10 @@ final class AccessibilityResolver: @unchecked Sendable {
                     pid: pid, generation: gen, key: target.key, candidate: target.rect,
                     candidateRole: target.role, destination: destination,
                     siblings: siblings.filter { $0 != target.rect }, candidateElement: el,
-                    diagnostic: { if gen % 20 == 0 { self.log($0) } })
+                    diagnostic: { msg in
+                        if msg.hasPrefix("VERDICT_REJECT") { self.log("FINAL \(target.key.prefix(24)) \(msg)") }
+                        else if gen % 20 == 0 { self.log(msg) }
+                    })
                 out[idx].chromeEligible = chromeEligible(el, role: target.role)
                 out[idx].evidenceGeneration = gen
                 out[idx].collectedAt = CACurrentMediaTime()

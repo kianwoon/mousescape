@@ -128,6 +128,46 @@ enum GeometryPolicy {
             && hasChrome && !hasWebArea
     }
 
+    /// Interior fractions re-probed when the centre hit-test answers with
+    /// content BENEATH a floating control. Observed: x.com's "new posts" pill in
+    /// Brave — AX hit-testing returns the tweet text under the pill's right half
+    /// (and intermittently at its centre), while the left half answers the
+    /// AXButton. The centre itself is the primary probe, so it is not repeated.
+    static let occlusionProbeFractions: [CGPoint] = [
+        CGPoint(x: 0.25, y: 0.5), CGPoint(x: 0.75, y: 0.5),
+        CGPoint(x: 0.5, y: 0.25), CGPoint(x: 0.5, y: 0.75)
+    ]
+    /// Wall-clock cap on the extra probes (AX hit-tests are ~1 ms; a hung
+    /// renderer must not eat the 60 ms evidence deadline).
+    static let occlusionProbeBudget: CFTimeInterval = 0.015
+    /// Parent hops checked when proving an enclosing centre answer is the
+    /// candidate's own ancestor (measured: x.com's pill sits 15 hops below
+    /// Brave's AXWebArea; headroom for deeper SPA trees).
+    static let occlusionAncestorDepth = 40
+
+    static func occlusionProbePoints(in rect: CGRect) -> [CGPoint] {
+        occlusionProbeFractions.map {
+            CGPoint(x: rect.minX + rect.width * $0.x, y: rect.minY + rect.height * $0.y)
+        }
+    }
+
+    /// The re-probe is only admitted when the centre answer could NOT be a
+    /// cover: a surface that fully encloses the candidate (a modal, sheet or
+    /// page layer over it) is a genuine occluder and keeps the mismatch. An
+    /// ACTIONABLE centre answer (a popup/menu item covering the centre) is a
+    /// real partial occluder too: the centre-aimed redirect would land in it,
+    /// so that case stays fail-closed. Only inert content (text, plain groups)
+    /// — the renderer falling through a floating control — is re-probed.
+    /// An AX ANCESTOR of the candidate can never occlude it: when Brave answers
+    /// the whole AXWebArea for x.com's pill, the renderer simply failed to
+    /// descend, so enclosing frames are admitted when they are ancestors.
+    static func admitsOcclusionProbe(candidate: CGRect, centreHit: CGRect,
+                                     centreHitActionable: Bool,
+                                     centreHitIsAncestor: Bool = false) -> Bool {
+        if centreHitIsAncestor { return true }
+        return !centreHitActionable && !centreHit.contains(candidate)
+    }
+
     // Row 3 — direct control roles (track roles are excluded: row 4 owns them).
     static let eligibleRoles: Set<String> = [
         "AXButton", "AXMenuButton", "AXLink",

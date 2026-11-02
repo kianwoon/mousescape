@@ -95,11 +95,18 @@ final class LegitimacyPolicy: @unchecked Sendable {
         if candidateRole == "AXSlider" {
             diagnostic("SLIDER_HIT result=\(hitResult.rawValue) destination=\(destination) candidate=\(candidate) live=\(String(describing: axFrame(candidateElement))) hit=\(String(describing: answeredFrame)) role=\(element.map { role(of: $0) } ?? "-")")
         }
-        guard hitResult == .success, let element, let hitFrame = answeredFrame else { return .unknown }
+        guard hitResult == .success, let element, let hitFrame = answeredFrame else {
+            diagnostic("VERDICT_REJECT unknown reason=hit-failed result=\(hitResult.rawValue) destination=\(destination) candidate=\(candidate)")
+            return .unknown
+        }
         // A successful hit on a surface that does not cover the requested point
         // is positive geometry disagreement, not a transport/timeout uncertainty.
-        guard hitFrame.contains(destination) else { return .mismatch }
+        guard hitFrame.contains(destination) else {
+            diagnostic("VERDICT_REJECT mismatch reason=hit-misses-destination hitRole=\(role(of: element)) hit=\(hitFrame) destination=\(destination) candidate=\(candidate)")
+            return .mismatch
+        }
         if let enabled = attr(element, kAXEnabledAttribute) as? Bool, !enabled {
+            diagnostic("VERDICT_REJECT mismatch reason=hit-disabled hitRole=\(role(of: element)) hit=\(hitFrame) candidate=\(candidate)")
             return .mismatch
         }
         if candidateRole == "AXButton" || candidateRole == "AXSlider" {
@@ -258,7 +265,69 @@ final class LegitimacyPolicy: @unchecked Sendable {
                 return .confirmed
             }
         }
+        if confirmsByInteriorProbe(app: app, candidate: candidate, centreHit: hitFrame,
+                                   centreHitActionable: GeometryPolicy.isActionable(
+                                       role: role(of: element), hasPressAction: hasPress),
+                                   // Only an enclosing answer needs the (bounded) walk.
+                                   centreHitIsAncestor: hitFrame.contains(candidate)
+                                       && isAncestor(element, of: candidateElement),
+                                   diagnostic: diagnostic) {
+            return .confirmed
+        }
+        diagnostic("VERDICT_REJECT mismatch reason=no-rule centreRole=\(role(of: element)) centreHit=\(hitFrame) destination=\(destination) candidate=\(candidate) liveCandidate=\(String(describing: axFrame(candidateElement))) candidateElementRole=\(role(of: candidateElement))")
         return .mismatch
+    }
+
+    private static func isAncestor(_ ancestor: AXUIElement, of element: AXUIElement) -> Bool {
+        var node: AXUIElement? = element
+        for _ in 0..<GeometryPolicy.occlusionAncestorDepth {
+            guard let current = node,
+                  let parent = attr(current, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            let p = parent as! AXUIElement
+            if CFEqual(p, ancestor) { return true }
+            node = p
+        }
+        return false
+    }
+
+    /// Floating controls (position:fixed pills) can make the renderer's AX
+    /// hit-test fall through to the content underneath at some interior
+    /// points. When the centre answer is a partial-overlap surface (never a
+    /// full cover), re-probe a few interior points: the control answering
+    /// for ITSELF (or a child inside it) at any of them proves it is the top
+    /// surface there. Same evidence rule as the primary probe — no frame-only
+    /// confirmation.
+    private static func confirmsByInteriorProbe(app: AXUIElement, candidate: CGRect,
+                                                centreHit: CGRect, centreHitActionable: Bool,
+                                                centreHitIsAncestor: Bool,
+                                                diagnostic: (String) -> Void) -> Bool {
+        guard GeometryPolicy.admitsOcclusionProbe(candidate: candidate, centreHit: centreHit,
+                                                  centreHitActionable: centreHitActionable,
+                                                  centreHitIsAncestor: centreHitIsAncestor)
+        else {
+            diagnostic("VERDICT_REJECT probe=not-admitted actionable=\(centreHitActionable) ancestor=\(centreHitIsAncestor)")
+            return false
+        }
+        let start = CACurrentMediaTime()
+        for point in GeometryPolicy.occlusionProbePoints(in: candidate) {
+            guard CACurrentMediaTime() - start < GeometryPolicy.occlusionProbeBudget else { break }
+            var element: AXUIElement?
+            guard AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y),
+                                                   &element) == .success,
+                  let element, let hit = axFrame(element), hit.contains(point),
+                  (attr(element, kAXEnabledAttribute) as? Bool) != false,
+                  sameFrame(candidate, hit) || candidate.contains(hit) else {
+                var miss: AXUIElement?
+                _ = AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &miss)
+                diagnostic("VERDICT_REJECT probe=miss at=\(point) role=\(miss.map { role(of: $0) } ?? "nil") frame=\(String(describing: miss.flatMap { axFrame($0) })) t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
+                continue
+            }
+            diagnostic("LEGITIMACY_INTERIOR_PROBE confirmed at=\(point) hitRole=\(role(of: element)) centreHit=\(centreHit)")
+            return true
+        }
+        diagnostic("VERDICT_REJECT probe=exhausted t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
+        return false
     }
 
     /// Drop cached verdicts (called on soft/hard invalidation).

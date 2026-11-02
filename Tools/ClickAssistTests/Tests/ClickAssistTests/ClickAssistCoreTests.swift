@@ -37,6 +37,42 @@ final class ClickAssistCoreTests: XCTestCase {
         }
     }
 
+    /// x.com "new posts" pill in Brave: the centre hit-test answered the tweet
+    /// text beneath the floating pill → mismatch → ring dropped mid-hover.
+    func testFloatingPillReprobeIsAdmittedOnlyForPartialOverlapAnswers() {
+        let pill = CGRect(x: 5838, y: 554, width: 180, height: 38)
+        let tweetText = CGRect(x: 5711, y: 571, width: 349, height: 131)   // logged centre answer
+        let modal = CGRect(x: 5600, y: 400, width: 800, height: 600)       // genuine cover
+        let popup = CGRect(x: 5900, y: 565, width: 160, height: 120)       // partial, actionable
+        XCTAssertTrue(GeometryPolicy.admitsOcclusionProbe(candidate: pill, centreHit: tweetText,
+                                                          centreHitActionable: false))
+        XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: pill, centreHit: modal,
+                                                           centreHitActionable: false))
+        // A real control covering the centre would receive the centre-aimed
+        // redirect: never re-probe past it.
+        XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: pill, centreHit: popup,
+                                                           centreHitActionable: true))
+        // 5f1846d live: Brave answered the pill centre with the whole AXWebArea.
+        // Enclosing, but the candidate's own ancestor — cannot be an occluder.
+        let webArea = pill.insetBy(dx: -600, dy: -300)   // encloses the pill like the live AXWebArea
+        XCTAssertTrue(GeometryPolicy.admitsOcclusionProbe(candidate: pill, centreHit: webArea,
+                                                          centreHitActionable: false,
+                                                          centreHitIsAncestor: true))
+        XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: pill, centreHit: webArea,
+                                                           centreHitActionable: false,
+                                                           centreHitIsAncestor: false))
+
+        let points = GeometryPolicy.occlusionProbePoints(in: pill)
+        XCTAssertEqual(points.count, GeometryPolicy.occlusionProbeFractions.count)
+        let centre = CGPoint(x: pill.midX, y: pill.midY)
+        for p in points {
+            XCTAssertTrue(pill.contains(p), "probe \(p) must lie inside the control")
+            XCTAssertNotEqual(p, centre, "the centre is the primary probe, never repeated")
+        }
+        // The left-quarter probe is where the pill's AXButton answered live.
+        XCTAssertTrue(points.contains(CGPoint(x: 5883, y: 573)))
+    }
+
     func testBraveTabGroupProxyRequiresTheLiveTabFrame() {
         let tab = rect(4937, 164, 248, 40)
         XCTAssertTrue(GeometryPolicy.isTabHitProxy(ancestorRole: "AXRadioButton",
