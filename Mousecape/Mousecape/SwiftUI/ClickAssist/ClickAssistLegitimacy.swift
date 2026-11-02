@@ -85,7 +85,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
               GeometryPolicy.isActionable(role: candidateRole, hasPressAction: false)
         else { return .unknown }
         let app = AXUIElementCreateApplication(pid)
-        AXUIElementSetMessagingTimeout(app, 0.05)
+        AXUIElementSetMessagingTimeout(app, GeometryPolicy.legitimacyHitTimeout)
         var element: AXUIElement?
         // One bounded query. A failed or incoherent answer is not confirmation;
         // the next resolver beat can try again without delaying this publish.
@@ -116,6 +116,18 @@ final class LegitimacyPolicy: @unchecked Sendable {
         // answered child (e.g. a button's text). A surrounding page/video group
         // cannot confirm a hidden control simply because its rectangle fits.
         if sameFrame(candidate, hitFrame) || candidate.contains(hitFrame) {
+            return .confirmed
+        }
+        // AppKit Open/Save panels are remote views hosted by
+        // openAndSavePanelService: an APP-rooted hit-test stops at the AXSheet
+        // (measured 20/20) while the SYSTEM-WIDE hit — the routing a real click
+        // takes — reaches Cancel/Open/the cell (20/20). Only an enclosing
+        // answer is re-asked; the system answer must come from the same app and
+        // be the candidate or lie inside it, so a foreign cover never confirms.
+        if hitFrame.contains(candidate),
+           let system = systemWideAnswer(at: destination, pid: pid),
+           sameFrame(candidate, system.frame) || candidate.contains(system.frame) {
+            diagnostic("LEGITIMACY_SYSTEM_HIT confirmed role=\(role(of: system.element)) appHitRole=\(role(of: element))")
             return .confirmed
         }
         // OpenCode's clipped tab label extends beyond the link's AX bounds.
@@ -268,9 +280,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
         if confirmsByInteriorProbe(app: app, candidate: candidate, centreHit: hitFrame,
                                    centreHitActionable: GeometryPolicy.isActionable(
                                        role: role(of: element), hasPressAction: hasPress),
-                                   // Only an enclosing answer needs the (bounded) walk.
-                                   centreHitIsAncestor: hitFrame.contains(candidate)
-                                       && isAncestor(element, of: candidateElement),
+                                   centreHitElement: element, candidateElement: candidateElement,
                                    diagnostic: diagnostic) {
             return .confirmed
         }
@@ -278,10 +288,27 @@ final class LegitimacyPolicy: @unchecked Sendable {
         return .mismatch
     }
 
-    private static func isAncestor(_ ancestor: AXUIElement, of element: AXUIElement) -> Bool {
+    /// One system-wide hit-test at `point`, accepted only when the answering
+    /// element belongs to `pid` and its frame covers the point.
+    private static func systemWideAnswer(at point: CGPoint,
+                                         pid: pid_t) -> (element: AXUIElement, frame: CGRect)? {
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, GeometryPolicy.legitimacyHitTimeout)
+        var element: AXUIElement?
+        var owner: pid_t = 0
+        guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y),
+                                               &element) == .success,
+              let element, AXUIElementGetPid(element, &owner) == .success, owner == pid,
+              let frame = axFrame(element), frame.contains(point) else { return nil }
+        return (element, frame)
+    }
+
+    /// Bounded parent walk. Running out of time is "not proven" (fail closed).
+    private static func isAncestor(_ ancestor: AXUIElement, of element: AXUIElement,
+                                   deadline: CFTimeInterval) -> Bool {
         var node: AXUIElement? = element
         for _ in 0..<GeometryPolicy.occlusionAncestorDepth {
-            guard let current = node,
+            guard CACurrentMediaTime() < deadline, let current = node,
                   let parent = attr(current, kAXParentAttribute),
                   CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
             let p = parent as! AXUIElement
@@ -300,18 +327,24 @@ final class LegitimacyPolicy: @unchecked Sendable {
     /// confirmation.
     private static func confirmsByInteriorProbe(app: AXUIElement, candidate: CGRect,
                                                 centreHit: CGRect, centreHitActionable: Bool,
-                                                centreHitIsAncestor: Bool,
+                                                centreHitElement: AXUIElement,
+                                                candidateElement: AXUIElement,
                                                 diagnostic: (String) -> Void) -> Bool {
-        guard GeometryPolicy.admitsOcclusionProbe(candidate: candidate, centreHit: centreHit,
-                                                  centreHitActionable: centreHitActionable,
-                                                  centreHitIsAncestor: centreHitIsAncestor)
+        // One deadline covers the probes AND the ancestry proof.
+        let start = CACurrentMediaTime()
+        let deadline = start + GeometryPolicy.occlusionProbeBudget
+        // A partial-overlap inert answer is admitted on geometry alone; an
+        // enclosing answer needs ancestry, proven lazily (only after a probe
+        // has confirmed) so the walk is never paid on the common miss path.
+        let enclosing = centreHit.contains(candidate)
+        guard enclosing || GeometryPolicy.admitsOcclusionProbe(candidate: candidate,
+                  centreHit: centreHit, centreHitActionable: centreHitActionable)
         else {
-            diagnostic("VERDICT_REJECT probe=not-admitted actionable=\(centreHitActionable) ancestor=\(centreHitIsAncestor)")
+            diagnostic("VERDICT_REJECT probe=not-admitted actionable=\(centreHitActionable)")
             return false
         }
-        let start = CACurrentMediaTime()
         for point in GeometryPolicy.occlusionProbePoints(in: candidate) {
-            guard CACurrentMediaTime() - start < GeometryPolicy.occlusionProbeBudget else { break }
+            guard CACurrentMediaTime() < deadline else { break }
             var element: AXUIElement?
             guard AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y),
                                                    &element) == .success,
@@ -322,6 +355,15 @@ final class LegitimacyPolicy: @unchecked Sendable {
                 _ = AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &miss)
                 diagnostic("VERDICT_REJECT probe=miss at=\(point) role=\(miss.map { role(of: $0) } ?? "nil") frame=\(String(describing: miss.flatMap { axFrame($0) })) t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
                 continue
+            }
+            if enclosing {
+                let ancestor = isAncestor(centreHitElement, of: candidateElement, deadline: deadline)
+                guard GeometryPolicy.admitsOcclusionProbe(candidate: candidate, centreHit: centreHit,
+                          centreHitActionable: centreHitActionable, centreHitIsAncestor: ancestor)
+                else {
+                    diagnostic("VERDICT_REJECT probe=enclosing-not-ancestor t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
+                    return false
+                }
             }
             diagnostic("LEGITIMACY_INTERIOR_PROBE confirmed at=\(point) hitRole=\(role(of: element)) centreHit=\(centreHit)")
             return true

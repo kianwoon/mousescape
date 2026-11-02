@@ -140,6 +140,8 @@ enum GeometryPolicy {
     /// Wall-clock cap on the extra probes (AX hit-tests are ~1 ms; a hung
     /// renderer must not eat the 60 ms evidence deadline).
     static let occlusionProbeBudget: CFTimeInterval = 0.015
+    /// AX messaging timeout for every legitimacy hit-test (app- and system-rooted).
+    static let legitimacyHitTimeout: Float = 0.05
     /// Parent hops checked when proving an enclosing centre answer is the
     /// candidate's own ancestor (measured: x.com's pill sits 15 hops below
     /// Brave's AXWebArea; headroom for deeper SPA trees).
