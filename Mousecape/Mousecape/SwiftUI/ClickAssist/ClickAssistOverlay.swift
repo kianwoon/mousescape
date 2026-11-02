@@ -96,10 +96,19 @@ final class TargetingOverlay {
     /// Latest immutable snapshot the tap router also reads. Kept only to re-run
     /// the same pure route against the LIVE pointer between snapshot publishes.
     private var latestSnapshot: CacheSnapshot?
-    /// Pointer sampling cadence (~30 Hz): visually attached to the real cursor,
+    /// Pointer sampling cadence (~60 Hz): visually attached to the real cursor,
     /// but each tick is just one pure DecisionCore.route() plus a few rect draws.
-    private static let repaintInterval: TimeInterval = 0.033
+    private static let repaintInterval: TimeInterval = 0.016
     private var repaintTimer: Timer?
+    // Bounded diagnostics for actual main-thread timer delivery and render work.
+    // These measure scheduling/CPU work, not display scanout or frame presentation.
+    private var redrawSampleStart: CFTimeInterval = 0
+    private var redrawPreviousTick: CFTimeInterval = 0
+    private var redrawIntervals = 0
+    private var redrawIntervalTotal: Double = 0
+    private var redrawIntervalMax: Double = 0
+    private var redrawWorkTotal: Double = 0
+    private var redrawWorkMax: Double = 0
 
     private var lastDrawnAction = ""
     private var lastDrawnFrame: CGRect?
@@ -140,7 +149,32 @@ final class TargetingOverlay {
     /// no snapshot copy, no event-tap work — display-only.
     private func repaintFromLivePointer() {
         guard !dead, let snapshot = latestSnapshot else { return }
+        let started = CACurrentMediaTime()
         render(snapshot)
+        let work = CACurrentMediaTime() - started
+        if redrawPreviousTick > 0 {
+            let interval = started - redrawPreviousTick
+            redrawIntervals += 1
+            redrawIntervalTotal += interval
+            redrawIntervalMax = max(redrawIntervalMax, interval)
+            redrawWorkTotal += work
+            redrawWorkMax = max(redrawWorkMax, work)
+        } else {
+            redrawSampleStart = started
+        }
+        redrawPreviousTick = started
+        if started - redrawSampleStart >= 5, redrawIntervals > 0 {
+            log(String(format: "OVERLAY_REDRAW_STATS configured_ms=%.1f intervals=%d mean_interval_ms=%.2f max_interval_ms=%.2f mean_work_ms=%.3f max_work_ms=%.3f",
+                Self.repaintInterval * 1000, redrawIntervals,
+                redrawIntervalTotal * 1000 / Double(redrawIntervals), redrawIntervalMax * 1000,
+                redrawWorkTotal * 1000 / Double(redrawIntervals), redrawWorkMax * 1000))
+            redrawSampleStart = started
+            redrawIntervals = 0
+            redrawIntervalTotal = 0
+            redrawIntervalMax = 0
+            redrawWorkTotal = 0
+            redrawWorkMax = 0
+        }
     }
 
     /// Gate 5: kill the instrument. The tap pipeline holds no reference to this path.
@@ -276,8 +310,8 @@ final class TargetingOverlay {
     private func draw(action: String, frame: CGRect?, secondary: CGRect?, pointer: CGPoint,
                       mode: String, primaryDim: Bool = false) {
         // Skip redundant redraws: state transitions always paint; pointer moves
-        // only matter while a highlight is shown. This keeps the 30 Hz sampling
-        // nearly free when the ring is static or blank.
+        // only matter while a highlight is shown. This keeps pointer sampling
+        // cheap when the ring is static or blank.
         let stateChanged = action != lastDrawnAction || frame != lastDrawnFrame
             || secondary != lastDrawnSecondary || mode != lastDrawnMode || tolerance != lastDrawnTolerance
             || primaryDim != lastDrawnDim
