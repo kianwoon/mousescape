@@ -1845,9 +1845,13 @@ final class AccessibilityResolver: @unchecked Sendable {
         defer { cycleProbeMs += (CACurrentMediaTime() - probeStart) * 1000 }
         if knownContainersPid != lastResolvedPid {
             knownContainers.removeAll()
+            loggedProbes.removeAll()
             knownContainersPid = lastResolvedPid
         }
+        // Frame keys change with every scroll; keep the diagnostic memo bounded.
+        if loggedProbes.count >= GeometryPolicy.containerCacheLimit { loggedProbes.removeAll() }
         if knownContainers.contains(key) { return true }
+        let containerFrame = frame(el)
         var queue = attr(el, kAXChildrenAttribute).flatMap(axArray) ?? []
         let directChildren = queue.count
         var visited = 0
@@ -1858,10 +1862,29 @@ final class AccessibilityResolver: @unchecked Sendable {
             guard let role = stringAttr(node, kAXRoleAttribute) else { continue }
             if seenRoles.count < 8 { seenRoles.append(role) }
             var pressable = GeometryPolicy.isActionable(role: role, hasPressAction: false)
+            var pressByAction = false
             if !pressable, role == "AXGroup" {
                 var actions: CFArray?
-                pressable = AXUIElementCopyActionNames(node, &actions) == .success
+                pressByAction = AXUIElementCopyActionNames(node, &actions) == .success
                     && (actions as? [String])?.contains("AXPress") == true
+                pressable = pressByAction
+            }
+            // Only a control that would itself be a ring target counts: a
+            // same-box nested wrapper, hidden, disabled or off-screen node is
+            // not a reason to reject the card. Frame/state read only after
+            // the cheap role/action test.
+            if pressable {
+                if let f = frame(node),
+                   !(containerFrame.map { FrameContinuity.delta($0, f) <= 1 } ?? false),
+                   GeometryPolicy.classify(role: role, hasPressAction: pressByAction, rect: f,
+                                           displayBounds: cycleDisplayBounds,
+                                           windowBounds: cycleWindowBounds).accepted,
+                   attr(node, kAXEnabledAttribute) as? Bool != false,
+                   attr(node, "AXHidden") as? Bool != true {
+                    // real control: fall through to the found path below
+                } else {
+                    pressable = false
+                }
             }
             if pressable {
                 if knownContainers.count >= GeometryPolicy.containerCacheLimit { knownContainers.removeAll() }
