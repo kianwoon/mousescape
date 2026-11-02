@@ -50,7 +50,8 @@ New constant `GeometryPolicy.windowFillLimit: CGFloat = 0.9`.
 frames of the target app this cycle. For every class, after the display gate:
 
 ```
-reference = smallest window containing the rect's centre
+reference = smallest window holding the WHOLE rect (2 pt slack)
+            ?? smallest window containing the rect's centre
             ?? union of the displays the rect intersects
 covered   = area(rect ∩ reference) / area(reference)
 if covered >= windowFillLimit -> reject .oversized
@@ -81,17 +82,39 @@ display-filling element is still rejected.
 
 ### 4. Window frame lookup (`ClickAssistResolver.swift`)
 
-Once per resolver cycle, where `cycleDisplayBounds` is set (`:647`), read the
-target app's on-screen window frames with one `CGWindowListCopyWindowInfo`
-call (bounds need no Screen Recording permission; CG global coordinates match
-AX). No per-element AX calls. Pass them to `classify`. Remove the
-`rowTooLarge` / `tileTooLarge` diagnostic counters and their
-`RESOLVER_PUBLISH` fields.
+Once per resolver cycle, where `cycleDisplayBounds` is set, read the target
+app's window frames through Accessibility (`kAXWindowsAttribute` on the app
+element, one frame per window). `CGWindowListCopyWindowInfo` was tried first
+and returned no windows inside the resolver XPC service (`wins=0` live), which
+silently disabled rule 2. `RESOLVER_PUBLISH` logs `wins=`, `win_ms=` and
+`probe_ms=`. The `rowTooLarge` / `tileTooLarge` counters are removed.
+
+### 5. Occlusion check (`ClickAssistLegitimacy.swift`, added after live test)
+
+The app-rooted hit-test answers even for windows buried under other windows.
+After `evaluate` confirms, one system-wide hit-test at the destination must
+land in the same app (else `covered-by-other-app`) AND in the candidate's own
+AX window when both expose one (else `covered-by-other-window`; one app can
+stack many windows, 8 Brave windows observed). A failed system-wide hit is
+`.unknown` (fail closed).
+
+### 6. Container rule (added after live test)
+
+A press-capable AXGroup that has a clickable control inside it is a container
+(YouTube's player, Claude's chat panel, a page wrapper), not a button: reason
+`containsControls`, and only the controls inside it ring. Checked by a
+breadth-first look at up to `containerProbeNodeBudget` (48) descendants, every
+time such a group is admitted (targets persist across cycles, so an unprobed
+admission would keep its ring). A found control is remembered per app (bounded
+by `containerCacheLimit`, 768); "no control found" is not remembered, because
+controls such as a video player's can auto-hide. Live cost: probe 1.3 ms p50,
+2.0 ms p95 per cycle. Known limit: a player whose controls are hidden from AX
+at first hover can ring for a moment until they appear.
 
 ## Unchanged
 
 Role gate, press-action detection, native-row handling, enabled check,
-legitimacy hit-test, smallest-container winner, overlay drawing, background
+legitimacy rules inside `evaluate`, smallest-container winner, overlay drawing, background
 click path.
 
 ## Testing
