@@ -551,8 +551,12 @@ enum BackgroundClickPolicy {
         return ClickAssistEvidence.activationState(evidenceGeneration: candidate.evidenceGeneration,
             currentGeneration: generation, ageMs: (now - candidate.collectedAt) * 1000) == .fresh
     }
-    static func isNativeRowPointerNoise(role: String, down: CGPoint, current: CGPoint) -> Bool {
-        GeometryPolicy.usesNativeRowAction(role)
+    /// Hand tremor during a click emits sub-point leftMouseDragged events.
+    /// Releasing the captured down for that noise hands the gesture back to
+    /// native routing, which only activates the background window (the user
+    /// must click again). Track controls keep every drag: movement is intent.
+    static func isClickPointerNoise(role: String, down: CGPoint, current: CGPoint) -> Bool {
+        !GeometryPolicy.trackRoles.contains(role)
             && hypot(current.x - down.x, current.y - down.y) <= ClickAssistEvidence.pointerMoveEpsilon
     }
     static func matches(_ click: BackgroundClickWire, rect: CGRect) -> Bool {

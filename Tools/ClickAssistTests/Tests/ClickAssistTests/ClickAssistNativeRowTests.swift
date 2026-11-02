@@ -51,11 +51,23 @@ final class ClickAssistNativeRowTests: XCTestCase {
             candidate: candidate("AXButton"), generation: 7, point: point, now: 10.1, nativeTolerance: 32))
     }
     func testNativeRowClickIgnoresOnlyExistingPointerNoiseAndPreservesRealDrags() {
-        XCTAssertTrue(BackgroundClickPolicy.isNativeRowPointerNoise(role: "AXSelectableRow",
+        XCTAssertTrue(BackgroundClickPolicy.isClickPointerNoise(role: "AXSelectableRow",
             down: .zero, current: CGPoint(x: 0.2, y: 0.3)))
-        XCTAssertFalse(BackgroundClickPolicy.isNativeRowPointerNoise(role: "AXNativeRowButton",
+        XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: "AXNativeRowButton",
             down: .zero, current: CGPoint(x: 3, y: 0)))
-        XCTAssertFalse(BackgroundClickPolicy.isNativeRowPointerNoise(role: "AXSlider",
+        XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: "AXSlider",
             down: .zero, current: CGPoint(x: 0.2, y: 0.3)))
+    }
+    func testBackgroundButtonClickIgnoresSubPointTremor() {
+        // Live log 2026-11-02: a 0.1 pt leftMouseDragged between down and up
+        // released the captured background click, so the app only activated.
+        XCTAssertTrue(BackgroundClickPolicy.isClickPointerNoise(role: "AXButton",
+            down: CGPoint(x: 6339.2, y: 530.7), current: CGPoint(x: 6339.3, y: 530.6)))
+        XCTAssertTrue(BackgroundClickPolicy.isClickPointerNoise(role: "AXLink",
+            down: .zero, current: CGPoint(x: 1, y: 1)))
+        XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: "AXButton",
+            down: .zero, current: CGPoint(x: 3, y: 0)))
+        XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: "AXScrollBar",
+            down: .zero, current: CGPoint(x: 0.5, y: 0)))
     }
 }

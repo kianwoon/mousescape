@@ -71,11 +71,22 @@ final class AssistTap: @unchecked Sendable {
     }
     private func captureBackgroundClick(_ candidate: DecisionCore.Candidate, res: Resolution,
                                         original: CGPoint, destination: CGPoint, event: CGEvent) -> Bool {
+        let foreground = currentForegroundPID()
+        let now = CACurrentMediaTime()
         guard activationSink != nil,
-              BackgroundClickPolicy.eligible(targetPID: res.pid, foregroundPID: currentForegroundPID(),
-                candidate: candidate, generation: res.generation, point: original, now: CACurrentMediaTime(),
+              BackgroundClickPolicy.eligible(targetPID: res.pid, foregroundPID: foreground,
+                candidate: candidate, generation: res.generation, point: original, now: now,
                 nativeTolerance: tolerance),
-              let down = event.copy() else { return false }
+              let down = event.copy() else {
+            // A background down that falls through here gets only native
+            // activation (the "needs two clicks" symptom); record why.
+            if foreground != res.pid {
+                let evidence = ClickAssistEvidence.activationState(evidenceGeneration: candidate.evidenceGeneration,
+                    currentGeneration: res.generation, ageMs: (now - candidate.collectedAt) * 1000)
+                log("BACKGROUND_CLICK_SKIPPED target=\(candidate.key) role=\(candidate.role) verdict=\(candidate.verdict) evidence=\(evidence.rawValue) ageMs=\(Int((now - candidate.collectedAt) * 1000)) contains=\(candidate.rect.contains(original) ? 1 : 0) fgPID=\(foreground.map(String.init) ?? "locked") pid=\(res.pid) sink=\(activationSink != nil ? 1 : 0)")
+            }
+            return false
+        }
         pendingBackgroundClick = PendingBackgroundClick(down: down, candidate: candidate,
             pid: res.pid, point: destination)
         log("BACKGROUND_CLICK_CAPTURED target=\(candidate.key) pid=\(res.pid) original=consumed")
@@ -424,7 +435,7 @@ final class AssistTap: @unchecked Sendable {
 
         if let pending = pendingBackgroundClick {
             if isDrag {
-                if BackgroundClickPolicy.isNativeRowPointerNoise(role: pending.candidate.role,
+                if BackgroundClickPolicy.isClickPointerNoise(role: pending.candidate.role,
                     down: pending.down.location, current: original) { return nil }
                 // A drag is not an activation-click. Release the captured native
                 // down ahead of this drag, preserving the app's normal gesture.
@@ -440,9 +451,11 @@ final class AssistTap: @unchecked Sendable {
                 if assistEnabled, latest.valid, latest.pid == pending.pid,
                    let target = latest.candidates.first(where: { $0.key == pending.candidate.key }),
                    FrameContinuity.delta(target.rect, pending.candidate.rect) <= 1,
-                   (target.rect.contains(original)
+                   // Judge the press location: up may sit up to the tremor
+                   // epsilon away, past the edge of a small button.
+                   (target.rect.contains(pending.down.location)
                     || (GeometryPolicy.usesNativeRowAction(target.role)
-                        && DecisionCore.boundaryDistance(original, target.rect) <= tolerance)),
+                        && DecisionCore.boundaryDistance(pending.down.location, target.rect) <= tolerance)),
                    target.verdict == .confirmed,
                    ClickAssistEvidence.activationState(evidenceGeneration: target.evidenceGeneration,
                     currentGeneration: latest.generation,
