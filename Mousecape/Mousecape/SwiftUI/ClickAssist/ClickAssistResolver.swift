@@ -235,16 +235,15 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Per-cycle display bounds in AX/CG points, handed to `GeometryPolicy`
     /// so every class is bounded by the displays it actually intersects.
     private var cycleDisplayBounds: [CGRect] = []
-    /// Diagnostics only: row-like elements (AXCell/AXRow/AXListItem) rejected by the
-    /// row-size guard this cycle. Reset per refresh; published as `rowTooLarge=`.
-    private var rowTooLarge = 0
-    /// Diagnostics only: tile-like elements (AXImage/AXGroup) rejected by the tile
-    /// envelope (too small / too large) and near-identical duplicates merged, per
-    /// cycle. Reset per refresh; published as `tileTooSmall=`/`tileTooLarge=`/`deduped=`.
+    /// On-screen window frames of the target app, read once per cycle. The
+    /// window-fill rule uses the smallest one containing an element.
+    private var cycleWindowBounds: [CGRect] = []
+    /// Diagnostics only: tile-like elements (AXImage/AXGroup) rejected as too
+    /// small, and near-identical duplicates merged, per cycle. Reset per
+    /// refresh; published as `tileTooSmall=`/`deduped=`.
     private var tileTooSmall = 0
     /// Candidates rejected by the user size invariant (too big = wrong for sure).
     private var oversized = 0
-    private var tileTooLarge = 0
     /// Tile-like candidates rejected for a sliver aspect ratio (not area).
     private var tileTooWide = 0
     /// Every rejection this cycle keyed by `RejectionReason.rawValue`, published
@@ -252,15 +251,13 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var rejCounts: [String: Int] = [:]
     private var dedupedCount = 0
 
-    /// Count one policy rejection. The five legacy named counters keep their
+    /// Count one policy rejection. The three legacy named counters keep their
     /// pre-refactor names; the aggregate carries every reason.
     private func record(_ reason: RejectionReason) {
         rejCounts[reason.rawValue, default: 0] += 1
         switch reason {
         case .oversized: oversized += 1
-        case .rowTooLarge: rowTooLarge += 1
         case .tileTooSmall: tileTooSmall += 1
-        case .tileTooLarge: tileTooLarge += 1
         case .tileTooWide: tileTooWide += 1
         default: break
         }
@@ -645,6 +642,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         let pointerDeadline = t0 + Self.pointerWindowDeadlineMs / 1000
         truncatedByDeadline = false
         cycleDisplayBounds = Self.displayBoundsAX()
+        cycleWindowBounds = Self.windowBoundsCG(pid: pid)
         let screenUnion = cycleDisplayBounds.reduce(CGRect.null) { $0.union($1) }
 
         // Diagnostics scratch for THIS cycle only (cleared next refresh): elements
@@ -653,9 +651,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         cyclePointer = pointer
         rejectedNear.removeAll()
         rejectedScanned = 0
-        rowTooLarge = 0
         tileTooSmall = 0
-        tileTooLarge = 0
         tileTooWide = 0
         rejCounts.removeAll()
         dedupedCount = 0
@@ -1003,7 +999,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         let rej = rejCounts.isEmpty ? "-"
             : rejCounts.sorted { $0.key < $1.key }
                 .map { "\($0.key):\($0.value)" }.joined(separator: ",")
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d rowTooLarge=%d tileTooSmall=%d tileTooLarge=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d tileTooSmall=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@",
                    gen, appName, pid, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -1013,8 +1009,8 @@ final class AccessibilityResolver: @unchecked Sendable {
                    pwinStats.guidedSteps, pwinStats.guidedHits,
                    pwinStats.guidedFallback ? 1 : 0,
                    (pwinStats.guidedFallbackReason ?? "-") as NSString,
-                   rotationSkipped ? 1 : 0, rowTooLarge,
-                   tileTooSmall, tileTooLarge, tileTooWide, dedupedCount, partialNoRenew, rej as NSString,
+                   rotationSkipped ? 1 : 0,
+                   tileTooSmall, tileTooWide, dedupedCount, partialNoRenew, rej as NSString,
                    pwinMode as NSString,
                    pidSrc as NSString))
 
@@ -1508,7 +1504,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         guard let rect = frame(el) else { return false }
         let verdict = GeometryPolicy.classify(role: role, hasPressAction: hasPressAction,
                                               rect: rect,
-                                              displayBounds: cycleDisplayBounds)
+                                              displayBounds: cycleDisplayBounds,
+                                              windowBounds: cycleWindowBounds)
         if let rejection = verdict.rejection {
             record(rejection)
             // The two silent buckets stay silent (today: no note, no counter).
@@ -1820,6 +1817,18 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// policy needs to know WHICH displays a rect lands on).
     private static func displayBoundsAX() -> [CGRect] {
         NSScreen.screens.map { ScreenSpace.cgRect(fromCocoaScreen: $0.frame) }
+    }
+
+    /// One WindowServer query per cycle (bounds need no Screen Recording
+    /// permission). CG global coordinates are the same space as AX frames.
+    private static func windowBoundsCG(pid: pid_t) -> [CGRect] {
+        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                                                    kCGNullWindowID) as? [[String: Any]] else { return [] }
+        return info.compactMap { window in
+            guard (window[kCGWindowOwnerPID as String] as? pid_t) == pid,
+                  let bounds = window[kCGWindowBounds as String] as? NSDictionary else { return nil }
+            return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+        }
     }
 
     private static func boundaryDistance(_ p: CGPoint, _ r: CGRect) -> CGFloat {
