@@ -455,6 +455,21 @@ final class ClickAssistCoreTests: XCTestCase {
 
     /// Guarded failure: the 16x16 tab-close glyph was filtered out as
     /// "degenerate", so Chromium chrome buttons could never be assisted.
+    /// Live 2026-11-02 23:29: clicks inside a 475x51 web press group that
+    /// wraps a text input were re-aimed 160 pt to its center, so the caret
+    /// always jumped to the same place.
+    func testClickInsideWebPressGroupIsNeverReaimed() {
+        let box = rect(4960, 1362, 475, 51)
+        let point = CGPoint(x: 5037.4, y: 1383.7)
+        let group = cand("@4960,1362", box, role: "AXPressGroup")
+        guard case .directHit(let hit, _) = DecisionCore.route(point: point, candidates: [group],
+                                                              tolerance: 18.5) else {
+            return XCTFail("a click inside a web press group must stay where it was aimed")
+        }
+        XCTAssertEqual(hit.key, group.key)
+        XCTAssertEqual(DecisionCore.snapMode(for: group), .edge)
+    }
+
     func testA7_smallButtonIsDirect() {
         XCTAssertEqual(classify("AXButton", rect(10, 10, 16, 16)).candidateClass, .direct)
     }

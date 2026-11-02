@@ -81,7 +81,11 @@ enum DecisionCore {
         // Tabs and radio buttons carry position/drag semantics: a near-miss must
         // edge-clamp to the clicked offset, never bullseye. Chromium exposes tabs
         // as AXRadioButton (AxTab/AXTabGroup where a distinct role exists).
-        "AXRadioButton", "AXTab", "AXTabGroup"
+        "AXRadioButton", "AXTab", "AXTabGroup",
+        // A web press group's AX rect IS its hit region and often wraps a text
+        // input or a card: re-aiming at its center moved the caret 160 pt
+        // (live 2026-11-02). The center re-aim is for native buttons only.
+        "AXPressGroup"
     ]
 
     struct Candidate {
