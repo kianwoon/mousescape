@@ -825,6 +825,17 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertNil(GeometryPolicy.referenceFrame(for: rect(5000, 900, 50, 20), windows: [big, small]))
     }
 
+    /// Live 2026-11-02: a Brave page group (1564x1277) in its own 1564x1358
+    /// window was measured against a smaller stacked Brave window that only
+    /// contained its centre (78 %), so the whole page ringed.
+    func testReferenceFramePrefersWindowHoldingWholeRect() {
+        let own = rect(5287, 642, 1564, 1358)
+        let stacked = rect(5707, 528, 1188, 1579)
+        let page = rect(5287, 723, 1564, 1277)
+        XCTAssertEqual(GeometryPolicy.referenceFrame(for: page, windows: [own, stacked]), own)
+        XCTAssertEqual(classify("AXGroup", page, press: true, windows: [own, stacked]).rejection, .oversized)
+    }
+
     func testShapeRulesSurvive() {
         // Chunky non-track slider: accepted trade-off of the shape rule.
         XCTAssertEqual(classify("AXSlider", rect(0, 0, 400, 150)).rejection, .notTrackShaped)

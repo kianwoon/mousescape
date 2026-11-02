@@ -68,10 +68,31 @@ final class LegitimacyPolicy: @unchecked Sendable {
         }
         lock.unlock()
 
-        let verdict = Self.evaluate(pid: pid, candidate: candidate,
+        var verdict = Self.evaluate(pid: pid, candidate: candidate,
                                     candidateRole: candidateRole,
                                     destination: destination, siblings: siblings,
                                     candidateElement: candidateElement, diagnostic: diagnostic)
+        // Visible = a real click there reaches this app. The app-rooted hit-test
+        // above answers for a window buried under other apps (observed: a held
+        // Claude window ringed whole-app while the pointer was over Brave).
+        // The same app's own stacked windows cover each other too (8 Brave
+        // windows observed), so the hit must land in the candidate's window.
+        if verdict == .confirmed || verdict == .confirmedWeak {
+            if let top = Self.systemWideHit(at: destination) {
+                let candidateWindow = Self.attr(candidateElement, kAXWindowAttribute)
+                let hitWindow = Self.attr(top.element, kAXWindowAttribute)
+                if top.owner != pid {
+                    diagnostic("VERDICT_REJECT mismatch reason=covered-by-other-app owner=\(top.owner) pid=\(pid) destination=\(destination)")
+                    verdict = .mismatch
+                } else if let candidateWindow, let hitWindow, !CFEqual(candidateWindow, hitWindow) {
+                    diagnostic("VERDICT_REJECT mismatch reason=covered-by-other-window pid=\(pid) destination=\(destination)")
+                    verdict = .mismatch
+                }
+            } else {
+                diagnostic("VERDICT_REJECT unknown reason=system-hit-failed pid=\(pid) destination=\(destination)")
+                verdict = .unknown
+            }
+        }
         lock.lock()
         cache[cacheKey] = Entry(verdict: verdict, generation: generation, stamp: now)
         lock.unlock()
@@ -286,6 +307,20 @@ final class LegitimacyPolicy: @unchecked Sendable {
         }
         diagnostic("VERDICT_REJECT mismatch reason=no-rule centreRole=\(role(of: element)) centreHit=\(hitFrame) destination=\(destination) candidate=\(candidate) liveCandidate=\(String(describing: axFrame(candidateElement))) candidateElementRole=\(role(of: candidateElement))")
         return .mismatch
+    }
+
+    /// What a real click at `point` reaches (top-most window under it).
+    /// nil when the system-wide hit-test fails (not proven: fail closed).
+    private static func systemWideHit(at point: CGPoint) -> (element: AXUIElement, owner: pid_t)? {
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, GeometryPolicy.legitimacyHitTimeout)
+        var element: AXUIElement?
+        var owner: pid_t = 0
+        guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y),
+                                               &element) == .success,
+              let element, AXUIElementGetPid(element, &owner) == .success else { return nil }
+        AXUIElementSetMessagingTimeout(element, GeometryPolicy.legitimacyHitTimeout)
+        return (element, owner)
     }
 
     /// One system-wide hit-test at `point`, accepted only when the answering

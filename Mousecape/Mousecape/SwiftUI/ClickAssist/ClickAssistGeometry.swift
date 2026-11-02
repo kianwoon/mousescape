@@ -15,6 +15,9 @@ enum RejectionReason: String {
     /// An AXSlider that is not track-shaped (e.g. a player container).
     case notTrackShaped
     case thinGroupMismatch
+    /// A press group with clickable controls inside is a container (a video
+    /// player, a page wrapper): ring the controls, never the box.
+    case containsControls
     case tileTooSmall, tileTooWide
     /// Rect intersects no known display: nothing can be clicked there.
     case offscreen
@@ -209,6 +212,11 @@ enum GeometryPolicy {
     // FIT GATE — an element covering this fraction of its reference frame is
     // the page/panel itself, not a control.
     static let windowFillLimit: CGFloat = 0.9
+    /// Descendants inspected when deciding whether a press group contains
+    /// controls. A work bound, not a size cap; only a found control is cached.
+    static let containerProbeNodeBudget = 48
+    /// Bound on remembered containers per app before the memo resets.
+    static let containerCacheLimit = 768
     // Row 2.5 — DISPLAY GATE. `allowed` = union of the displays this rect
     // intersects, inflated 1.05× on each dimension plus 2 pt of rounding slack.
     // All values are AX/CG points, so there is no Retina/pixel scaling here.
@@ -235,11 +243,16 @@ enum GeometryPolicy {
     }
 
     /// The window an element lives in: the smallest window containing its centre.
+    /// Prefers the smallest window that holds the WHOLE rect: with several
+    /// overlapping windows of one app (8 stacked Brave windows observed), a
+    /// smaller window that merely contains the centre is a different window.
     static func referenceFrame(for rect: CGRect, windows: [CGRect]) -> CGRect? {
+        let valid = windows.filter { isValidFrame($0) && $0.width > 0 && $0.height > 0 }
+        let slack = displaySlackPoints
+        let holding = valid.filter { $0.insetBy(dx: -slack, dy: -slack).contains(rect) }
         let centre = CGPoint(x: rect.midX, y: rect.midY)
-        return windows
-            .filter { isValidFrame($0) && $0.width > 0 && $0.height > 0 && $0.contains(centre) }
-            .min { $0.width * $0.height < $1.width * $1.height }
+        let pool = holding.isEmpty ? valid.filter { $0.contains(centre) } : holding
+        return pool.min { $0.width * $0.height < $1.width * $1.height }
     }
 
     /// The single finiteness test. Non-finite geometry is never testimony.
