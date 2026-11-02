@@ -238,6 +238,16 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// On-screen window frames of the target app, read once per cycle. The
     /// window-fill rule uses the smallest one containing an element.
     private var cycleWindowBounds: [CGRect] = []
+    /// Press groups proven to contain a control, keyed by frame, for the
+    /// current target pid. Only positives are kept: controls such as a video
+    /// player's can auto-hide, so a negative answer is not stable.
+    private var knownContainers: Set<String> = []
+    private var knownContainersPid: pid_t = 0
+    /// Diagnostics: time spent this cycle on window frames / container probes.
+    private var cycleWindowMs: Double = 0
+    private var cycleProbeMs: Double = 0
+    /// Diagnostics: container probe outcomes already logged (key per pid).
+    private var loggedProbes: Set<String> = []
     /// Diagnostics only: tile-like elements (AXImage/AXGroup) rejected as too
     /// small, and near-identical duplicates merged, per cycle. Reset per
     /// refresh; published as `tileTooSmall=`/`deduped=`.
@@ -642,7 +652,10 @@ final class AccessibilityResolver: @unchecked Sendable {
         let pointerDeadline = t0 + Self.pointerWindowDeadlineMs / 1000
         truncatedByDeadline = false
         cycleDisplayBounds = Self.displayBoundsAX()
-        cycleWindowBounds = Self.windowBoundsCG(pid: pid)
+        let windowStart = CACurrentMediaTime()
+        cycleWindowBounds = windowBoundsAX(pid: pid)
+        cycleWindowMs = (CACurrentMediaTime() - windowStart) * 1000
+        cycleProbeMs = 0
         let screenUnion = cycleDisplayBounds.reduce(CGRect.null) { $0.union($1) }
 
         // Diagnostics scratch for THIS cycle only (cleared next refresh): elements
@@ -999,8 +1012,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         let rej = rejCounts.isEmpty ? "-"
             : rejCounts.sorted { $0.key < $1.key }
                 .map { "\($0.key):\($0.value)" }.joined(separator: ",")
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d tileTooSmall=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@",
-                   gen, appName, pid, out.count, newCount, near, visited,
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d wins=%d win_ms=%.1f probe_ms=%.1f targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d tileTooSmall=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@",
+                   gen, appName, pid, cycleWindowBounds.count, cycleWindowMs, cycleProbeMs, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
                    pwinTargets, pwinSpent, pwinStats.maxDepth,
@@ -1515,6 +1528,13 @@ final class AccessibilityResolver: @unchecked Sendable {
             return false
         }
         guard let cls = verdict.candidateClass, rect.intersects(screenUnion) else { return false }
+        // Every admitted press group is probed: targets persist across
+        // cycles, so a box admitted unprobed would keep its ring (seen live).
+        if cls == .pressGroup, containsControl(el, key: "\(Int(rect.minX)),\(Int(rect.minY)),\(Int(rect.width))x\(Int(rect.height))") {
+            record(.containsControls)
+            noteRejectedNearPointer(el, role: role)
+            return false
+        }
         // A press group is published as a group, not as a container role.
         let admittedRole = nativeSelectableRow ? "AXSelectableRow"
             : (hasPressAction && !GeometryPolicy.isActionable(role: role, hasPressAction: false)
@@ -1819,16 +1839,55 @@ final class AccessibilityResolver: @unchecked Sendable {
         NSScreen.screens.map { ScreenSpace.cgRect(fromCocoaScreen: $0.frame) }
     }
 
-    /// One WindowServer query per cycle (bounds need no Screen Recording
-    /// permission). CG global coordinates are the same space as AX frames.
-    private static func windowBoundsCG(pid: pid_t) -> [CGRect] {
-        guard let info = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
-                                                    kCGNullWindowID) as? [[String: Any]] else { return [] }
-        return info.compactMap { window in
-            guard (window[kCGWindowOwnerPID as String] as? pid_t) == pid,
-                  let bounds = window[kCGWindowBounds as String] as? NSDictionary else { return nil }
-            return CGRect(dictionaryRepresentation: bounds as CFDictionary)
+    /// Bounded breadth-first look for a clickable control inside `el`.
+    private func containsControl(_ el: AXUIElement, key: String) -> Bool {
+        let probeStart = CACurrentMediaTime()
+        defer { cycleProbeMs += (CACurrentMediaTime() - probeStart) * 1000 }
+        if knownContainersPid != lastResolvedPid {
+            knownContainers.removeAll()
+            knownContainersPid = lastResolvedPid
         }
+        if knownContainers.contains(key) { return true }
+        var queue = attr(el, kAXChildrenAttribute).flatMap(axArray) ?? []
+        let directChildren = queue.count
+        var visited = 0
+        var seenRoles: [String] = []
+        while !queue.isEmpty, visited < GeometryPolicy.containerProbeNodeBudget {
+            let node = queue.removeFirst()
+            visited += 1
+            guard let role = stringAttr(node, kAXRoleAttribute) else { continue }
+            if seenRoles.count < 8 { seenRoles.append(role) }
+            var pressable = GeometryPolicy.isActionable(role: role, hasPressAction: false)
+            if !pressable, role == "AXGroup" {
+                var actions: CFArray?
+                pressable = AXUIElementCopyActionNames(node, &actions) == .success
+                    && (actions as? [String])?.contains("AXPress") == true
+            }
+            if pressable {
+                if knownContainers.count >= GeometryPolicy.containerCacheLimit { knownContainers.removeAll() }
+                knownContainers.insert(key)
+                if loggedProbes.insert("\(lastResolvedPid)|\(key)|1").inserted {
+                    log("CONTAINER_PROBE key=\(key) found=\(role) visited=\(visited) children=\(directChildren)")
+                }
+                return true
+            }
+            queue.append(contentsOf: attr(node, kAXChildrenAttribute).flatMap(axArray) ?? [])
+        }
+        if loggedProbes.insert("\(lastResolvedPid)|\(key)|0").inserted {
+            log("CONTAINER_PROBE key=\(key) found=none visited=\(visited) children=\(directChildren) roles=\(seenRoles.joined(separator: ","))")
+        }
+        return false
+    }
+
+    /// The target app's window frames, read through Accessibility once per
+    /// cycle. CGWindowListCopyWindowInfo returned no windows inside this
+    /// service (wins=0 observed live: other apps' windows are filtered without
+    /// Screen Recording), which silently fell back to whole-display reference.
+    private func windowBoundsAX(pid: pid_t) -> [CGRect] {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, GeometryPolicy.legitimacyHitTimeout)
+        let windows = attr(app, kAXWindowsAttribute).flatMap(axArray) ?? []
+        return windows.compactMap { frame($0) }
     }
 
     private static func boundaryDistance(_ p: CGPoint, _ r: CGRect) -> CGFloat {
