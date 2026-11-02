@@ -1193,8 +1193,10 @@ final class AccessibilityResolver: @unchecked Sendable {
     private func pointerWindowOwnerPid(_ pointer: CGPoint) -> pid_t? {
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                     kCGNullWindowID) as? [[String: Any]] else {
+            noteCGWindowList(site: "pointer-owner", count: -1)
             return nil
         }
+        noteCGWindowList(site: "pointer-owner", count: list.count)
         let selfPid = getpid()
         for entry in list {
             guard let bounds = entry[kCGWindowBounds as String] as? [String: Any] else { continue }
@@ -1273,9 +1275,12 @@ final class AccessibilityResolver: @unchecked Sendable {
         }
         guard let list = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                                     kCGNullWindowID) as? [[String: Any]] else {
+            noteCGWindowList(site: "pointer-window", count: -1)
             // No CG list at all: AX frames are the only authority (see fallback).
             return axWindowContainingPointer(windows, pointer: pointer)
         }
+        noteCGWindowList(site: "pointer-window", count: list.count,
+                         ownerCount: list.filter { ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == ownerPid }.count)
         for entry in list {
             guard let pidNum = entry[kCGWindowOwnerPID as String] as? NSNumber,
                   pid_t(truncating: pidNum) == ownerPid else { continue }
@@ -1310,6 +1315,16 @@ final class AccessibilityResolver: @unchecked Sendable {
         // the AX content window still carries the full tree). AX frames are
         // authoritative then: the containing window, smallest area when nested.
         return axWindowContainingPointer(windows, pointer: pointer)
+    }
+
+    /// Diagnostics: whether CGWindowList answers inside this service at all
+    /// (the window-fill rule saw wins=0 from it). First few answers per site.
+    private var cgWindowListNotes: [String: Int] = [:]
+    private func noteCGWindowList(site: String, count: Int, ownerCount: Int = -1) {
+        let seen = cgWindowListNotes[site, default: 0]
+        guard seen < GeometryPolicy.cgWindowListNoteLimit else { return }
+        cgWindowListNotes[site] = seen + 1
+        log("CG_WINDOWLIST site=\(site) count=\(count) ownerCount=\(ownerCount)")
     }
 
     /// AX-containment fallback for `windowUnderPointer`: the smallest-area AX
@@ -1857,7 +1872,21 @@ final class AccessibilityResolver: @unchecked Sendable {
         if loggedProbes.count >= GeometryPolicy.containerCacheLimit { loggedProbes.removeAll() }
         if knownContainers.contains(key) { return true }
         let containerFrame = frame(el)
-        var queue = attr(el, kAXChildrenAttribute).flatMap(axArray) ?? []
+        // One visual box can be several nested same-size AX nodes (YouTube: the
+        // press-capable video surface sits inside a same-size player whose
+        // controls are the surface's siblings). Probe from the outermost node.
+        var root = el
+        if let box = containerFrame {
+            var steps = 0
+            while steps < GeometryPolicy.containerProbeNodeBudget,
+                  let raw = attr(root, kAXParentAttribute), CFGetTypeID(raw) == AXUIElementGetTypeID() {
+                let parent = raw as! AXUIElement
+                guard let parentFrame = frame(parent), FrameContinuity.delta(parentFrame, box) <= 1 else { break }
+                root = parent
+                steps += 1
+            }
+        }
+        var queue = attr(root, kAXChildrenAttribute).flatMap(axArray) ?? []
         let directChildren = queue.count
         var visited = 0
         var seenRoles: [String] = []
