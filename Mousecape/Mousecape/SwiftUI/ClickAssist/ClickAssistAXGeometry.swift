@@ -24,6 +24,31 @@ enum AXGeometry {
         })
     }
 
+    /// Frames of every AXScrollArea at or above `start` (nearest first), up to
+    /// the window. A scroll area's frame is its visible viewport; the list or
+    /// outline inside it reports the full scrolled content extent instead.
+    static func scrollViewports(from start: AXUIElement, maxDepth: Int) -> [CGRect] {
+        func attr(_ e: AXUIElement, _ key: String) -> CFTypeRef? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(e, key as CFString, &value) == .success else { return nil }
+            return value
+        }
+        var viewports: [CGRect] = []
+        var node: AXUIElement? = start
+        for _ in 0..<maxDepth {
+            guard let current = node else { break }
+            let role = attr(current, kAXRoleAttribute) as? String ?? ""
+            if role == (kAXWindowRole as String) { break }
+            if role == (kAXScrollAreaRole as String), let viewport = frame(current) {
+                viewports.append(viewport)
+            }
+            guard let parent = attr(current, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            node = (parent as! AXUIElement)
+        }
+        return viewports
+    }
+
     /// One live round trip on supporting apps. A partial/unsupported batch uses
     /// the original reader, preserving apps with incomplete batch support.
     /// Nothing is cached, and both paths use the same finite-frame validation.
