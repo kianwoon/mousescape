@@ -171,7 +171,17 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// node per level (it reads children only to choose the single containing one),
     /// so depth is far cheaper than breadth: 48 levels ≈ 48 nodes out of the 300-node
     /// pointer-window budget, and the deadline still stops it first if AX stalls.
-    private static let pointerWindowGuidedMaxDepth = 48
+    /// x.com's feed player keeps its controls 56-61 levels below the window
+    /// (measured live), so the bound leaves headroom above that.
+    private static let pointerWindowGuidedMaxDepth = 80
+    /// Sibling branches within this many points of the pointer are rescued to
+    /// the absolute guided depth bound instead of the endpoint-relative one.
+    private static let pointerRescueNearRadius: CGFloat = 150
+    /// Hit-test ancestry rescue: levels climbed from the hit element, levels walked
+    /// back down from that container, and the node budget it may spend per cycle.
+    private static let hitAncestryClimb = 6
+    private static let hitAncestryDescend = 8
+    private static let hitAncestryBudget = 100
     /// Default depth bound for the shared `walk` (rotation-style consumers).
     private static let walkMaxDepth = 12
     /// Adaptive cadence. The walk is the dominant resolver cost (measured mean
@@ -796,6 +806,13 @@ final class AccessibilityResolver: @unchecked Sendable {
             let bandSpent = bandStart - bandBudget
             pwinSpent = (min(Self.pointerWindowBudget, budget) - pwinBudget) + bandSpent
             budget -= pwinSpent   // total work stays inside the shared node budget
+            if pwinMode == "hit-window", pwinStats.guidedFallbackReason == "no-containing-child" {
+                let hitSpent = walkHitAncestry(appEl, pointer: pointer, out: &out,
+                    budget: min(budget, Self.hitAncestryBudget), deadline: pointerDeadline,
+                    screenUnion: screenUnion, pid: pid, stats: &pwinStats)
+                pwinSpent += hitSpent
+                budget -= hitSpent
+            }
         }
         let pwinTargets = Set(out.map { $0.key }).subtracting(keysBeforePwin).count
         let pointerWalkMs = (CACurrentMediaTime() - pointerWalkStart) * 1000
@@ -1497,7 +1514,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     ///  1. From the pointer window's element, descend one level at a time into the
     ///     child whose AX frame CONTAINS the pointer (smallest containing child
     ///     wins), collecting eligible targets along the path, bounded by the guided
-    ///     depth bound (`pointerWindowGuidedMaxDepth` = 48: ~1 node per level).
+    ///     depth bound (`pointerWindowGuidedMaxDepth` = 80: ~1 node per level).
     ///  2. No child contains the pointer (or the node is a leaf / budget or
     ///     deadline is exhausted) -> stop and fall back to today's bounded walk at
     ///     that node; the reason is recorded for the publish log.
@@ -1583,10 +1600,21 @@ final class AccessibilityResolver: @unchecked Sendable {
            let rawP = attr(parent, kAXChildrenAttribute), let siblings = axArray(rawP) {
             var rescue = min(budget, 160)
             let rescueStart = rescue
-            for k in siblings where rescue > 0 {
+            // Only branches near the pointer can hold the hovered control, and a
+            // player's controls sit far below the endpoint (x.com: ~58 levels
+            // from the window), so near branches may use the absolute bound.
+            let near = CGRect(x: pointer.x, y: pointer.y, width: 0, height: 0)
+                .insetBy(dx: -Self.pointerRescueNearRadius, dy: -Self.pointerRescueNearRadius)
+            // Near branches first, so far-away fan-out cannot spend the budget
+            // before the branch holding the hovered control is reached.
+            let nearFlags = siblings.map { sibling in frame(sibling).map { $0.intersects(near) } ?? false }
+            let order = siblings.indices.sorted { (nearFlags[$0] ? 0 : 1, $0) < (nearFlags[$1] ? 0 : 1, $1) }
+            for index in order where rescue > 0 {
+                let k = siblings[index]
+                let isNear = nearFlags[index]
                 walk(k, depth: depth + 1, out: &out, budget: &rescue, deadline: deadline,
                      screenUnion: screenUnion, appElement: appElement, pid: pid,
-                     maxDepth: depth + subtreeDepth, stats: &stats)
+                     maxDepth: isNear ? maxDepth : depth + subtreeDepth, stats: &stats)
             }
             budget -= min(budget, 160) - rescue
             log("PWIN_RESCUE siblings=\(siblings.count) depth=\(depth) spent=\(rescueStart - rescue) reason=\(stats.guidedFallbackReason ?? "-")")
@@ -1602,6 +1630,31 @@ final class AccessibilityResolver: @unchecked Sendable {
                      maxDepth: depth + subtreeDepth, stats: &stats)
             }
         }
+    }
+
+    /// Pointer hit-test rescue for pages whose guided descent dies mid-tree (x.com
+    /// player: no child frame contains the pointer, yet the hit-test lands on the
+    /// player's own control strip ~58 levels down). The hit element is already
+    /// deep in the right branch: climb a few levels from it and walk that
+    /// container's subtree, so the neighbouring controls (seek slider, buttons)
+    /// are collected. Returns the nodes spent.
+    private func walkHitAncestry(_ appElement: AXUIElement, pointer: CGPoint, out: inout [CachedTarget],
+                                 budget: Int, deadline: CFTimeInterval, screenUnion: CGRect,
+                                 pid: pid_t, stats: inout WalkStats) -> Int {
+        guard budget > 0, CACurrentMediaTime() < deadline else { return 0 }
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(appElement, Float(pointer.x), Float(pointer.y), &hit) == .success,
+              var top = hit else { return 0 }
+        for _ in 0..<Self.hitAncestryClimb {
+            guard let parent = attr(top, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+            top = parent as! AXUIElement
+        }
+        var remaining = budget
+        walk(top, depth: 0, out: &out, budget: &remaining, deadline: deadline,
+             screenUnion: screenUnion, appElement: appElement, pid: pid,
+             maxDepth: Self.hitAncestryClimb + Self.hitAncestryDescend, stats: &stats)
+        return budget - remaining
     }
 
     /// Depth-first walk used by the pointer-window priority pass. `maxDepth` is a

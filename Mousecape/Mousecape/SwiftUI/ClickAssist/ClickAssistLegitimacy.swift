@@ -196,7 +196,14 @@ final class LegitimacyPolicy: @unchecked Sendable {
                 guard let current = node else { break }
                 let currentRole = role(of: current)
                 // Stop at the web document: a whole page/window cannot vouch
-                // for a slider that a different surface covers.
+                // for a slider that a different surface covers. The exception is
+                // the page itself answering the hit-test (x.com's player exposes no
+                // finer element at its seek bar): nothing else covers the slider,
+                // so the slider's own live web document is the proof.
+                if currentRole == "AXWebArea", CFEqual(current, element) {
+                    hitIsAncestor = true
+                    diagnostic("SLIDER_PAGE_ANSWER adjustable=\(adjustable)")
+                }
                 if currentRole == "AXWebArea" || currentRole == "AXWindow" { break }
                 let currentFrame = currentRole == "AXGroup" ? axFrame(current) : nil
                 if currentRole == "AXGroup",
