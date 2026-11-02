@@ -87,6 +87,16 @@ enum GeometryPolicy {
             && windowFrame.contains(pointer)
     }
 
+    /// Whether the pointer window is the app's focused window. Only a live
+    /// hit-window (frame containment cannot tell stacked same-app windows
+    /// apart) that is a STANDARD window (panels/HUDs may never become key) and
+    /// whose app reports a different focused window is unfocused. Any unread
+    /// fact (`focusedMatches == nil`) keeps the conservative answer: focused.
+    static func pointerWindowFocused(mode: String, isStandardWindow: Bool,
+                                     focusedMatches: Bool?) -> Bool {
+        !(mode == "hit-window" && isStandardWindow && focusedMatches == false)
+    }
+
     /// Video pixels and controls must belong to the same actual player.
     /// Dimensions, aspect ratio and equal-looking ancestor bounds are not evidence.
     static func confirmsSharedVideoPlayer(isVideoSurface: Bool, sameLivePlayer: Bool) -> Bool {

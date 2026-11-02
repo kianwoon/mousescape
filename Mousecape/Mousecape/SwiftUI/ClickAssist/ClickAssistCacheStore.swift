@@ -50,6 +50,9 @@ struct CacheSnapshot: Sendable {
     var evidenceMs: Double = 0
     var evidenceN: Int = 0
     var trunc: String = "none"
+    /// False only when this cycle's live hit-window is a standard window that
+    /// is not its app's focused window (a click there would only focus it).
+    var pointerWindowFocused: Bool = true
 
     static let empty = CacheSnapshot(generation: 0, targets: [], valid: false,
                                      reason: "unavailable:not-started", stamp: 0,

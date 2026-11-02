@@ -76,20 +76,20 @@ final class AssistTap: @unchecked Sendable {
         guard activationSink != nil,
               BackgroundClickPolicy.eligible(targetPID: res.pid, foregroundPID: foreground,
                 candidate: candidate, generation: res.generation, point: original, now: now,
-                nativeTolerance: tolerance),
+                nativeTolerance: tolerance, targetWindowFocused: res.pointerWindowFocused),
               let down = event.copy() else {
             // A background down that falls through here gets only native
             // activation (the "needs two clicks" symptom); record why.
-            if foreground != res.pid {
+            if foreground != res.pid || !res.pointerWindowFocused {
                 let evidence = ClickAssistEvidence.activationState(evidenceGeneration: candidate.evidenceGeneration,
                     currentGeneration: res.generation, ageMs: (now - candidate.collectedAt) * 1000)
-                log("BACKGROUND_CLICK_SKIPPED target=\(candidate.key) role=\(candidate.role) verdict=\(candidate.verdict) evidence=\(evidence.rawValue) ageMs=\(Int((now - candidate.collectedAt) * 1000)) contains=\(candidate.rect.contains(original) ? 1 : 0) fgPID=\(foreground.map(String.init) ?? "locked") pid=\(res.pid) sink=\(activationSink != nil ? 1 : 0)")
+                log("BACKGROUND_CLICK_SKIPPED target=\(candidate.key) role=\(candidate.role) verdict=\(candidate.verdict) evidence=\(evidence.rawValue) ageMs=\(Int((now - candidate.collectedAt) * 1000)) contains=\(candidate.rect.contains(original) ? 1 : 0) fgPID=\(foreground.map(String.init) ?? "locked") pid=\(res.pid) sink=\(activationSink != nil ? 1 : 0) winFocused=\(res.pointerWindowFocused ? 1 : 0)")
             }
             return false
         }
         pendingBackgroundClick = PendingBackgroundClick(down: down, candidate: candidate,
             pid: res.pid, point: destination)
-        log("BACKGROUND_CLICK_CAPTURED target=\(candidate.key) pid=\(res.pid) original=consumed")
+        log("BACKGROUND_CLICK_CAPTURED target=\(candidate.key) pid=\(res.pid) winFocused=\(res.pointerWindowFocused ? 1 : 0) original=consumed")
         return true
     }
     /// Off-callback activation transport (XPC to the resolver service). The tap
@@ -222,6 +222,8 @@ final class AssistTap: @unchecked Sendable {
         let ageMs: Double
         let source: String
         let pid: pid_t
+        /// Resolver's pointer-window focus fact; see `CacheSnapshot`.
+        var pointerWindowFocused: Bool = true
     }
 
     /// Pure in-memory snapshot read. No IPC, no AX, no allocation beyond a retain.
@@ -245,7 +247,8 @@ final class AssistTap: @unchecked Sendable {
                                                                      evidenceGeneration: $0.evidenceGeneration,
                                                                      collectedAt: $0.collectedAt) },
                               valid: fresh, reason: reason, generation: s.generation,
-                              ageMs: ageMs, source: "cache", pid: s.pid)
+                              ageMs: ageMs, source: "cache", pid: s.pid,
+                              pointerWindowFocused: s.pointerWindowFocused)
         }
     }
 

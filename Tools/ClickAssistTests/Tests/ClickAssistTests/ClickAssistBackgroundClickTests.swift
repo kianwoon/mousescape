@@ -65,4 +65,43 @@ final class ClickAssistBackgroundClickTests: XCTestCase {
         XCTAssertEqual(ActivationGate.admit(request, now: 10.01, currentGeneration: 6,
             targetExists: true, chromeEligible: false, backgroundEligible: true, state: &state), .staleGeneration)
     }
+    func testFrontmostAppUnfocusedWindowTakesOwnershipLikeBackgroundApp() {
+        func eligible(foreground: Int32, focused: Bool) -> Bool {
+            BackgroundClickPolicy.eligible(targetPID: 1, foregroundPID: foreground,
+                candidate: candidate(), generation: 7, point: CGPoint(x: 200, y: 110), now: 10.1,
+                targetWindowFocused: focused)
+        }
+        XCTAssertTrue(eligible(foreground: 1, focused: false))
+        XCTAssertFalse(eligible(foreground: 1, focused: true))
+        XCTAssertTrue(eligible(foreground: 2, focused: true))
+        XCTAssertTrue(eligible(foreground: 2, focused: false))
+    }
+    func testOnlyLiveStandardHitWindowCanReportUnfocused() {
+        XCTAssertFalse(GeometryPolicy.pointerWindowFocused(mode: "hit-window",
+            isStandardWindow: true, focusedMatches: false))
+        XCTAssertTrue(GeometryPolicy.pointerWindowFocused(mode: "hit-window",
+            isStandardWindow: true, focusedMatches: true))
+        XCTAssertTrue(GeometryPolicy.pointerWindowFocused(mode: "hit-window",
+            isStandardWindow: true, focusedMatches: nil))
+        XCTAssertTrue(GeometryPolicy.pointerWindowFocused(mode: "hit-window",
+            isStandardWindow: false, focusedMatches: false))
+        for mode in ["ax-contain", "confirmed-seed", "none"] {
+            XCTAssertTrue(GeometryPolicy.pointerWindowFocused(mode: mode,
+                isStandardWindow: true, focusedMatches: false))
+        }
+    }
+    func testSnapshotWireCarriesPointerWindowFocus() throws {
+        var snap = CacheSnapshot(generation: 3, targets: [], valid: true, reason: "fresh",
+                                 stamp: 10, resolverMs: 0, pointer: .zero, appName: "A", pid: 1)
+        snap.pointerWindowFocused = false
+        let data = try XCTUnwrap(ClickAssistSnapshotCodec.encode(SnapshotWire(snapshot: snap, epoch: "E")))
+        let decoded = try ClickAssistSnapshotCodec.decode(data, expectedEpoch: "E",
+            currentGeneration: nil, now: 10.01).get()
+        XCTAssertFalse(decoded.wire.cacheSnapshot().pointerWindowFocused)
+        let old = Data(#"{"version":1,"epoch":"E","generation":3,"publishedAt":10,"ageMs":400,"pid":1,"valid":true,"reason":"fresh","targets":[]}"#.utf8)
+        let legacy = try ClickAssistSnapshotCodec.decode(old, expectedEpoch: "E",
+            currentGeneration: nil, now: 10.01).get()
+        XCTAssertNil(legacy.wire.pointerWindowFocused)
+        XCTAssertTrue(legacy.wire.cacheSnapshot().pointerWindowFocused)
+    }
 }

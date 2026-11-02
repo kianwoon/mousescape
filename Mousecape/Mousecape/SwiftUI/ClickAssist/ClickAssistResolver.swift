@@ -756,6 +756,17 @@ final class AccessibilityResolver: @unchecked Sendable {
             : windowUnderPointer(windows: windows, pointer: pointer, ownerPid: pid)
         let pwin: AXUIElement? = pwinResult.window
         let pwinMode = pwinResult.mode
+        // Focus fact for the tap's one-click policy, read only for a live
+        // hit-window (two cheap reads on elements already held). Seed, none and
+        // ax-contain cycles keep the default: focused.
+        var pointerWindowFocused = true
+        if let pwin, pwinMode == "hit-window" {
+            let isStandard = (attr(pwin, kAXSubroleAttribute) as? String) == (kAXStandardWindowSubrole as String)
+            let focusedMatches = attr(appEl, kAXFocusedWindowAttribute)
+                .flatMap(axElement).map { CFEqual($0, pwin) }
+            pointerWindowFocused = GeometryPolicy.pointerWindowFocused(mode: pwinMode,
+                isStandardWindow: isStandard, focusedMatches: focusedMatches)
+        }
         let keysBeforePwin = Set(out.map { $0.key })
         var pwinSpent = 0
         var pwinStats = WalkStats()
@@ -1001,7 +1012,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                                  pointerGeneration: pointerGeneration,
                                  cycleStartAt: t0, walkMs: pointerWalkMs,
                                  evidenceMs: evidenceMs, evidenceN: validatedKeys.count,
-                                 trunc: trunc)
+                                 trunc: trunc, pointerWindowFocused: pointerWindowFocused)
         elements.set(elementRefs, pid: pid)
         cache.publish(snap)
 
@@ -1017,7 +1028,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         let rej = rejCounts.isEmpty ? "-"
             : rejCounts.sorted { $0.key < $1.key }
                 .map { "\($0.key):\($0.value)" }.joined(separator: ",")
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d wins=%d win_ms=%.1f probe_ms=%.1f targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d tileTooSmall=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d wins=%d win_ms=%.1f probe_ms=%.1f targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d tileTooSmall=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@ winFocused=%d",
                    gen, appName, pid, cycleWindowBounds.count, cycleWindowMs, cycleProbeMs, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -1030,7 +1041,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                    rotationSkipped ? 1 : 0,
                    tileTooSmall, tileTooWide, dedupedCount, partialNoRenew, rej as NSString,
                    pwinMode as NSString,
-                   pidSrc as NSString))
+                   pidSrc as NSString, pointerWindowFocused ? 1 : 0))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.

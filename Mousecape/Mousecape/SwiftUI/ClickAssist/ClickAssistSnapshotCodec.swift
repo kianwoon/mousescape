@@ -39,6 +39,8 @@ struct SnapshotWire: Codable, Equatable, Sendable {
     var encodeMs: Double?
     var evidenceN: Int?
     var trunc: String?
+    /// Absent in older payloads; decodes as focused (today's behaviour).
+    var pointerWindowFocused: Bool?
 
     init(epoch: String, generation: UInt64, publishedAt: Double,
          ageMs: Double = ClickAssistSnapshotCodec.evidenceMaxAgeMs,
@@ -180,6 +182,7 @@ extension SnapshotWire {
         self.evidenceMs = snapshot.evidenceMs
         self.evidenceN = snapshot.evidenceN
         self.trunc = snapshot.trunc
+        self.pointerWindowFocused = snapshot.pointerWindowFocused
     }
 
     /// Materialize the local immutable snapshot the tap/overlay consume. `stamp`
@@ -200,7 +203,8 @@ extension SnapshotWire {
                       walkMs: walkMs ?? 0,
                       evidenceMs: evidenceMs ?? 0,
                       evidenceN: evidenceN ?? 0,
-                      trunc: trunc ?? "none")
+                      trunc: trunc ?? "none",
+                      pointerWindowFocused: pointerWindowFocused ?? true)
     }
 }
 
