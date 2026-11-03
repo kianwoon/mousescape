@@ -252,6 +252,32 @@ final class LegitimacyPolicy: @unchecked Sendable {
                 enabled: enabled, adjustable: adjustable, frameMatches: liveFrameMatches,
                 hitIsAncestor: hitIsAncestor) { return .confirmed }
         }
+        // Div-built video players: the seek bar is a bar-shaped AXPress group and
+        // Chromium answers the hit-test with a coarser ANCESTOR of it (the frame's
+        // web document or the player container). Accept only when the answer is
+        // an exact live ancestor inside the bar's own web document; a foreign
+        // cover is never an ancestor.
+        if candidateRole == "AXPressGroup" {
+            var node: AXUIElement? = candidateElement
+            var ownsHit = false
+            for _ in 0..<24 {
+                guard let current = node else { break }
+                if CFEqual(current, element) { ownsHit = true; break }
+                if role(of: current) == "AXWebArea" { break }
+                guard let parent = attr(current, kAXParentAttribute),
+                      CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+                node = (parent as! AXUIElement)
+            }
+            let liveFrameMatches = axFrame(candidateElement).map { sameFrame($0, candidate) } == true
+            let enabled = (attr(candidateElement, kAXEnabledAttribute) as? Bool) != false
+                && (attr(candidateElement, "AXHidden") as? Bool) != true
+            if GeometryPolicy.confirmsBarPageAnswer(candidateRole: candidateRole, candidate: candidate,
+                destination: destination, hitIsOwnWebArea: ownsHit,
+                liveFrameMatches: liveFrameMatches, enabled: enabled) {
+                diagnostic("BAR_ANCESTOR_ANSWER confirmed candidate=\(candidate)")
+                return .confirmed
+            }
+        }
         // Confirm the actual tab control's live relationship to the tab hit,
         // even when the tab group itself has no control role or press action.
         if ["AXButton", "AXRadioButton", "AXTab"].contains(candidateRole),

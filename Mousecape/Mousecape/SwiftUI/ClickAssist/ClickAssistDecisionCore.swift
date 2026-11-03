@@ -167,10 +167,13 @@ enum DecisionCore {
         guard !scored.isEmpty else { return .none }
         let all = scored
         let filtered = scored.filter { cand, _ in
-            all.filter { other in
-                other.0.key != cand.key
+            // Equal-footprint twins are one visual child, not several: count
+            // DISTINCT enclosed rects, and never the candidate's own footprint.
+            Set(all.compactMap { other -> CGRect? in
+                other.0.key != cand.key && other.0.rect != cand.rect
                     && DecisionCore.isNested(cand.rect, other.0.rect, margin: 0)
-            }.count < 2
+                    ? other.0.rect : nil
+            }).count < 2
         }
         guard !filtered.isEmpty else { return .none }
 

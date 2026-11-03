@@ -76,6 +76,22 @@ enum GeometryPolicy {
         candidate.contains(destination) && hit.contains(destination)
     }
 
+    /// Chromium answers a frame-nested player's hit-test with the frame's own
+    /// AXWebArea, never the finer element at its seek bar. Div-built players
+    /// (no slider role) expose that bar as a bar-shaped AXPress group, so the
+    /// page answering is the only possible answer, not a cover. Accept it only
+    /// for a live, enabled, bar-shaped press group whose OWN nearest web
+    /// document is the answered surface and that contains the click point.
+    static func confirmsBarPageAnswer(candidateRole: String, candidate: CGRect,
+                                      destination: CGPoint, hitIsOwnWebArea: Bool,
+                                      liveFrameMatches: Bool, enabled: Bool) -> Bool {
+        guard candidateRole == "AXPressGroup", hitIsOwnWebArea, liveFrameMatches,
+              enabled, candidate.contains(destination) else { return false }
+        let minSide = min(candidate.width, candidate.height)
+        let aspect = max(candidate.width, candidate.height) / max(minSide, 1)
+        return minSide <= trackShortMinSide && aspect >= trackMinAspect
+    }
+
     /// A renderer's inner video surface and a real slider can be siblings.
     /// Require an exact common-container frame in BOTH live ancestry chains,
     /// and keep that container local to the hit surface (not the whole page).
