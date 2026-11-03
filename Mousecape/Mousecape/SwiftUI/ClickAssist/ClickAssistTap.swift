@@ -80,7 +80,9 @@ final class AssistTap: @unchecked Sendable {
               let down = event.copy() else {
             // A background down that falls through here gets only native
             // activation (the "needs two clicks" symptom); record why.
-            if foreground != res.pid || !res.pointerWindowFocused {
+            // Also logged for a frontmost target: its window may be unfocused
+            // while the resolver reports it focused (the silent two-click case).
+            if candidate.verdict == .confirmed {
                 let evidence = ClickAssistEvidence.activationState(evidenceGeneration: candidate.evidenceGeneration,
                     currentGeneration: res.generation, ageMs: (now - candidate.collectedAt) * 1000)
                 log("BACKGROUND_CLICK_SKIPPED target=\(candidate.key) role=\(candidate.role) verdict=\(candidate.verdict) evidence=\(evidence.rawValue) ageMs=\(Int((now - candidate.collectedAt) * 1000)) contains=\(candidate.rect.contains(original) ? 1 : 0) fgPID=\(foreground.map(String.init) ?? "locked") pid=\(res.pid) sink=\(activationSink != nil ? 1 : 0) winFocused=\(res.pointerWindowFocused ? 1 : 0)")
