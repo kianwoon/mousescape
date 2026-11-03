@@ -28,6 +28,7 @@ typedef NS_ENUM(NSUInteger, MCCursorScale) {
 @property (nonatomic, assign)   NSUInteger        frameCount;
 @property (nonatomic, assign)   NSSize            size;
 @property (nonatomic, assign)   NSPoint           hotSpot;
+@property (nonatomic, copy, nullable) NSString   *vectorSVG; // optional SVG markup (VectorSVG key)
 //@property (assign) NSUInteger        repeatCount; // v2.01
 
 // creating a cursor from a dictionary

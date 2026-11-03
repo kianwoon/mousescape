@@ -988,6 +988,26 @@ private func _processStaticImage(data: Data) async -> StaticImageResult? {
     return StaticImageResult(cgImage: cg, originalWidth: w, originalHeight: h, isSquare: w == h)
 }
 
+/// Rasterise an SVG file at its own pixel size, then scale to the standard cursor size
+private func _processSVG(url: URL) async -> StaticImageResult? {
+    guard let image = NSImage(contentsOf: url) else { return nil }
+    let w = Int(image.size.width.rounded())
+    let h = Int(image.size.height.rounded())
+    guard w > 0, h > 0 else { return nil }
+    guard let rep = NSBitmapImageRep(
+        bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+    guard let ctx = NSGraphicsContext(bitmapImageRep: rep) else { return nil }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = ctx
+    image.draw(in: NSRect(x: 0, y: 0, width: w, height: h), from: .zero, operation: .sourceOver, fraction: 1.0)
+    NSGraphicsContext.restoreGraphicsState()
+    guard let scaled = CursorImageScaler.scaleImageToStandardSize(rep),
+          let cg = scaled.cgImage else { return nil }
+    return StaticImageResult(cgImage: cg, originalWidth: w, originalHeight: h, isSquare: w == h)
+}
+
 /// Process a GIF file off the main actor
 private func _processGIF(data: Data) async -> GIFProcessingResult? {
     guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
@@ -1111,7 +1131,7 @@ struct CursorPreviewDropZone: View {
 
     /// Supported image types for file picker
     private static let supportedImageTypes: [UTType] = [
-        .png, .jpeg, .tiff, .gif, .windowsCursor, .windowsAnimatedCursor
+        .png, .jpeg, .tiff, .gif, .svg, .windowsCursor, .windowsAnimatedCursor
     ]
 
     /// Check if cursor has any valid image representation
@@ -1316,6 +1336,12 @@ struct CursorPreviewDropZone: View {
             return
         }
 
+        // SVG: keep the markup AND rasterise into the normal bitmap rep
+        if ext == "svg" {
+            loadSVGImage(from: url)
+            return
+        }
+
         // Check if it's a GIF file - handle animation
         if ext == "gif" {
             loadGIFImage(from: url)
@@ -1352,6 +1378,47 @@ struct CursorPreviewDropZone: View {
             localRefreshTrigger += 1
             appState.cursorListRefreshTrigger += 1
             debugLog("Image imported successfully: \(result.originalWidth)x\(result.originalHeight) → \(CursorImageScaler.standardCursorSize)x\(CursorImageScaler.standardCursorSize)")
+            syncAliasesIfSimpleMode()
+        }
+    }
+
+    // MARK: - SVG Import
+
+    /// Load an SVG file: store its markup in vectorSVG and rasterise it into the standard bitmap rep.
+    /// Note: Security-scoped access is managed by the caller (loadImage)
+    private func loadSVGImage(from url: URL) {
+        guard let svgText = try? String(contentsOf: url, encoding: .utf8), !svgText.isEmpty else {
+            debugLog("Failed to read SVG text from: \(url)")
+            appState.validationErrorMessage = String(localized:"Unsupported image format. Supported formats: PNG, JPEG, TIFF, GIF, CUR, ANI.")
+            appState.showValidationError = true
+            return
+        }
+
+        isLoadingImage = true
+        Task {
+            let result = await _processSVG(url: url)
+
+            isLoadingImage = false
+            guard let result = result else {
+                debugLog("Failed to rasterise SVG")
+                appState.validationErrorMessage = String(localized:"Unsupported image format. Supported formats: PNG, JPEG, TIFF, GIF, CUR, ANI.")
+                appState.showValidationError = true
+                return
+            }
+
+            if !result.isSquare {
+                appState.imageImportWarningMessage = String(format: String(localized: "Image is not square (%d×%d). It will be scaled to fit and centered."), result.originalWidth, result.originalHeight)
+                appState.showImageImportWarning = true
+            }
+
+            cursor.removeAllRepresentations()  // also clears any previous vectorSVG
+            cursor.setRepresentation(NSBitmapImageRep(cgImage: result.cgImage), for: targetScale)
+            cursor.vectorSVG = svgText
+            cursor.size = NSSize(width: 32, height: 32)
+            appState.markAsChanged()
+            localRefreshTrigger += 1
+            appState.cursorListRefreshTrigger += 1
+            debugLog("SVG imported successfully: \(result.originalWidth)x\(result.originalHeight) → \(CursorImageScaler.standardCursorSize)x\(CursorImageScaler.standardCursorSize)")
             syncAliasesIfSimpleMode()
         }
     }

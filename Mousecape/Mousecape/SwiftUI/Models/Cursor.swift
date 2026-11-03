@@ -77,6 +77,12 @@ final class Cursor: Identifiable, Hashable {
         set { objcCursor.hotSpot = newValue }
     }
 
+    /// Optional SVG markup (cape key "VectorSVG"); nil when the cursor is bitmap-only
+    var vectorSVG: String? {
+        get { objcCursor.vectorSVG }
+        set { objcCursor.vectorSVG = (newValue?.isEmpty ?? true) ? nil : newValue }
+    }
+
     var isAnimated: Bool {
         frameCount > 1
     }
@@ -126,7 +132,9 @@ final class Cursor: Identifiable, Hashable {
 
     /// Remove all scale representations (used before importing a new image
     /// to ensure stale data at other scales doesn't persist)
+    /// Also clears vectorSVG so a stale SVG never overrides a newer bitmap.
     func removeAllRepresentations() {
+        vectorSVG = nil
         for scale in CursorScale.allCases {
             objcCursor.removeRepresentation(for: MCCursorScale(rawValue: UInt(scale.rawValue)) ?? .scale100)
         }
@@ -198,6 +206,9 @@ final class Cursor: Identifiable, Hashable {
         cursor.frameDuration = frameDuration.doubleValue
         cursor.hotSpot = NSPoint(x: hotSpotX.doubleValue, y: hotSpotY.doubleValue)
         cursor.size = NSSize(width: pointsWide.doubleValue, height: pointsHigh.doubleValue)
+        if let svg = dictionary["VectorSVG"] as? String, !svg.isEmpty {
+            cursor.vectorSVG = svg
+        }
 
         // Parse representations (TIFF data)
         for data in reps {
@@ -229,6 +240,7 @@ final class Cursor: Identifiable, Hashable {
         newCursor.frameDuration = self.frameDuration
         newCursor.size = self.size
         newCursor.hotSpot = self.hotSpot
+        newCursor.vectorSVG = self.vectorSVG
         for scale in CursorScale.allCases {
             if let rep = self.representation(for: scale),
                let repCopy = rep.copy() as? NSImageRep {
@@ -246,6 +258,7 @@ final class Cursor: Identifiable, Hashable {
         newCursor.frameDuration = self.frameDuration
         newCursor.size = self.size
         newCursor.hotSpot = self.hotSpot
+        newCursor.vectorSVG = self.vectorSVG
         // 共享图像引用而非深拷贝，因为光标图像设置后不会被修改
         for scale in CursorScale.allCases {
             if let rep = self.representation(for: scale) {
@@ -268,6 +281,9 @@ final class Cursor: Identifiable, Hashable {
         dict["HotSpotY"] = NSNumber(value: hotSpot.y)
         dict["PointsWide"] = NSNumber(value: size.width)
         dict["PointsHigh"] = NSNumber(value: size.height)
+        if let svg = vectorSVG, !svg.isEmpty {
+            dict["VectorSVG"] = svg
+        }
 
         // Convert all representations to HEIF data (lossless compression, quality = 1.0)
         var heifData: [Data] = []

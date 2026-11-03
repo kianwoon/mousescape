@@ -17,6 +17,7 @@
 #import "outerShadow.h"
 #import "scale.h"
 #import "edgeVector.h"
+#import "edgeSVG.h"
 #import <unistd.h>
 #import <pthread.h>
 #import <math.h>
@@ -332,6 +333,9 @@ static CIContext *MCSharedCIContext() {
 // Hard-edged art is re-rendered from a traced vector silhouette (edgeVector.m)
 // instead of being resampled, so edges stay sharp at any zoom.
 static const CGFloat kMCVectorMinScale = 1.2;  // below this the raster path is fine
+#define kMCSVGMinSide ((NSUInteger)MCMaxImportSize)  // SVG render canvas = import canvas
+static const NSUInteger kMCSVGMaxSide = 4096;  // keep the existing surface-size cap
+static const CGFloat kMCDisplayPxPerPt = 2.0;  // Retina
 
 static CGImageRef _Nullable MCUpscaleAndSharpen(CGImageRef original, NSUInteger targetW, NSUInteger targetH, CGFloat sharpness) {
     @autoreleasepool {
@@ -505,7 +509,27 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
     // Since we always select the highest resolution representation, this primarily
     // helps system default cursors whose native images may be small (e.g. 64×64)
     // and cape cursors at very high custom scales (e.g. 35x → 1120pt).
-    if (images.count > 0 && bestRep) {
+    // Optional vector source: render it at the exact pixel size needed instead of
+    // resampling a bitmap. Same square, centred canvas as the import path so the
+    // hotspot stays valid; single-frame cursors only.
+    BOOL usedSVG = NO;
+    NSString *svg = cursor[MCCursorDictionaryVectorSVGKey];
+    if ([svg isKindOfClass:[NSString class]] && svg.length > 0 && frameCount.integerValue <= 1) {
+        CGFloat needPt = fmax(effectiveSize.width, effectiveSize.height);
+        NSUInteger side = (NSUInteger)ceil(needPt * kMCDisplayPxPerPt);
+        side = MIN(MAX(side, kMCSVGMinSide), kMCSVGMaxSide);
+        CGImageRef vec = MCRenderSVGCursor(svg, side, lefty && !restore);
+        if (vec) {
+            images = [NSMutableArray arrayWithObject:(__bridge id)vec];
+            CGImageRelease(vec);
+            usedSVG = YES;
+            MMLog("  Rendered vector SVG at %lux%lu px", (unsigned long)side, (unsigned long)side);
+        } else {
+            MMLog("  VectorSVG present but could not be rendered; using bitmap");
+        }
+    }
+
+    if (images.count > 0 && bestRep && !usedSVG) {
         NSUInteger srcPixels = (NSUInteger)bestRep.pixelsWide * (NSUInteger)bestRep.pixelsHigh;
 
         // Calculate minimum pixels needed for crisp rendering at the FINAL

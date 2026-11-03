@@ -90,10 +90,13 @@
 		B2C3D4E5F6A7B8C9D0E1F2A4 /* innerShadow.m in Sources */ = {isa = PBXBuildFile; fileRef = 1C0A58B5D987469C80FCB4DD /* innerShadow.m */; };
 		D3E4F5A6B7C8D9E0F1A2B3C4 /* outerGlow.m in Sources */ = {isa = PBXBuildFile; fileRef = E4F5A6B7C8D9E0F1A2B3C4D5 /* outerGlow.m */; };
 		F2A3B4C5D6E7F8091A2B3C4D /* edgeVector.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E6F708192A3B4C /* edgeVector.m */; };
+		A6B7C8D9EAFB0C1D2E3F4051 /* edgeSVG.m in Sources */ = {isa = PBXBuildFile; fileRef = A5B6C7D8E9FA0B1C2D3E4F50 /* edgeSVG.m */; };
 		C2D3E4F5A6B7C8D9E0F1A2B3 /* outerGlow.m in Sources */ = {isa = PBXBuildFile; fileRef = E4F5A6B7C8D9E0F1A2B3C4D5 /* outerGlow.m */; };
 		F3A4B5C6D7E8F90A1B2C3D4E /* edgeVector.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E6F708192A3B4C /* edgeVector.m */; };
+		A7B8C9DAEBFC0D1E2F304152 /* edgeSVG.m in Sources */ = {isa = PBXBuildFile; fileRef = A5B6C7D8E9FA0B1C2D3E4F50 /* edgeSVG.m */; };
 		A1B2C3D4E5F6789ABCDEF012 /* outerGlow.m in Sources */ = {isa = PBXBuildFile; fileRef = E4F5A6B7C8D9E0F1A2B3C4D5 /* outerGlow.m */; };
 		F4A5B6C7D8E9FA0B1C2D3E4F /* edgeVector.m in Sources */ = {isa = PBXBuildFile; fileRef = F1A2B3C4D5E6F708192A3B4C /* edgeVector.m */; };
+		A8B9CADBECFD0E1F20314253 /* edgeSVG.m in Sources */ = {isa = PBXBuildFile; fileRef = A5B6C7D8E9FA0B1C2D3E4F50 /* edgeSVG.m */; };
 		9A4568A6FBA055D959B11A8C /* outerShadow.m in Sources */ = {isa = PBXBuildFile; fileRef = 3BF865A6B79C1B9526A4253D /* outerShadow.m */; };
 		D5013A12D38D87747600AEB3 /* outerShadow.m in Sources */ = {isa = PBXBuildFile; fileRef = 3BF865A6B79C1B9526A4253D /* outerShadow.m */; };
 		BCBB0678DB01DC5603E3C1E1 /* outerShadow.m in Sources */ = {isa = PBXBuildFile; fileRef = 3BF865A6B79C1B9526A4253D /* outerShadow.m */; };
@@ -281,6 +284,7 @@
 		1C0A58B5D987469C80FCB4DD /* innerShadow.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = innerShadow.m; sourceTree = "<group>"; };
 		E4F5A6B7C8D9E0F1A2B3C4D5 /* outerGlow.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = outerGlow.m; sourceTree = "<group>"; };
 		F1A2B3C4D5E6F708192A3B4C /* edgeVector.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = edgeVector.m; sourceTree = "<group>"; };
+		A5B6C7D8E9FA0B1C2D3E4F50 /* edgeSVG.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = edgeSVG.m; sourceTree = "<group>"; };
 		3BF865A6B79C1B9526A4253D /* outerShadow.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = outerShadow.m; sourceTree = "<group>"; };
 		FA8FF772189D67AA00750E51 /* create.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = create.h; sourceTree = "<group>"; };
 		FA8FF773189D67B100750E51 /* create.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = create.m; sourceTree = "<group>"; };
@@ -613,6 +617,7 @@
 			1C0A58B5D987469C80FCB4DD /* innerShadow.m */,
 			E4F5A6B7C8D9E0F1A2B3C4D5 /* outerGlow.m */,
 			F1A2B3C4D5E6F708192A3B4C /* edgeVector.m */,
+			A5B6C7D8E9FA0B1C2D3E4F50 /* edgeSVG.m */,
 			3BF865A6B79C1B9526A4253D /* outerShadow.m */,
 			);
 			path = mousecloak;
@@ -865,6 +870,7 @@
 				A1B2C3D4E5F6A7B8C9D0E1F2 /* innerShadow.m in Sources */,
 				C2D3E4F5A6B7C8D9E0F1A2B3 /* outerGlow.m in Sources */,
 				F2A3B4C5D6E7F8091A2B3C4D /* edgeVector.m in Sources */,
+				A6B7C8D9EAFB0C1D2E3F4051 /* edgeSVG.m in Sources */,
 				D5013A12D38D87747600AEB3 /* outerShadow.m in Sources */,
 			);
 		};
@@ -913,6 +919,7 @@
 				B2C3D4E5F6A7B8C9D0E1F2A4 /* innerShadow.m in Sources */,
 				A1B2C3D4E5F6789ABCDEF012 /* outerGlow.m in Sources */,
 				F3A4B5C6D7E8F90A1B2C3D4E /* edgeVector.m in Sources */,
+				A7B8C9DAEBFC0D1E2F304152 /* edgeSVG.m in Sources */,
 				BCBB0678DB01DC5603E3C1E1 /* outerShadow.m in Sources */,
 				FAC69FDC189D636700BC829D /* MCDefs.m in Sources */,
 				DEBC96042F165800004E6C07 /* MCLogger.m in Sources */,
@@ -937,6 +944,7 @@
 				9C68EEBB9D4B4A07BDCB9DF4 /* innerShadow.m in Sources */,
 				D3E4F5A6B7C8D9E0F1A2B3C4 /* outerGlow.m in Sources */,
 				F4A5B6C7D8E9FA0B1C2D3E4F /* edgeVector.m in Sources */,
+				A8B9CADBECFD0E1F20314253 /* edgeSVG.m in Sources */,
 				9A4568A6FBA055D959B11A8C /* outerShadow.m in Sources */,
 			);
 		};

@@ -62,6 +62,7 @@ static MCCursorScale cursorScaleForScale(CGFloat scale) {
     cursor.representations = self.representations.mutableCopy;
     cursor.hotSpot         = self.hotSpot;
     cursor.identifier      = self.identifier;
+    cursor.vectorSVG       = self.vectorSVG;
     
     return cursor;
 }
@@ -89,6 +90,9 @@ static MCCursorScale cursorScaleForScale(CGFloat scale) {
             //            self.repeatCount   = repeatCount.unsignedIntegerValue;
             self.size          = NSMakeSize(pointsWide.doubleValue, pointsHigh.doubleValue);
 
+            id svg = [dictionary objectForKey:MCCursorDictionaryVectorSVGKey];
+            self.vectorSVG = ([svg isKindOfClass:NSString.class] && [(NSString *)svg length]) ? svg : nil;
+
             for (NSData *data in reps) {
                 // NSBitmapImageRep automatically detects format (PNG/TIFF/HEIF/etc)
                 // v2.0+ documents are saved as HEIF (lossless), but can read any format
@@ -113,6 +117,8 @@ static MCCursorScale cursorScaleForScale(CGFloat scale) {
     drep[MCCursorDictionaryHotSpotYKey]      = @(self.hotSpot.y);
     drep[MCCursorDictionaryPointsWideKey]    = @(self.size.width);
     drep[MCCursorDictionaryPointsHighKey]    = @(self.size.height);
+    if (self.vectorSVG.length)
+        drep[MCCursorDictionaryVectorSVGKey] = self.vectorSVG;
 
     NSMutableArray *imageData = [NSMutableArray array];
     for (NSString *key in self.representations) {

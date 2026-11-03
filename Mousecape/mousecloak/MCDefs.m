@@ -52,6 +52,7 @@ const NSString *MCCursorDictionaryHotSpotYKey        = @"HotSpotY";
 const NSString *MCCursorDictionaryPointsWideKey      = @"PointsWide";
 const NSString *MCCursorDictionaryPointsHighKey      = @"PointsHigh";
 const NSString *MCCursorDictionaryRepresentationsKey = @"Representations";
+const NSString *MCCursorDictionaryVectorSVGKey       = @"VectorSVG";
 
 NSString *UUID(void) {
     CFUUIDRef theUUID = CFUUIDCreate(NULL);

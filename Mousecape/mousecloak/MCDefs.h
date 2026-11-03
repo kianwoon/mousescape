@@ -81,6 +81,7 @@ extern const NSString *MCCursorDictionaryHotSpotYKey;
 extern const NSString *MCCursorDictionaryPointsWideKey;
 extern const NSString *MCCursorDictionaryPointsHighKey;
 extern const NSString *MCCursorDictionaryRepresentationsKey;
+extern const NSString *MCCursorDictionaryVectorSVGKey;
 
 extern NSDictionary *cursorMap(void);
 extern NSString *nameForCursorIdentifier(NSString *identifier);
