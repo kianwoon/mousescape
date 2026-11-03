@@ -53,7 +53,7 @@ final class ClickAssistProgressBarGroupTests: XCTestCase {
     }
 
     // Frame-nested players answer the hit-test with the frame's web document.
-    func testBarPageAnswerConfirmsOnlyBarShapedPressGroupOwningHit() {
+    func testBarPageAnswerConfirmsOnlyBarShapedPressGroupWithLiveAncestorHit() {
         let bar = CGRect(x: 100, y: 900, width: 1288, height: 8)
         let dest = CGPoint(x: 500, y: 904)
         func ok(role: String = "AXPressGroup", rect: CGRect? = nil, owns: Bool = true,
@@ -68,5 +68,20 @@ final class ClickAssistProgressBarGroupTests: XCTestCase {
         XCTAssertFalse(ok(enabled: false))
         // A card-sized press group must not be confirmed by the page answering.
         XCTAssertFalse(ok(rect: CGRect(x: 100, y: 800, width: 400, height: 200)))
+    }
+}
+
+final class GuidedAlternatesTests: XCTestCase {
+    func testOrdersDeepestFirstFiltersFarAndBounds() {
+        let near = CGRect(x: 90, y: 90, width: 20, height: 20)
+        let layer = CGRect(x: 0, y: 0, width: 1312, height: 738)
+        let far = CGRect(x: 5000, y: 5000, width: 10, height: 10)
+        let e = [GuidedAlternates.Entry(index: 0, depth: 3, frame: layer),
+                 GuidedAlternates.Entry(index: 1, depth: 3, frame: layer),
+                 GuidedAlternates.Entry(index: 2, depth: 7, frame: far),
+                 GuidedAlternates.Entry(index: 3, depth: 9, frame: layer)]
+        XCTAssertEqual(GuidedAlternates.ordered(e, near: near, limit: 8).map(\.index), [3, 0, 1])
+        XCTAssertEqual(GuidedAlternates.ordered(e, near: near, limit: 2).map(\.index), [3, 0])
+        XCTAssertTrue(GuidedAlternates.ordered(e, near: near, limit: 0).isEmpty)
     }
 }

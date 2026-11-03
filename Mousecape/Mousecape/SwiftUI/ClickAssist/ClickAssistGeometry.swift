@@ -103,6 +103,14 @@ enum GeometryPolicy {
             && windowFrame.contains(pointer)
     }
 
+    /// A target tagged with a window other than the live hit window is occluded
+    /// by it. 0 pointerWindow (no coherent hit window) or untagged targets
+    /// (menus, menu bar, system surfaces) are never dropped.
+    static func isOtherWindowTarget(targetWindow: Int?, pointerWindow: Int) -> Bool {
+        guard pointerWindow != 0, let targetWindow, targetWindow != 0 else { return false }
+        return targetWindow != pointerWindow
+    }
+
     /// Whether the pointer window is the app's focused window. Only a live
     /// hit-window (frame containment cannot tell stacked same-app windows
     /// apart) that is a STANDARD window (panels/HUDs may never become key) and
@@ -386,4 +394,26 @@ enum ScreenSpace {
 
     static func fmt(_ p: CGPoint) -> String { String(format: "(%.1f,%.1f)", p.x, p.y) }
     static func fmt(_ v: CGVector) -> String { String(format: "(%.1f,%.1f)", v.dx, v.dy) }
+}
+
+/// Equal-footprint alternates for the pointer-guided descent. When several
+/// children of one node contain the pointer (stacked same-size player layers),
+/// the descent follows only the smallest; the rest are remembered so the
+/// sibling rescue can still reach a control living under a layer that was not
+/// chosen. Pure so the ordering/bounding is unit-testable offline.
+enum GuidedAlternates {
+    struct Entry: Equatable {
+        let index: Int      // caller-side identity (position in the remembered list)
+        let depth: Int      // depth of the alternate node
+        let frame: CGRect
+    }
+
+    /// Alternates worth walking: frames intersecting `near`, deepest level first
+    /// (closest to where the descent died), then original order; at most `limit`.
+    static func ordered(_ entries: [Entry], near: CGRect, limit: Int) -> [Entry] {
+        guard limit > 0 else { return [] }
+        return Array(entries.filter { $0.frame.intersects(near) }
+            .sorted { ($0.depth, $1.index) > ($1.depth, $0.index) }
+            .prefix(limit))
+    }
 }

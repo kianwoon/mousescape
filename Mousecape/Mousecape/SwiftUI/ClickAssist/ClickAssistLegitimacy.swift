@@ -255,15 +255,16 @@ final class LegitimacyPolicy: @unchecked Sendable {
         // Div-built video players: the seek bar is a bar-shaped AXPress group and
         // Chromium answers the hit-test with a coarser ANCESTOR of it (the frame's
         // web document or the player container). Accept only when the answer is
-        // an exact live ancestor inside the bar's own web document; a foreign
+        // an exact live ancestor up to the AXWindow, THROUGH web-area/iframe
+        // boundaries (the answer can be the outer page's wrapper group); a foreign
         // cover is never an ancestor.
         if candidateRole == "AXPressGroup" {
             var node: AXUIElement? = candidateElement
             var ownsHit = false
-            for _ in 0..<24 {
+            for _ in 0..<48 {
                 guard let current = node else { break }
                 if CFEqual(current, element) { ownsHit = true; break }
-                if role(of: current) == "AXWebArea" { break }
+                if role(of: current) == "AXWindow" { break }
                 guard let parent = attr(current, kAXParentAttribute),
                       CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
                 node = (parent as! AXUIElement)

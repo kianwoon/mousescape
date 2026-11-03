@@ -104,4 +104,12 @@ final class ClickAssistBackgroundClickTests: XCTestCase {
         XCTAssertNil(legacy.wire.pointerWindowFocused)
         XCTAssertTrue(legacy.wire.cacheSnapshot().pointerWindowFocused)
     }
+
+    func testOtherWindowTargetFilter() {
+        XCTAssertTrue(GeometryPolicy.isOtherWindowTarget(targetWindow: 6, pointerWindow: 1))
+        XCTAssertFalse(GeometryPolicy.isOtherWindowTarget(targetWindow: 1, pointerWindow: 1))
+        XCTAssertFalse(GeometryPolicy.isOtherWindowTarget(targetWindow: nil, pointerWindow: 1))
+        XCTAssertFalse(GeometryPolicy.isOtherWindowTarget(targetWindow: 0, pointerWindow: 1))
+        XCTAssertFalse(GeometryPolicy.isOtherWindowTarget(targetWindow: 6, pointerWindow: 0))
+    }
 }

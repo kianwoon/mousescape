@@ -120,7 +120,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     private struct UnionStash {
         var targets: [CachedTarget]
         var lastSeen: [String: CFTimeInterval]
-        var frontier: [(element: AXUIElement, depth: Int)]
+        var frontier: [(element: AXUIElement, depth: Int, win: Int)]
         var frontierHead: Int
         var sliceIndex: Int
         var coverageKeys: Set<String>
@@ -151,7 +151,13 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Persisted breadth-first frontier. The head cursor survives refreshes, so
     /// successive 600-node slices advance into different subtrees instead of
     /// re-walking the same prefix. Bounded and reset on invalidation/app change.
-    private var frontier: [(element: AXUIElement, depth: Int)] = []
+    private var frontier: [(element: AXUIElement, depth: Int, win: Int)] = []
+    /// Root-window identity (CFHash) of each collected target, tagged cheaply from
+    /// the root it was walked under. 0/absent = not window-owned (menus, menu bar).
+    private var windowOfKey: [String: Int] = [:]
+    /// Window currently being walked (0 = none) and this cycle's live hit window.
+    private var collectingWindow = 0
+    private var pointerWindowTag = 0
     private var frontierHead = 0
     private var sliceIndex = 0
     private var consecutiveLocalRotationSkips = 0
@@ -177,6 +183,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Sibling branches within this many points of the pointer are rescued to
     /// the absolute guided depth bound instead of the endpoint-relative one.
     private static let pointerRescueNearRadius: CGFloat = 150
+    /// Max equal-footprint alternates remembered / walked per guided descent.
+    private static let guidedAlternatesLimit = 8
+    private static let guidedAlternatesBudget = 120
     /// Hit-test ancestry rescue: levels climbed from the hit element, levels walked
     /// back down from that container, and the node budget it may spend per cycle.
     private static let hitAncestryClimb = 6
@@ -786,11 +795,14 @@ final class AccessibilityResolver: @unchecked Sendable {
                 isStandardWindow: isStandard, focusedMatches: focusedMatches)
             lastWindowFocus = (pid, pointerGeneration, pointerWindowFocused)
         }
+        pointerWindowTag = (pwinMode == "hit-window" ? pwin : nil).map { Int(bitPattern: CFHash($0)) } ?? 0
         let keysBeforePwin = Set(out.map { $0.key })
         var pwinSpent = 0
         var pwinStats = WalkStats()
         if let pwin {
             var pwinBudget = min(Self.pointerWindowBudget, budget)
+            collectingWindow = Int(bitPattern: CFHash(pwin))
+            defer { collectingWindow = 0 }
             walkGuided(pwin, pointer: pointer, out: &out, budget: &pwinBudget, deadline: pointerDeadline,
                        screenUnion: screenUnion, appElement: appEl, pid: pid,
                        maxDepth: Self.pointerWindowGuidedMaxDepth,
@@ -804,6 +816,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                      deadline: pointerDeadline, screenUnion: screenUnion, appElement: appEl, pid: pid,
                      maxDepth: Self.pointerWindowGuidedMaxDepth, stats: &pwinStats)
             let bandSpent = bandStart - bandBudget
+            collectingWindow = 0
             pwinSpent = (min(Self.pointerWindowBudget, budget) - pwinBudget) + bandSpent
             budget -= pwinSpent   // total work stays inside the shared node budget
             if pwinMode == "hit-window", pwinStats.guidedFallbackReason == "no-containing-child" {
@@ -954,6 +967,15 @@ final class AccessibilityResolver: @unchecked Sendable {
                 chromeEligible: false, evidenceGeneration: old.evidenceGeneration,
                 collectedAt: old.collectedAt)
         }
+        // Candidates from OTHER (occluded) windows of the same app share screen
+        // coordinates with the hit window; the system hit-test answers with the
+        // front window, so such a nearer candidate reads .unknown and blocks the
+        // real one. Only applied when the hit window is coherent (live hit-window).
+        let beforeOtherWin = out.count
+        out.removeAll { GeometryPolicy.isOtherWindowTarget(targetWindow: windowOfKey[$0.key],
+                                                           pointerWindow: pointerWindowTag) }
+        let otherWindowDropped = beforeOtherWin - out.count
+        windowOfKey = windowOfKey.filter { k, _ in out.contains { $0.key == k } }
         unionTargets = out
         // Drop element references for keys that did not survive this cycle's
         // union/dedupe — never leave a delivery aim pointing at a gone element.
@@ -1054,7 +1076,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         let rej = rejCounts.isEmpty ? "-"
             : rejCounts.sorted { $0.key < $1.key }
                 .map { "\($0.key):\($0.value)" }.joined(separator: ",")
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d wins=%d win_ms=%.1f probe_ms=%.1f targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d tileTooSmall=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@ winFocused=%d",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d wins=%d win_ms=%.1f probe_ms=%.1f targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d tileTooSmall=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@ winFocused=%d otherWindowDropped=%d",
                    gen, appName, pid, cycleWindowBounds.count, cycleWindowMs, cycleProbeMs, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -1067,7 +1089,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                    rotationSkipped ? 1 : 0,
                    tileTooSmall, tileTooWide, dedupedCount, partialNoRenew, rej as NSString,
                    pwinMode as NSString,
-                   pidSrc as NSString, pointerWindowFocused ? 1 : 0))
+                   pidSrc as NSString, pointerWindowFocused ? 1 : 0, otherWindowDropped))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
@@ -1126,7 +1148,12 @@ final class AccessibilityResolver: @unchecked Sendable {
             frontierHead = 0
             sliceIndex = 0
             coverageKeys.removeAll()
-            for root in roots { frontier.append((root, 0)) }
+            for root in roots {
+                // Window roots tag everything beneath them; menuBar/openMenu are
+                // not AXWindow roots and stay untagged (win 0, never dropped).
+                let isWindow = stringAttr(root, kAXRoleAttribute) == (kAXWindowRole as String)
+                frontier.append((root, 0, isWindow ? Int(bitPattern: CFHash(root)) : 0))
+            }
         }
         let sliceId = sliceIndex
         sliceIndex += 1
@@ -1139,7 +1166,9 @@ final class AccessibilityResolver: @unchecked Sendable {
             let node = frontier[frontierHead]
             frontierHead += 1
             budget -= 1
+            collectingWindow = node.win
             collect(node.element, out: &out, screenUnion: screenUnion)
+            collectingWindow = 0
 
             // Window move/resize notifications are registered on window elements.
             if let role = stringAttr(node.element, kAXRoleAttribute), role == "AXWindow",
@@ -1154,7 +1183,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                let raw = attr(node.element, kAXChildrenAttribute),
                let kids = axArray(raw) {
                 for k in kids where frontier.count < Self.maxFrontierNodes {
-                    frontier.append((k, node.depth + 1))
+                    frontier.append((k, node.depth + 1, node.win))
                 }
             }
         }
@@ -1479,6 +1508,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         // Delivery side table: the tap needs the live element reference to decide
         // AXPress vs synthetic. Same-process reference, stored outside the snapshot.
         elementRefs[key] = el
+        if collectingWindow != 0, windowOfKey[key] == nil || collectingWindow == pointerWindowTag {
+            windowOfKey[key] = collectingWindow
+        }
         return true
     }
 
@@ -1536,6 +1568,9 @@ final class AccessibilityResolver: @unchecked Sendable {
         // waiting for the rotation slice.
         var lastParentWithKids: AXUIElement?
         var cappedByDepth = false
+        // Other containing children at levels where >1 child held the pointer
+        // (stacked same-size layers); the descent follows only one of them.
+        var alternates: [(el: AXUIElement, depth: Int, frame: CGRect)] = []
         stats.guidedBound = maxDepth
 
         // 1) Guided descent: at each level choose the smallest child containing the pointer.
@@ -1569,12 +1604,19 @@ final class AccessibilityResolver: @unchecked Sendable {
             // both contain the pointer; the tightest frame is the inner control.
             var best: AXUIElement?
             var bestArea = CGFloat.greatestFiniteMagnitude
+            var containing: [(el: AXUIElement, frame: CGRect)] = []
             for kid in kids {
                 guard let r = frame(kid), r.width > 0, r.height > 0, r.contains(pointer) else { continue }
+                containing.append((kid, r))
                 let area = r.width * r.height
                 if area < bestArea {
                     bestArea = area
                     best = kid
+                }
+            }
+            if containing.count > 1, let chosen = best {
+                for c in containing where !CFEqual(c.el, chosen) && alternates.count < 64 {
+                    alternates.append((c.el, depth + 1, c.frame))
                 }
             }
             guard let next = best else {
@@ -1618,6 +1660,30 @@ final class AccessibilityResolver: @unchecked Sendable {
             }
             budget -= min(budget, 160) - rescue
             log("PWIN_RESCUE siblings=\(siblings.count) depth=\(depth) spent=\(rescueStart - rescue) reason=\(stats.guidedFallbackReason ?? "-")")
+        }
+
+        // 2b) Alternate-layer rescue: the descent died (no containing child / leaf)
+        // after choosing ONE of several stacked containing children (video
+        // players: same-size art-video / art-mask / art-bottom layers). Walk the
+        // unchosen near alternates, deepest level first, within their own bound.
+        if stats.guidedFallbackReason == "no-containing-child" || stats.guidedFallbackReason == "leaf",
+           !alternates.isEmpty, budget > 0, CACurrentMediaTime() < deadline {
+            let near = CGRect(x: pointer.x, y: pointer.y, width: 0, height: 0)
+                .insetBy(dx: -Self.pointerRescueNearRadius, dy: -Self.pointerRescueNearRadius)
+            let entries = alternates.enumerated().map {
+                GuidedAlternates.Entry(index: $0.offset, depth: $0.element.depth, frame: $0.element.frame)
+            }
+            var rescue = min(budget, Self.guidedAlternatesBudget)
+            let rescueStart = rescue
+            let picked = GuidedAlternates.ordered(entries, near: near, limit: Self.guidedAlternatesLimit)
+            for entry in picked where rescue > 0 {
+                let alt = alternates[entry.index]
+                walk(alt.el, depth: alt.depth, out: &out, budget: &rescue, deadline: deadline,
+                     screenUnion: screenUnion, appElement: appElement, pid: pid,
+                     maxDepth: maxDepth, stats: &stats)
+            }
+            budget -= rescueStart - rescue
+            log("PWIN_RESCUE alternates=\(picked.count)/\(alternates.count) spent=\(rescueStart - rescue) reason=\(stats.guidedFallbackReason ?? "-")")
         }
 
         // 3) Bounded subtree walk from the deepest node, unchanged width: the same
