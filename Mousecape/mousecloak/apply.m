@@ -16,6 +16,7 @@
 #import "outerGlow.h"
 #import "outerShadow.h"
 #import "scale.h"
+#import "edgeVector.h"
 #import <unistd.h>
 #import <pthread.h>
 #import <math.h>
@@ -328,8 +329,17 @@ static CIContext *MCSharedCIContext() {
 // Upscale + sharpen using Core Image for high quality.
 // Uses Lanczos resampling (much sharper than bicubic) + CISharpenLuminance
 // for perceptual edge enhancement. Falls back to CGContext if CIImage fails.
+// Hard-edged art is re-rendered from a traced vector silhouette (edgeVector.m)
+// instead of being resampled, so edges stay sharp at any zoom.
+static const CGFloat kMCVectorMinScale = 1.2;  // below this the raster path is fine
+
 static CGImageRef _Nullable MCUpscaleAndSharpen(CGImageRef original, NSUInteger targetW, NSUInteger targetH, CGFloat sharpness) {
     @autoreleasepool {
+        if ((CGFloat)targetW / (CGFloat)CGImageGetWidth(original) >= kMCVectorMinScale && MCImageHasHardEdges(original)) {
+            CGImageRef vec = MCVectorUpscaleHardEdges(original, targetW, targetH);
+            if (vec) return vec;
+            MMLog("  Vector upscale failed; falling back to raster Lanczos");
+        }
         CIImage *ciImg = [CIImage imageWithCGImage:original];
         if (!ciImg) return NULL;
 
@@ -346,11 +356,14 @@ static CGImageRef _Nullable MCUpscaleAndSharpen(CGImageRef original, NSUInteger 
 
         // Sharpen luminance — perceptual edge enhancement
         if (sharpness > 0.01) {
+            // Sharpen straight (un-premultiplied) colour so anti-aliased edge
+            // pixels are not brightened/darkened into a halo; Lanczos above stays
+            // premultiplied, which is the correct space for interpolation.
             CIFilter *sharpen = [CIFilter filterWithName:@"CISharpenLuminance"];
             [sharpen setDefaults];
-            [sharpen setValue:scaled forKey:kCIInputImageKey];
+            [sharpen setValue:[scaled imageByUnpremultiplyingAlpha] forKey:kCIInputImageKey];
             [sharpen setValue:@(sharpness) forKey:@"inputSharpness"];
-            scaled = sharpen.outputImage;
+            scaled = [sharpen.outputImage imageByPremultiplyingAlpha];
         }
 
         // Render to CGImage (release CGColorSpace to avoid leak)
@@ -509,7 +522,15 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
               (unsigned long)srcPixels, (unsigned long)minNeededPixels,
               (unsigned long)minNeededLinear, effectiveSize.width, effectiveSize.height, customRatio);
 
-        if (srcPixels < minNeededPixels) {
+        // A source that already covers the on-screen pixel size (2 px/pt) needs no
+        // resample here: the system downsamples it, which is sharper than an extra
+        // Lanczos+sharpen pass that only adds ringing on hard edges.
+        // Animated cursors are a vertical strip of frames: compare per-frame height.
+        NSUInteger frames = MAX(1, frameCount.unsignedIntegerValue);
+        NSUInteger srcLinear = fmax(bestRep.pixelsWide, bestRep.pixelsHigh / frames);
+        BOOL coversDisplay = srcLinear >= (NSUInteger)ceil(maxNeededPt * 2.0);
+
+        if (srcPixels < minNeededPixels && !coversDisplay) {
             NSUInteger targetPixelCount = minNeededPixels;
 
             if (targetPixelCount > srcPixels) {
