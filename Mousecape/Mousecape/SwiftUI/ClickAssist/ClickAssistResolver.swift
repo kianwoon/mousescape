@@ -783,16 +783,29 @@ final class AccessibilityResolver: @unchecked Sendable {
         // (live: seed and hit-window cycles alternate, so a click often lands
         // right after a seed cycle). None and ax-contain keep the default: focused.
         var pointerWindowFocused = true
-        if pwinMode == "confirmed-seed", let last = lastWindowFocus,
-           last.pid == pid, last.pointerGeneration == pointerGeneration {
-            pointerWindowFocused = last.focused
+        var windowFocusFacts = "std=-1 read=-1"
+        // The window to judge focus on: the walked one, or for a seed cycle with
+        // no remembered answer (pointer just arrived on the control) one live
+        // hit-test, so the first click after arriving is not judged "focused" blind.
+        var focusWindow: AXUIElement? = pwin
+        var focusMode = pwinMode
+        if pwinMode == "confirmed-seed" {
+            if let last = lastWindowFocus, last.pid == pid, last.pointerGeneration == pointerGeneration {
+                pointerWindowFocused = last.focused
+                focusWindow = nil
+            } else {
+                let live = windowUnderPointer(windows: windows, pointer: pointer, ownerPid: pid)
+                focusWindow = live.window
+                focusMode = live.mode
+            }
         }
-        if let pwin, pwinMode == "hit-window" {
-            let isStandard = (attr(pwin, kAXSubroleAttribute) as? String) == (kAXStandardWindowSubrole as String)
+        if let focusWindow, focusMode == "hit-window" {
+            let isStandard = (attr(focusWindow, kAXSubroleAttribute) as? String) == (kAXStandardWindowSubrole as String)
             let focusedMatches = attr(appEl, kAXFocusedWindowAttribute)
-                .flatMap(axElement).map { CFEqual($0, pwin) }
-            pointerWindowFocused = GeometryPolicy.pointerWindowFocused(mode: pwinMode,
+                .flatMap(axElement).map { CFEqual($0, focusWindow) }
+            pointerWindowFocused = GeometryPolicy.pointerWindowFocused(mode: focusMode,
                 isStandardWindow: isStandard, focusedMatches: focusedMatches)
+            windowFocusFacts = "std=\(isStandard ? 1 : 0) read=\(focusedMatches.map { $0 ? 1 : 0 } ?? -1)"
             lastWindowFocus = (pid, pointerGeneration, pointerWindowFocused)
         }
         pointerWindowTag = (pwinMode == "hit-window" ? pwin : nil).map { Int(bitPattern: CFHash($0)) } ?? 0
@@ -1076,7 +1089,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         let rej = rejCounts.isEmpty ? "-"
             : rejCounts.sorted { $0.key < $1.key }
                 .map { "\($0.key):\($0.value)" }.joined(separator: ",")
-        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d wins=%d win_ms=%.1f probe_ms=%.1f targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d tileTooSmall=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@ winFocused=%d otherWindowDropped=%d",
+        log(String(format: "RESOLVER_PUBLISH gen=%llu app=\"%@\" pid=%d wins=%d win_ms=%.1f probe_ms=%.1f targets=%d newTargets=%d nearPointer=%d nodes=%d seed=%d droppedExpired=%d resolver_ms=%.2f partial=%d trunc=%@ slice=%d coverage=%d pwin=%d pwinNodes=%d pwinDepth=%d pwinDepthCapped=%d pwinGuidedBound=%d pwinGuided=%d pwinGuidedSteps=%d pwinGuidedHits=%d pwinFallback=%d pwinFallbackReason=%@ rotationSkipped=%d tileTooSmall=%d tileTooWide=%d deduped=%d partialNoRenew=%d rej=%@ pwinMode=%@ pidSrc=%@ winFocused=%d otherWindowDropped=%d winFacts=%@",
                    gen, appName, pid, cycleWindowBounds.count, cycleWindowMs, cycleProbeMs, out.count, newCount, near, visited,
                    seedHit ? 1 : 0, droppedExpired, ms, partial ? 1 : 0,
                    trunc as NSString, sliceId, coverageKeys.count,
@@ -1089,7 +1102,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                    rotationSkipped ? 1 : 0,
                    tileTooSmall, tileTooWide, dedupedCount, partialNoRenew, rej as NSString,
                    pwinMode as NSString,
-                   pidSrc as NSString, pointerWindowFocused ? 1 : 0, otherWindowDropped))
+                   pidSrc as NSString, pointerWindowFocused ? 1 : 0, otherWindowDropped, windowFocusFacts as NSString))
 
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
