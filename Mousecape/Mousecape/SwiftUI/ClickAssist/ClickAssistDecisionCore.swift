@@ -470,6 +470,7 @@ enum FrameContinuity {
 /// mid-gesture recomputation impossible: drags and the up apply this value
 /// verbatim regardless of snapshot, target or resolver changes.
 struct GestureLatch: Sendable {
+    var originalDown: CGPoint = .zero
     let delta: CGVector
     let target: String
     let snap: DecisionCore.Snap
