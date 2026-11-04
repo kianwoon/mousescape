@@ -58,6 +58,19 @@ final class ClickAssistNativeRowTests: XCTestCase {
         XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: "AXSlider",
             down: .zero, current: CGPoint(x: 0.2, y: 0.3)))
     }
+    func testOrdinaryClickJitterDoesNotCancelButRealDragsRemainNative() {
+        for role in ["AXButton", "AXLink", "AXCheckBox"] {
+            XCTAssertTrue(BackgroundClickPolicy.isClickPointerNoise(role: role,
+                down: CGPoint(x: 1098.4, y: 507.3), current: CGPoint(x: 1098.4, y: 507.1)))
+            XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: role,
+                down: .zero, current: CGPoint(x: 2.1, y: 0)))
+        }
+        for role in ["AXSlider", "AXTextField", "AXMenuItem", "AXMenuBarItem", "AXRadioButton"] {
+            XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: role,
+                down: .zero, current: CGPoint(x: 0.1, y: 0)))
+        }
+    }
+
     func testBackgroundButtonClickIgnoresSubPointTremor() {
         // Live log 2026-11-02: a 0.1 pt leftMouseDragged between down and up
         // released the captured background click, so the app only activated.

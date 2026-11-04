@@ -568,7 +568,10 @@ enum BackgroundClickPolicy {
     /// native routing, which only activates the background window (the user
     /// must click again). Track controls keep every drag: movement is intent.
     static func isClickPointerNoise(role: String, down: CGPoint, current: CGPoint) -> Bool {
+        // Track controls and position-sensitive roles (sliders, text fields,
+        // menu items, radios...) keep every drag: movement is intent there.
         !GeometryPolicy.trackRoles.contains(role)
+            && (GeometryPolicy.usesNativeRowAction(role) || !DecisionCore.positionSensitiveRoles.contains(role))
             && hypot(current.x - down.x, current.y - down.y) <= ClickAssistEvidence.pointerMoveEpsilon
     }
     static func matches(_ click: BackgroundClickWire, rect: CGRect) -> Bool {
