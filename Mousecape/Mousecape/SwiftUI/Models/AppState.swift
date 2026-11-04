@@ -312,12 +312,11 @@ final class AppState: @unchecked Sendable {
             perCursorScales = dict
         }
 
-        // Update value (remove if 1.0 to keep dict clean)
-        if abs(scale - 1.0) < 0.01 {
-            perCursorScales.removeValue(forKey: identifier)
-        } else {
-            perCursorScales[identifier] = scale
-        }
+        // Always store the scale — including 1.0. Keeping the 1.0 entry lets the
+        // Helper's diff update revert a previously-scaled non-cape cursor (e.g. the
+        // Pointing hand) back to native size; if we removed the key, the Helper
+        // would have no record that the cursor needs restoring and it would stay big.
+        perCursorScales[identifier] = scale
 
         // Save
         CFPreferencesSetAppValue(
@@ -617,14 +616,16 @@ final class AppState: @unchecked Sendable {
         }
         let capeDict = capeDictNS as! [AnyHashable: Any]
 
-        // Standard in-process apply. On macOS 27 a very large cursor will render in
-        // software (blinks while moving) until the next login session — that is an OS
-        // session-level limitation we cannot change from here. Normal-size cursors are
-        // unaffected, and large cursors render solid after logging out and back in.
-        let success = applyCapeWithoutReset(capeDict)
+        // macOS 27 DIFF apply: lightweight, compositor-preserving.
+        //  • Cape cursors (incl. the giant Arrow) registered in place → smooth (no
+        //    teardown that would knock the big cursor off the compositor).
+        //  • Scaled NON-cape cursors (Pointing, etc.) re-registered in place too, so
+        //    their scale takes effect — without rebuilding all ~50 system defaults.
+        // This keeps both cape and non-cape scaling working without the blink.
+        let success = applyCapeLight(capeDict)
 
         if !success {
-            debugLog("Apply failed - applyCapeWithoutReset returned false")
+            debugLog("Apply failed - applyCapeLight returned false")
             operationResultMessage = String(localized: "Failed to apply cape.")
             operationResultIsSuccess = false
             showOperationResult = true
@@ -634,39 +635,17 @@ final class AppState: @unchecked Sendable {
         appliedCape = cape
         showToastNotification("\"\(cape.name)\" \(String(localized: "applied successfully."))")
 
-        debugLog("Apply completed, saving preferences...")
+        debugLog("Apply completed (diff), saving preferences...")
         UserDefaults.standard.set(cape.identifier, forKey: "lastAppliedCapeIdentifier")
-
-        // macOS 27 fix: re-engage the accessibility cursor compositor.
-        reengageAccessibilityCursor()
-    }
-
-    /// macOS 27: when a cape is registered on a running login session, the cursor
-    /// drops out of the accessibility cursor compositor (run by `universalaccessd`).
-    /// A large cursor then renders in software and **blinks while moving**. Restarting
-    /// `universalaccessd` makes it re-engage the compositor on the just-applied cape,
-    /// so even very large cursors render smoothly — live, no logout, no size cap.
-    /// (This is what dragging System Settings → Accessibility → Pointer size does
-    /// under the hood; we trigger the same re-engage automatically.)
-    private func reengageAccessibilityCursor() {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
-        task.arguments = ["universalaccessd"]   // user agent; launchd relaunches it (~1s)
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            debugLog("Re-engaged accessibility cursor compositor (restarted universalaccessd)")
-        } catch {
-            debugLog("reengageAccessibilityCursor failed: \(error.localizedDescription)")
-        }
     }
 
     /// Reset to default system cursors
     func resetToDefault() {
         debugLog("=== Resetting to Default Cursors ===")
 
-        libraryController?.restoreCape()
+        // Call resetAllCursors() DIRECTLY, not via libraryController — the controller
+        // is set to nil when the window closes, which made reset a silent no-op.
+        resetAllCursors()
         appliedCape = nil
 
         debugLog("Reset completed, clearing preferences...")

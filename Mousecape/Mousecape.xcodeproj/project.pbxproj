@@ -83,6 +83,9 @@
 		D3E4F5A6B7C8D9E0F1A2B3C4 /* outerGlow.m in Sources */ = {isa = PBXBuildFile; fileRef = E4F5A6B7C8D9E0F1A2B3C4D5 /* outerGlow.m */; };
 		C2D3E4F5A6B7C8D9E0F1A2B3 /* outerGlow.m in Sources */ = {isa = PBXBuildFile; fileRef = E4F5A6B7C8D9E0F1A2B3C4D5 /* outerGlow.m */; };
 		A1B2C3D4E5F6789ABCDEF012 /* outerGlow.m in Sources */ = {isa = PBXBuildFile; fileRef = E4F5A6B7C8D9E0F1A2B3C4D5 /* outerGlow.m */; };
+		FA00000000000000000000C3 /* outerShadow.m in Sources */ = {isa = PBXBuildFile; fileRef = FA00000000000000000000F1 /* outerShadow.m */; };
+		FA00000000000000000000A1 /* outerShadow.m in Sources */ = {isa = PBXBuildFile; fileRef = FA00000000000000000000F1 /* outerShadow.m */; };
+		FA00000000000000000000B2 /* outerShadow.m in Sources */ = {isa = PBXBuildFile; fileRef = FA00000000000000000000F1 /* outerShadow.m */; };
 		FAAEF958189F4F8200145DF8 /* scale.m in Sources */ = {isa = PBXBuildFile; fileRef = FAAEF956189F4ED300145DF8 /* scale.m */; };
 		FABA44D421D9D7D0009B10D9 /* NSBitmapImageRep+ColorSpace.m in Sources */ = {isa = PBXBuildFile; fileRef = FABA44D321D9D7D0009B10D9 /* NSBitmapImageRep+ColorSpace.m */; };
 		FABA44D521D9D947009B10D9 /* NSBitmapImageRep+ColorSpace.m in Sources */ = {isa = PBXBuildFile; fileRef = FABA44D321D9D7D0009B10D9 /* NSBitmapImageRep+ColorSpace.m */; };
@@ -199,6 +202,8 @@
 		FA8FF770189D66D800750E51 /* apply.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = apply.m; sourceTree = "<group>"; };
 		1C0A58B5D987469C80FCB4DD /* innerShadow.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = innerShadow.m; sourceTree = "<group>"; };
 		E4F5A6B7C8D9E0F1A2B3C4D5 /* outerGlow.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = outerGlow.m; sourceTree = "<group>"; };
+		FA00000000000000000000F1 /* outerShadow.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = outerShadow.m; sourceTree = "<group>"; };
+		FA00000000000000000000F2 /* outerShadow.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = outerShadow.h; sourceTree = "<group>"; };
 		FA8FF772189D67AA00750E51 /* create.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = create.h; sourceTree = "<group>"; };
 		FA8FF773189D67B100750E51 /* create.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = create.m; sourceTree = "<group>"; };
 		FAAEF8F6189EB34700145DF8 /* QuartzCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = QuartzCore.framework; path = System/Library/Frameworks/QuartzCore.framework; sourceTree = SDKROOT; };
@@ -472,6 +477,8 @@
 				CF122E4B298E5744EE9F0578 /* mousecloak-Bridging-Header.h */,
 			1C0A58B5D987469C80FCB4DD /* innerShadow.m */,
 			E4F5A6B7C8D9E0F1A2B3C4D5 /* outerGlow.m */,
+			FA00000000000000000000F1 /* outerShadow.m */,
+			FA00000000000000000000F2 /* outerShadow.h */,
 			);
 			path = mousecloak;
 			sourceTree = "<group>";
@@ -670,6 +677,7 @@
 				DE2E174E2F5B2BB000055E78 /* listen.m in Sources */,
 				A1B2C3D4E5F6A7B8C9D0E1F2 /* innerShadow.m in Sources */,
 				C2D3E4F5A6B7C8D9E0F1A2B3 /* outerGlow.m in Sources */,
+				FA00000000000000000000A1 /* outerShadow.m in Sources */,
 			);
 		};
 		FAC69F5D189D603C00BC829D /* Sources */ = {
@@ -712,6 +720,7 @@
 				DE36620A2EFAAAB600D94521 /* AppEnums.swift in Sources */,
 				B2C3D4E5F6A7B8C9D0E1F2A4 /* innerShadow.m in Sources */,
 				A1B2C3D4E5F6789ABCDEF012 /* outerGlow.m in Sources */,
+				FA00000000000000000000B2 /* outerShadow.m in Sources */,
 				FAC69FDC189D636700BC829D /* MCDefs.m in Sources */,
 				DEBC96042F165800004E6C07 /* MCLogger.m in Sources */,
 				FA359840189DA3C100288163 /* MCPrefs.m in Sources */,
@@ -734,6 +743,7 @@
 				9CB312EE7052700D9F29C682 /* main.swift in Sources */,
 				9C68EEBB9D4B4A07BDCB9DF4 /* innerShadow.m in Sources */,
 				D3E4F5A6B7C8D9E0F1A2B3C4 /* outerGlow.m in Sources */,
+				FA00000000000000000000C3 /* outerShadow.m in Sources */,
 			);
 		};
 /* End PBXSourcesBuildPhase section */

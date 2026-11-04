@@ -25,6 +25,7 @@ final class UserPreferences: @unchecked Sendable {
         static let handedness = "MCHandedness"
         static let innerShadow = "MCInnerShadow"
         static let outerGlow = "MCOuterGlow"
+        static let outerShadow = "MCOuterShadow"
         static let scaleMode = "MCScaleMode"
         static let perCursorScales = "MCPerCursorScales"
     }

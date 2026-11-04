@@ -20,6 +20,7 @@ extern NSString *MCPreferencesCursorScaleKey;
 extern NSString *MCPreferencesHandednessKey;
 extern NSString *MCPreferencesInnerShadowKey;
 extern NSString *MCPreferencesOuterGlowKey;
+extern NSString *MCPreferencesOuterShadowKey;
 extern NSString *MCPreferencesScaleModeKey;
 extern NSString *MCPreferencesPerCursorScalesKey;
 extern id _Nullable MCDefaultFor(NSString *key, NSString *user, NSString *host);

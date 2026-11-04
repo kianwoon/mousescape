@@ -66,17 +66,27 @@ void resetAllCursors(void) {
 
     // Restore auxiliary/core cursors
     MMLog("--- Restoring core cursors ---");
+    // Always clear the applied-cape preference, even if CoreCursorUnregisterAll
+    // reports an error — otherwise reset leaves the cape "applied" and the Helper
+    // re-applies it on the next event. Use an explicit synchronized write so the
+    // removal is immediately visible to other processes (MCSetDefault doesn't sync).
+    CFPreferencesSetValue((__bridge CFStringRef)MCPreferencesAppliedCursorKey, NULL,
+                          (__bridge CFStringRef)kMCDomain,
+                          kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    CFPreferencesSynchronize((__bridge CFStringRef)kMCDomain,
+                             kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    NSLog(@"[MousecapeHelper] resetAllCursors: cleared MCAppliedCursor");
+
     CGError err = CoreCursorUnregisterAll(CGSMainConnectionID());
-    MMLog("CoreCursorUnregisterAll result: %d", err);
+    NSLog(@"[MousecapeHelper] resetAllCursors: CoreCursorUnregisterAll result=%d", (int)err);
 
     if (err == 0) {
-        MCSetDefault(NULL, MCPreferencesAppliedCursorKey);
         for (int x = 0; x < 45; x++) {
             CoreCursorSet(CGSMainConnectionID(), x);
         }
-        MMLog(BOLD GREEN "Successfully restored all cursors." RESET);
+        NSLog(@"[MousecapeHelper] resetAllCursors: restored %d core cursors", 45);
     } else {
-        MMLog(BOLD RED "Received an error while restoring core cursors." RESET);
+        NSLog(@"[MousecapeHelper] resetAllCursors: error restoring core cursors (err=%d)", (int)err);
     }
 
     // Restore original scale settings

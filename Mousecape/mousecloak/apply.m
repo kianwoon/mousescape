@@ -14,6 +14,7 @@
 #import "MCDefs.h"
 #import "innerShadow.h"
 #import "outerGlow.h"
+#import "outerShadow.h"
 #import "scale.h"
 #import <unistd.h>
 #import <math.h>
@@ -62,6 +63,20 @@ double MCSecondsSinceLastApply(void) {
     return CFAbsoluteTimeGetCurrent() - last;
 }
 
+// Record which cape is applied WITHOUT registering cursors in this process, and post
+// the Darwin notification the Helper listens for. Used by the foreground app to
+// DELEGATE the actual apply to the background Helper: on macOS 27 the Helper's apply
+// (a background agent, the same path that works at login) renders large cursors,
+// whereas the foreground app's in-process registration does not. MCSetDefault posts
+// com.sdmj76.Mousecape.preferencesChanged, which the Helper observes and re-applies.
+void persistAppliedCape(NSString *identifier) {
+    if (!identifier || identifier.length == 0) {
+        MMLog(BOLD RED "persistAppliedCape: empty identifier" RESET);
+        return;
+    }
+    MCSetDefault(identifier, MCPreferencesAppliedCursorKey);
+}
+
 // Re-engage the macOS accessibility cursor compositor by restarting universalaccessd.
 // On macOS 27, registering a cape on a running session detaches the cursor from the
 // accessibility cursor compositor (run by universalaccessd); a large cursor then
@@ -72,14 +87,26 @@ double MCSecondsSinceLastApply(void) {
 // after an in-app apply). Same effect as nudging Accessibility → Pointer size.
 void reengageAccessibilityCursor(void) {
     @try {
+        // The apply forces the live cursor scale to 1.0, which disengages the macOS
+        // accessibility cursor compositor (the thing that actually renders a large
+        // cape cursor). Just restoring the scale value isn't enough — the compositor
+        // also has to re-establish its cursor/IOHID connection. Restarting
+        // universalaccessd does the full re-engage (re-reads pointer size + rebuilds
+        // the connection), which makes the big cursor render again.
+        //
+        // Use `launchctl kickstart -k`, NOT `killall`: killall lets launchd respawn the
+        // daemon but launchd THROTTLES respawns to ~10s after the first, so rapid
+        // re-applies would leave the cursor broken on the 3rd+ apply. kickstart
+        // force-restarts immediately every time (~1s, verified), bypassing the throttle.
+        NSString *target = [NSString stringWithFormat:@"gui/%u/com.apple.universalaccessd", getuid()];
         NSTask *task = [[NSTask alloc] init];
-        task.executableURL = [NSURL fileURLWithPath:@"/usr/bin/killall"];
-        task.arguments = @[@"universalaccessd"];
+        task.executableURL = [NSURL fileURLWithPath:@"/bin/launchctl"];
+        task.arguments = @[@"kickstart", @"-k", target];
         task.standardOutput = [NSFileHandle fileHandleWithNullDevice];
         task.standardError = [NSFileHandle fileHandleWithNullDevice];
         NSError *err = nil;
         [task launchAndReturnError:&err];
-        NSLog(@"[MousecapeHelper] reengageAccessibilityCursor: restarted universalaccessd%@",
+        NSLog(@"[MousecapeHelper] reengageAccessibilityCursor: kickstarted universalaccessd%@",
               err ? [NSString stringWithFormat:@" (error: %@)", err.localizedDescription] : @"");
     } @catch (NSException *e) {
         NSLog(@"[MousecapeHelper] reengageAccessibilityCursor exception: %@", e.reason);
@@ -164,8 +191,13 @@ BOOL applyCursorForIdentifier(NSUInteger frameCount, CGFloat frameDuration, CGPo
     MMLog("  Identifier: %s", ident.UTF8String);
     MMLog("  Skip synonyms: %s", skipSynonyms ? "YES" : "NO");
 
-    if (frameCount > 24 || frameCount < 1) {
-        MMLog(BOLD RED "Frame count of %s out of range [1...24]", ident.UTF8String);
+    // macOS's own animated cursors exceed the old [1...24] cap (e.g. the busy
+    // "Wait" spinner is 30 frames), so that cap rejected legitimate system cursors
+    // and any cape with >24 frames. The frame count is just passed to
+    // CGSRegisterCursorWithImages (which slices one image strip), so a higher bound
+    // is memory-safe; 256 covers any realistic animation while still rejecting garbage.
+    if (frameCount > 256 || frameCount < 1) {
+        MMLog(BOLD RED "Frame count of %s out of range [1...256]", ident.UTF8String);
         return NO;
     }
 
@@ -270,6 +302,40 @@ BOOL applyCursorForIdentifier(NSUInteger frameCount, CGFloat frameDuration, CGPo
 // system built-in cursors (com.apple.cursor.*) are still readable via CoreCursorCopyImages.
 // Unlike capeWithIdentifier, this skips the MCIsCursorRegistered check and also
 // calls CoreCursorSet first to activate the cursor before reading (required by CoreCursorCopyImages).
+// Read an ALREADY-REGISTERED cursor's images PASSIVELY via CGSCopyRegisteredCursorImages
+// — NO CoreCursorSet (which activates cursors and disturbs the accessibility compositor /
+// the cape's giant cursor surface). Used by the non-cape diff path to re-scale a
+// system-default cursor in place without blinking the cape. Normalizes to a native 32×32
+// base so the per-cursor ratio scales from native size (avoids compounding off an
+// already-scaled registration).
+static NSDictionary * _Nullable registeredCursorData(NSString *identifier) {
+    NSUInteger frameCount = 1;
+    CGFloat frameDuration = 0;
+    CGPoint hotSpot = CGPointZero;
+    CGSize size = CGSizeZero;
+    CFArrayRef reps = NULL;
+    CGError err = CGSCopyRegisteredCursorImages(CGSMainConnectionID(), (char *)identifier.UTF8String,
+                                                &size, &hotSpot, &frameCount, &frameDuration, &reps);
+    if (err || !reps || !CFArrayGetCount(reps)) {
+        if (reps) CFRelease(reps);
+        return nil;
+    }
+    if (size.width > 1.0 && size.height > 1.0) {
+        hotSpot = CGPointMake(hotSpot.x * (32.0 / size.width), hotSpot.y * (32.0 / size.height));
+    }
+    NSDictionary *dict = @{
+        MCCursorDictionaryFrameCountKey: @(frameCount),
+        MCCursorDictionaryFrameDuratiomKey: @(frameDuration),
+        MCCursorDictionaryHotSpotXKey: @(hotSpot.x),
+        MCCursorDictionaryHotSpotYKey: @(hotSpot.y),
+        MCCursorDictionaryPointsWideKey: @(32.0),
+        MCCursorDictionaryPointsHighKey: @(32.0),
+        MCCursorDictionaryRepresentationsKey: (__bridge NSArray *)reps
+    };
+    CFRelease(reps);
+    return dict;
+}
+
 static NSDictionary * _Nullable systemCapeWithIdentifier(NSString *identifier) {
     NSUInteger frameCount;
     CGFloat frameDuration;
@@ -412,8 +478,17 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
     }
 
     BOOL lefty = MCFlag(MCPreferencesHandednessKey);
-    BOOL innerShadow = MCFlag(MCPreferencesInnerShadowKey);
-    BOOL outerGlow = MCFlag(MCPreferencesOuterGlowKey);
+    // Effects (inner shadow / outer glow / outer shadow) apply ONLY to the cape's own
+    // cursors — never to system-default / non-cape cursors. Two reasons:
+    //   1. The non-cape diff path re-registers from registeredCursorData (its own prior
+    //      output), so applying an effect there compounds a growing halo every apply,
+    //      muddying those cursors and undoing their sharpness.
+    //   2. Effects are meant to style the cape design, not modify plain system cursors.
+    // Also skip during backup/restore so an effect is never baked into a saved cursor.
+    BOOL effectsAllowed = (!isSystemDefault && !restore);
+    BOOL innerShadow = effectsAllowed && MCFlag(MCPreferencesInnerShadowKey);
+    BOOL outerGlow = effectsAllowed && MCFlag(MCPreferencesOuterGlowKey);
+    BOOL outerShadow = effectsAllowed && MCFlag(MCPreferencesOuterShadowKey);
     BOOL pointer = MCCursorIsPointer(identifier);
     NSNumber *frameCount    = cursor[MCCursorDictionaryFrameCountKey];
     NSNumber *frameDuration = cursor[MCCursorDictionaryFrameDuratiomKey];
@@ -506,8 +581,8 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
     CGFloat customRatio = 1.0;
     if (customScaleMode) {
         NSDictionary *perCursorScales = MCDefault(MCPreferencesPerCursorScalesKey);
-        MMLog("SCALE DEBUG per-cursor %s: perCursorScales=%@, customMode=YES, skipSynonyms=%s",
-              identifier.UTF8String, perCursorScales, skipSynonyms ? "YES" : "NO");
+        MMLog("SCALE DEBUG per-cursor %s: perCursorScales=%s, customMode=YES, skipSynonyms=%s",
+              identifier.UTF8String, perCursorScales.description.UTF8String, skipSynonyms ? "YES" : "NO");
         float desiredScale = [perCursorScales[identifier] floatValue];
         if (desiredScale <= 0.0f) desiredScale = 1.0f;
 
@@ -536,6 +611,14 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
         // registration size (after custom scaling).  On Retina (2x), a cursor
         // registered at S pt needs S*2 pixels per dimension.  Add 1.5x safety.
         // We work in LINEAR pixels first, then square for the area comparison.
+        //
+        // NOTE: the 2048 floor is deliberately aggressive. It guarantees EVERY
+        // cursor goes through the Lanczos upscale + CISharpenLuminance pass and is
+        // registered with generous downsampling headroom — which is what makes
+        // scaled cursors (incl. low-detail system/non-cape cursors) look crisp.
+        // A displayed-size-based target was tried (2026-06-23) to save memory but
+        // it SKIPS the upscale+sharpen when src≥target, making non-cape cursors look
+        // softer — user-visible regression — so it was reverted. Sharpness > memory.
         CGFloat maxNeededPt = fmax(effectiveSize.width, effectiveSize.height);
         NSUInteger minNeededLinear = (NSUInteger)(maxNeededPt * 2.0 * 1.5);
         if (minNeededLinear < 2048) minNeededLinear = 2048;
@@ -593,14 +676,20 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
         images = processed;
     }
 
-    // Apply outer glow effect if enabled
+    // Apply outer glow effect if enabled. Radius is proportional to each image's size
+    // (like the outer shadow) so the halo looks consistent across cursor scales —
+    // effects run on the already-upscaled image, so a fixed px radius is relatively
+    // huge on a small cursor and thin on a large one. (Scoped to cape cursors above.)
     if (outerGlow && images.count > 0) {
-        float radius = 40.0f;
-        float intensity = 0.7f;
-        MMLog("Applying outer glow effect (radius=%.1f, intensity=%.1f)", radius, intensity);
+        float intensity = 0.55f;
+        MMLog("Applying outer glow effect (tight proportional radius ~0.6%%, intensity=%.2f)", intensity);
         NSMutableArray *processed = [NSMutableArray arrayWithCapacity:images.count];
         for (id imgObj in images) {
             CGImageRef original = (__bridge CGImageRef)imgObj;
+            // Tight radius (~0.6%) so the halo hugs the silhouette instead of pooling
+            // into a bright blob at sharp tips / thin line-art (a larger radius wraps
+            // the whole arrowhead point in glow). Matches the outer shadow's tightness.
+            float radius = (float)fmax(2.0, CGImageGetWidth(original) * 0.006);
             CGImageRef glowing = MCApplyOuterGlow(original, radius, intensity);
             [processed addObject:(__bridge id)(glowing ?: original)];
             if (glowing) CGImageRelease(glowing);
@@ -608,11 +697,31 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
         images = processed;
     }
 
+    // Apply outer shadow effect if enabled. This is a SYMMETRIC dark outline (offset 0),
+    // not a one-sided drop shadow. A directional cast hides behind shapes that extend in
+    // the cast direction (e.g. an arrow whose body trails down-right) and shows nothing at
+    // a sharp tip. A symmetric soft-dark edge instead darkens EVERY contour — including the
+    // tip — so the cursor looks raised regardless of cape geometry. Radius is small (~0.6%)
+    // and proportional so it hugs the silhouette (incl. thin line-art) instead of smearing.
+    if (outerShadow && images.count > 0) {
+        MMLog("Applying outer shadow effect (symmetric dark outline, intensity=0.6)");
+        NSMutableArray *processed = [NSMutableArray arrayWithCapacity:images.count];
+        for (id imgObj in images) {
+            CGImageRef original = (__bridge CGImageRef)imgObj;
+            CGFloat w = (CGFloat)CGImageGetWidth(original);
+            float radius = (float)fmax(2.0, w * 0.006);  // ~0.6% — tight soft edge, hugs the shape
+            CGImageRef shadowed = MCApplyOuterShadow(original, radius, 0.6f, 0.0f, 0.0f);  // offset 0 = symmetric
+            [processed addObject:(__bridge id)(shadowed ?: original)];
+            if (shadowed) CGImageRelease(shadowed);
+        }
+        images = processed;
+    }
+
     // Per-cursor custom scaling
     if (customScaleMode) {
         NSDictionary *perCursorScales = MCDefault(MCPreferencesPerCursorScalesKey);
-        MMLog("SCALE DEBUG per-cursor %s: perCursorScales=%@, customMode=YES, skipSynonyms=%s",
-              identifier.UTF8String, perCursorScales, skipSynonyms ? "YES" : "NO");
+        MMLog("SCALE DEBUG per-cursor %s: perCursorScales=%s, customMode=YES, skipSynonyms=%s",
+              identifier.UTF8String, perCursorScales.description.UTF8String, skipSynonyms ? "YES" : "NO");
         float desiredScale = [perCursorScales[identifier] floatValue];
         if (desiredScale <= 0.0f) desiredScale = 1.0f;
 
@@ -825,6 +934,144 @@ BOOL applyCape(NSDictionary *dictionary) {
     }
 }
 
+// Lightweight RE-APPLY for a running session (macOS 27 compositor-preserving).
+//
+// applyCapeWithoutReset() does a full rebuild every time: CoreCursorUnregisterAll +
+// re-extract & re-register ~50 system defaults + toggle the global cursor scale
+// (1.0→8.0→savedScale). On macOS 27 that whole teardown DISENGAGES the accessibility
+// cursor compositor, so a large cape cursor stops being painted (invisible/blinks).
+//
+// When we're just re-applying a cape on a running session (the system defaults are
+// already registered by the login/full apply), none of that teardown is needed.
+// This path:
+//   • does NOT call CoreCursorUnregisterAll  (keeps the compositor's bindings)
+//   • does NOT re-extract / re-register system defaults
+//   • does NOT toggle the scale to 1.0/8.0
+//   • registers ONLY the cape's own cursors in place
+//   • leaves the global cursor scale at the user's accessibility pointer size, so the
+//     compositor stays engaged and keeps painting large cursors
+BOOL applyCapeLight(NSDictionary *dictionary) {
+    if (g_refreshingSystemDefaults) {
+        MMLog(YELLOW "applyCapeLight: another apply/refresh in progress, skipping" RESET);
+        return NO;
+    }
+    g_refreshingSystemDefaults = YES;
+    MCStampApplyTime();
+
+    @try {
+    @autoreleasepool {
+        NSDictionary *cursors = dictionary[MCCursorDictionaryCursorsKey];
+        NSString *name = dictionary[MCCursorDictionaryCapeNameKey];
+
+        MMLog("========================================");
+        MMLog("=== APPLYING CAPE (light / compositor-preserving) ===");
+        MMLog("========================================");
+        MMLog("Cape name: %s", name.UTF8String);
+        MMLog("Total cursors: %lu", (unsigned long)cursors.count);
+
+        BOOL isCustomMode = customScaleMode();
+        float savedScale;
+        if (isCustomMode) {
+            savedScale = [MCDefault(@"MCCustomMaxScale") floatValue];
+            if (savedScale <= 0.0f) savedScale = 1.0f;
+        } else {
+            savedScale = [MCDefault(@"MCGlobalCursorScale") floatValue];
+            if (savedScale < 0.5f || savedScale > 96.0f) savedScale = 1.0f;
+        }
+        float baseScaleForRegistration = isCustomMode ? 1.0f : savedScale;
+
+        // Register ONLY the cape's own cursors, in place. No unregister, no scale
+        // toggle, no system-default re-registration.
+        NSUInteger successCount = 0, skippedCount = 0, failedCount = 0;
+        for (NSString *key in cursors) {
+            NSDictionary *cape = cursors[key];
+            NSArray *reps = cape[MCCursorDictionaryRepresentationsKey];
+            if (!reps || reps.count == 0) { skippedCount++; continue; }
+            if (applyCapeForIdentifier(cape, key, NO, isCustomMode, NO, NO, baseScaleForRegistration)) {
+                successCount++;
+            } else {
+                failedCount++;
+            }
+        }
+        MMLog("light apply: %lu applied, %lu skipped, %lu failed",
+              (unsigned long)successCount, (unsigned long)skippedCount, (unsigned long)failedCount);
+
+        if (successCount == 0) {
+            MMLog(BOLD RED "No cursors applied (light)!" RESET);
+            return NO;
+        }
+        MCSetDefault(dictionary[MCCursorDictionaryIdentifierKey], MCPreferencesAppliedCursorKey);
+
+        // DIFF UPDATE for NON-cape cursors: also re-register system-default cursors that
+        // the user gave a custom per-cursor scale (e.g. the Pointing hand, which has no
+        // cape image). The full apply rebuilds ALL ~50 system defaults (heavy, tears the
+        // compositor down → blinks the giant cape); here we touch ONLY the scaled non-cape
+        // cursors, in place, so their scale takes effect without disturbing the cape
+        // cursors' compositor surfaces. (Custom mode only — global mode scales uniformly.)
+        if (isCustomMode) {
+            NSDictionary *perCursorScales = MCDefault(MCPreferencesPerCursorScalesKey);
+            NSUInteger ncTotal = 0, ncReadFail = 0, ncOk = 0, ncRegFail = 0;
+            for (NSString *ident in perCursorScales) {
+                if (cursors[ident]) continue;            // cape cursor — handled above
+                float sc = [perCursorScales[ident] floatValue];
+                // Note: 1.0 is treated like any other scale — re-registering at ratio
+                // 1/baseScale shrinks the point-size so the global accessibility scale
+                // multiplies it back to native size. This is what reverts a cursor.
+                ncTotal++;
+                // Passive read (no CoreCursorSet) so we don't disturb the cape's
+                // compositor surface; already normalized to native 32×32 base.
+                NSDictionary *sysData = registeredCursorData(ident);
+                if (!sysData) {
+                    ncReadFail++;
+                    NSLog(@"[MousecapeHelper] diff: read FAILED for non-cape %@ (scale %.2f)", ident, sc);
+                    continue;
+                }
+                if (applyCapeForIdentifier(sysData, ident, NO, isCustomMode, YES, YES, baseScaleForRegistration)) {
+                    ncOk++;
+                } else {
+                    ncRegFail++;
+                    NSLog(@"[MousecapeHelper] diff: register FAILED for non-cape %@", ident);
+                }
+            }
+            NSLog(@"[MousecapeHelper] diff non-cape: %lu scaled, %lu rescaled, %lu readFail, %lu regFail",
+                  (unsigned long)ncTotal, (unsigned long)ncOk, (unsigned long)ncReadFail, (unsigned long)ncRegFail);
+        }
+
+        // Keep the accessibility cursor compositor engaged: set the global cursor scale
+        // to the user's accessibility pointer size (mouseDriverCursorSize). This both
+        // (a) avoids leaving the scale at 1.0 (which disengages the compositor) and
+        // (b) triggers the cursor to repaint with the just-registered images.
+        CFPreferencesAppSynchronize(CFSTR("com.apple.universalaccess"));
+        double sz = 0.0;
+        CFNumberRef ref = CFPreferencesCopyValue(CFSTR("mouseDriverCursorSize"),
+                                                 CFSTR("com.apple.universalaccess"),
+                                                 kCFPreferencesCurrentUser, kCFPreferencesAnyHost);
+        if (!ref) {
+            ref = CFPreferencesCopyValue(CFSTR("mouseDriverCursorSize"),
+                                         CFSTR("com.apple.universalaccess"),
+                                         kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+        }
+        if (ref) {
+            if (CFGetTypeID(ref) == CFNumberGetTypeID()) {
+                CFNumberGetValue((CFNumberRef)ref, kCFNumberDoubleType, &sz);
+            }
+            CFRelease(ref);
+        }
+        if (sz > 1.01) {
+            CGSSetCursorScale(CGSMainConnectionID(), (float)sz);
+            MMLog("light apply: kept compositor scale at accessibility size %.3f", sz);
+        }
+
+        MMLog(BOLD GREEN "Applied %s (light, success: %lu, skipped: %lu)" RESET,
+              name.UTF8String, (unsigned long)successCount, (unsigned long)skippedCount);
+        return YES;
+    }
+    } @finally {
+        MCStampApplyTime();
+        g_refreshingSystemDefaults = NO;
+    }
+}
+
 // Same as applyCape() but with a different strategy for running systems.
 // Instead of resetAllCursors() → CoreCursorUnregisterAll() → apply everything,
 // we: (1) unregister all to clear the WindowServer cache, (2) extract system
@@ -900,10 +1147,13 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         usleep(100000); // 100 ms
 
         // Step 2: Extract ALL system default cursors at a moderate scale.
-        // On a running system, extreme 64x extraction can degrade quality due to
-        // WindowServer's internal bitmap caching.  A moderate 8x extraction
-        // produces cleaner images, and the Lanczos upscaler in
-        // applyCapeForIdentifier handles the rest.
+        // VERIFIED (2026-06-23): boosting this beyond 8x does NOT increase non-cape
+        // cursor detail. At both 8x and 16x the system returns identical source sizes
+        // (e.g. cursor.30 = 352x352, others 384-512px) — macOS's built-in cursor
+        // assets cap at ~512px, so a higher boost just upscales the same blob at more
+        // cost (and 64x is known to degrade via the WindowServer bitmap cache). The
+        // practical ceiling: non-cape cursors stay crisp to ~5x; to exceed that, the
+        // cursor must be a cape cursor carrying its own high-res image.
         float extractScale = 8.0f;
         MMLog("--- Extracting system defaults at %.1fx ---", extractScale);
         CGSSetCursorScale(CGSMainConnectionID(), extractScale);
