@@ -100,6 +100,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var running = false
     private var loggedSecure: Set<String> = []
     private var loggedRowCapabilities: Set<String> = []
+    /// Per-cycle: enclosing AXScrollArea frames keyed by a row's parent (rows
+    /// of one list share it, so the ancestor walk runs once per list).
+    private var rowViewportsByParent: [AXUIElement: [CGRect]] = [:]
     /// Per-target last time the AX walk (or pointer seed) actually saw it. Used to
     /// keep a monotonic union across truncated walks.
     private var lastSeen: [String: CFTimeInterval] = [:]
@@ -688,6 +691,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         tileTooSmall = 0
         tileTooWide = 0
         rejCounts.removeAll()
+        rowViewportsByParent.removeAll()
         dedupedCount = 0
 
         // Per-pid union swap. This is now reached only on a LEGITIMATE switch
@@ -1494,6 +1498,30 @@ final class AccessibilityResolver: @unchecked Sendable {
             record(.containsControls)
             noteRejectedNearPointer(el, role: role)
             return false
+        }
+        // A row's AX frame keeps its scrolled-out extent: rows beneath an Open
+        // panel's button bar would otherwise outrank the visible controls.
+        if GeometryPolicy.rowRoles.contains(role) {
+            var viewports: [CGRect] = []
+            if let rawParent = attr(el, kAXParentAttribute), CFGetTypeID(rawParent) == AXUIElementGetTypeID() {
+                let parent = rawParent as! AXUIElement
+                if let cached = rowViewportsByParent[parent] {
+                    viewports = cached
+                } else {
+                    viewports = AXGeometry.scrollViewports(from: parent,
+                        maxDepth: GeometryPolicy.rowViewportAncestorDepth)
+                    rowViewportsByParent[parent] = viewports
+                }
+            }
+            if !GeometryPolicy.isVisibleInViewport(rect, viewports: viewports) {
+                record(.scrolledOut)
+                noteRejectedNearPointer(el, role: role)
+                let near = GeometryPolicy.rowViewportLogRadius
+                if rect.insetBy(dx: -near, dy: -near).contains(cyclePointer) {
+                    log("ROW_SCROLLED_OUT role=\(role) rect=\(rect) viewports=\(viewports)")
+                }
+                return false
+            }
         }
         // A press group is published as a group, not as a container role.
         let admittedRole = nativeSelectableRow ? "AXSelectableRow"

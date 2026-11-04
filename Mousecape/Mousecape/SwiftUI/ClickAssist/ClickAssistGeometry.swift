@@ -21,6 +21,8 @@ enum RejectionReason: String {
     case tileTooSmall, tileTooWide
     /// Rect intersects no known display: nothing can be clicked there.
     case offscreen
+    /// Row scrolled (mostly) out of its enclosing scroll area's viewport.
+    case scrolledOut
 }
 
 struct GeometryVerdict {
@@ -51,6 +53,14 @@ struct GeometryVerdict {
 /// 8. tile roles: sides ≥ 30, aspect ≤ 3               -> .tile / .tileTooSmall
 ///                                                              / .tileTooWide
 /// 9. otherwise                                        -> .role
+///
+/// Viewport gate (row roles only, applied by `isVisibleInViewport` after
+/// `classify`): a row's AX frame keeps its scrolled-out extent, so a row
+/// beneath an Open panel's button bar is still "on screen". The row must show
+/// ≥ `rowMinVisibleHeight` pt and ≥ `rowMinVisibleHeightFraction` of its
+/// height inside the intersection of its enclosing AXScrollArea frames,
+/// otherwise -> .scrolledOut. The published rect stays the full AX frame:
+/// legitimacy confirms by exact frame identity with the hit element.
 enum GeometryPolicy {
     /// Names and rectangles do not prove that page furniture can be clicked.
     static func isActionable(role: String, hasPressAction: Bool) -> Bool {
@@ -239,6 +249,31 @@ enum GeometryPolicy {
     static let wideThinMaxHeight: CGFloat = 6
     // Row 7 — row-like containers.
     static let rowRoles: Set<String> = ["AXCell", "AXRow", "AXListItem"]
+    static let rowMaxHeight: CGFloat = 200
+    static let rowMaxArea: CGFloat = 120_000
+    // Viewport gate — rows scrolled under a scroll area's edge. Scrolling clips
+    // one edge, so a ≥ 0.5 HEIGHT fraction keeps the row's centre (the
+    // legitimacy probe point) inside the viewport.
+    static let rowMinVisibleHeightFraction: CGFloat = 0.5
+    /// A sliver of a row (a few points peeking above a bar) is not a target.
+    static let rowMinVisibleHeight: CGFloat = 8
+    /// Parent hops searched for enclosing AXScrollArea viewports.
+    static let rowViewportAncestorDepth = 24
+    /// Diagnostics only: a scrolled-out drop is logged when the pointer is
+    /// within this many points of the row (keeps the log to the hovered area).
+    static let rowViewportLogRadius: CGFloat = 80
+
+    /// Pure viewport gate. `viewports` are the frames of every enclosing
+    /// AXScrollArea (nearest first); none -> nothing clips the row.
+    static func isVisibleInViewport(_ rect: CGRect, viewports: [CGRect]) -> Bool {
+        guard let first = viewports.first else { return true }
+        let viewport = viewports.dropFirst().reduce(first) { $0.intersection($1) }
+        let visible = rect.intersection(viewport)
+        guard !visible.isNull, rect.height > 0 else { return false }
+        // A fully visible row shorter than the sliver floor is still whole.
+        return visible.height >= min(rowMinVisibleHeight, rect.height)
+            && visible.height >= rect.height * rowMinVisibleHeightFraction
+    }
     // Row 8 — tiles / thumbnails (no press action of their own). The aspect
     // bound is a SHAPE rule: long wrapper strips (1258 × 47) are furniture.
     static let tileRoles: Set<String> = ["AXImage", "AXGroup"]
