@@ -1,0 +1,9 @@
+# Preserve clicks across small pointer jitter
+
+Trace evidence: YouTube Premium home link at (1011,463) received a redirected down at original (1098.4,507.3), then a drag at (1098.4,507.1) cancelled its latch. Another click moved only 0.1 pt and did the same. Background captures on the same control had no queued action and ended in gesture-unsupported continuity, consistent with releasing the original down on the first drag event.
+
+Correction: use the existing 2 pt pointer-noise threshold for ordinary click controls, extending the already-working native-row noise policy. Background click ownership survives these tiny drags; ordinary center-snapped foreground clicks retain their latch. Distances are cumulative from the original down, not the previous event, so slow real drags escape the threshold. Position-sensitive controls (sliders, tabs/radios, text and menus) retain existing drag behavior. Genuine drags still release the captured down once; no action retry or additional mouse pair is introduced. Target legitimacy and evidence checks remain unchanged.
+
+Add diagnostic records for held jitter and background drag release. Regression tests cover the recorded 0.2 pt motion, movement beyond the threshold and position-sensitive exclusions. Build/install and real click validation pending.
+
+Completed verification: all three required builds and 101 regression tests passed. Installed signature and five executable hashes verified; helper/agent restarted. Live capture showed YouTube Home background delivery completing once, and a native row click retaining ownership through three small jitter events followed by one successful native action. User confirmed “All worked correctly” for the focused/background Home-link test and all requested app/menu/slider regression cases, with no reported duplicates or wrong rings. No automatic commit.

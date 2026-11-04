@@ -51,11 +51,24 @@ final class ClickAssistNativeRowTests: XCTestCase {
             candidate: candidate("AXButton"), generation: 7, point: point, now: 10.1, nativeTolerance: 32))
     }
     func testNativeRowClickIgnoresOnlyExistingPointerNoiseAndPreservesRealDrags() {
-        XCTAssertTrue(BackgroundClickPolicy.isNativeRowPointerNoise(role: "AXSelectableRow",
+        XCTAssertTrue(BackgroundClickPolicy.isClickPointerNoise(role: "AXSelectableRow",
             down: .zero, current: CGPoint(x: 0.2, y: 0.3)))
-        XCTAssertFalse(BackgroundClickPolicy.isNativeRowPointerNoise(role: "AXNativeRowButton",
+        XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: "AXNativeRowButton",
             down: .zero, current: CGPoint(x: 3, y: 0)))
-        XCTAssertFalse(BackgroundClickPolicy.isNativeRowPointerNoise(role: "AXSlider",
+        XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: "AXSlider",
             down: .zero, current: CGPoint(x: 0.2, y: 0.3)))
     }
+    func testOrdinaryClickJitterDoesNotCancelButRealDragsRemainNative() {
+        for role in ["AXButton", "AXLink", "AXCheckBox"] {
+            XCTAssertTrue(BackgroundClickPolicy.isClickPointerNoise(role: role,
+                down: CGPoint(x: 1098.4, y: 507.3), current: CGPoint(x: 1098.4, y: 507.1)))
+            XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: role,
+                down: .zero, current: CGPoint(x: 2.1, y: 0)))
+        }
+        for role in ["AXSlider", "AXTextField", "AXMenuItem", "AXMenuBarItem", "AXRadioButton"] {
+            XCTAssertFalse(BackgroundClickPolicy.isClickPointerNoise(role: role,
+                down: .zero, current: CGPoint(x: 0.1, y: 0)))
+        }
+    }
+
 }

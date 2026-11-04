@@ -424,11 +424,15 @@ final class AssistTap: @unchecked Sendable {
 
         if let pending = pendingBackgroundClick {
             if isDrag {
-                if BackgroundClickPolicy.isNativeRowPointerNoise(role: pending.candidate.role,
-                    down: pending.down.location, current: original) { return nil }
+                if BackgroundClickPolicy.isClickPointerNoise(role: pending.candidate.role,
+                    down: pending.down.location, current: original) {
+                    log("CLICK_JITTER_HELD mode=background target=\(pending.candidate.key)")
+                    return nil
+                }
                 // A drag is not an activation-click. Release the captured native
                 // down ahead of this drag, preserving the app's normal gesture.
                 pendingBackgroundClick = nil
+                log("BACKGROUND_CLICK_DRAG_RELEASE target=\(pending.candidate.key) distance=\(hypot(original.x - pending.down.location.x, original.y - pending.down.location.y))")
                 pending.down.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
                 pending.down.tapPostEvent(proxy)
                 gestureUnsupported = true
@@ -623,6 +627,7 @@ final class AssistTap: @unchecked Sendable {
                 event.location = corrected
                 latched = GestureLatch(delta: delta, target: best.key, snap: snap,
                                        edgeCore: false)
+                latched?.originalDown = original
                 emit("MUTATE", type: label, original: original, mutated: corrected,
                      reason: "redirect", res: res, started: started,
                      extra: "delta=\(ScreenSpace.fmt(delta)) dist=\(String(format: "%.1f", winner.0.dist)) target=\(best.key) mode=return-modified-event mode=synthetic snap=\(snap.rawValue) tier=\(best.tier == .firstClass ? 1 : 2) legitimacy=confirmed cands=\(confirmed.count) winner=1")
@@ -639,6 +644,11 @@ final class AssistTap: @unchecked Sendable {
             return Unmanaged.passUnretained(event)
         }
         if isDrag, let l = latched, l.snap == .center {
+            if hypot(original.x - l.originalDown.x, original.y - l.originalDown.y)
+                <= ClickAssistEvidence.pointerMoveEpsilon {
+                log("CLICK_JITTER_HELD mode=foreground target=\(l.target)")
+                return nil
+            }
             latched = nil
             unlatchedForDrag = true
             emit("PASSTHROUGH", type: label, original: original, mutated: nil,

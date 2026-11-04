@@ -463,6 +463,7 @@ enum FrameContinuity {
 /// mid-gesture recomputation impossible: drags and the up apply this value
 /// verbatim regardless of snapshot, target or resolver changes.
 struct GestureLatch: Sendable {
+    var originalDown: CGPoint = .zero
     let delta: CGVector
     let target: String
     let snap: DecisionCore.Snap
@@ -551,8 +552,10 @@ enum BackgroundClickPolicy {
         return ClickAssistEvidence.activationState(evidenceGeneration: candidate.evidenceGeneration,
             currentGeneration: generation, ageMs: (now - candidate.collectedAt) * 1000) == .fresh
     }
-    static func isNativeRowPointerNoise(role: String, down: CGPoint, current: CGPoint) -> Bool {
-        GeometryPolicy.usesNativeRowAction(role)
+    static func isClickPointerNoise(role: String, down: CGPoint, current: CGPoint) -> Bool {
+        // Ordinary click controls tolerate the same small hand jitter as native
+        // rows. Position-sensitive controls retain every drag event.
+        (GeometryPolicy.usesNativeRowAction(role) || !DecisionCore.positionSensitiveRoles.contains(role))
             && hypot(current.x - down.x, current.y - down.y) <= ClickAssistEvidence.pointerMoveEpsilon
     }
     static func matches(_ click: BackgroundClickWire, rect: CGRect) -> Bool {
