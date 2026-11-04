@@ -1,7 +1,7 @@
 // baseline-guard:allow new standalone XPC protocol file, no prior baseline possible
 //
 //  ClickAssistXPCProtocol.swift
-//  Shared by ClickAssistAgent (client) and ClickAssistResolver.xpc (service).
+//  Shared by MousecapeHelper (client) and ClickAssistResolver.xpc (service).
 //
 //  PAYLOADS: every non-liveness argument/reply that carries structured data is
 //  VERSIONED JSON and includes an `epoch` field identifying the service process

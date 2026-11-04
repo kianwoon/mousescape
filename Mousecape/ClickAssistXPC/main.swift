@@ -27,6 +27,14 @@ private func svcLog(_ line: String) {
     let row = "\(stamp) [ClickAssist] \(line)\n"
     svcLogLock.lock()
     defer { svcLogLock.unlock() }
+    // FileHandle(forWritingTo:) never creates the file: create it (and its
+    // directory) first or every RESOLVER line is silently dropped.
+    let fm = FileManager.default
+    if !fm.fileExists(atPath: svcLogURL.path) {
+        try? fm.createDirectory(at: svcLogURL.deletingLastPathComponent(),
+                                withIntermediateDirectories: true)
+        fm.createFile(atPath: svcLogURL.path, contents: nil)
+    }
     if let h = try? FileHandle(forWritingTo: svcLogURL) {
         h.seekToEndOfFile()
         h.write(row.data(using: .utf8) ?? Data())

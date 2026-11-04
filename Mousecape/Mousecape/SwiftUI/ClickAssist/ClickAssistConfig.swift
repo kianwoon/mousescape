@@ -7,6 +7,7 @@
 //
 
 import Foundation
+import AppKit
 import CoreGraphics
 
 // MARK: - Contract table (exact names / defaults / validation)
@@ -94,6 +95,37 @@ final class ClickAssistPreferences: @unchecked Sendable {
         guard let raw = read(key), let n = raw as? NSNumber else { return def }
         let d = n.doubleValue
         return d.isFinite ? CGFloat(d) : def
+    }
+}
+
+/// Which process hosts the Click Assist engine: MousecapeHelper, the single
+/// resident app. The standalone ClickAssistAgent no longer ships; its bundle id
+/// is kept only so upgrades can retire a still-registered/running old copy.
+enum ClickAssistHost {
+    /// Bundle id of the MousecapeHelper login item (hosts the engine).
+    static let helperBundleIdentifier = "com.sdmj76.MousecapeHelper"
+    /// Bundle id of the removed legacy ClickAssistAgent login item.
+    static let legacyAgentBundleIdentifier = "com.sdmj76.ClickAssistAgent"
+    /// How long a polite terminate() may take before forceTerminate().
+    static let legacyAgentTerminateTimeout: TimeInterval = 2.0
+    /// Poll interval while waiting for the legacy agent to exit.
+    static let legacyAgentTerminatePollInterval: TimeInterval = 0.05
+
+    /// Terminate any running legacy ClickAssistAgent (terminate, then
+    /// forceTerminate after `legacyAgentTerminateTimeout`). Blocking but bounded;
+    /// call off the main thread where possible. Returns true if one was running.
+    @discardableResult
+    static func terminateLegacyAgentIfRunning() -> Bool {
+        let running = NSRunningApplication.runningApplications(
+            withBundleIdentifier: legacyAgentBundleIdentifier)
+        guard !running.isEmpty else { return false }
+        running.forEach { _ = $0.terminate() }
+        let deadline = Date().addingTimeInterval(legacyAgentTerminateTimeout)
+        while Date() < deadline, running.contains(where: { !$0.isTerminated }) {
+            Thread.sleep(forTimeInterval: legacyAgentTerminatePollInterval)
+        }
+        running.filter { !$0.isTerminated }.forEach { _ = $0.forceTerminate() }
+        return true
     }
 }
 

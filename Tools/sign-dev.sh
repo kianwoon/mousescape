@@ -20,4 +20,4 @@ find "$APP/Contents" \( -name '*.xpc' -o -name '*.app' -o -name '*.framework' \
   done
 codesign --force --sign "$IDENTITY" --preserve-metadata=entitlements,flags "$APP"
 codesign --verify --strict --deep "$APP"
-codesign -d -r- "$APP/Contents/Library/LoginItems/ClickAssistAgent.app" 2>&1 | tail -1
+codesign -d -r- "$APP/Contents/Library/LoginItems/MousecapeHelper.app" 2>&1 | tail -1

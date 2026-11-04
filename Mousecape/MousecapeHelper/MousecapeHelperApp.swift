@@ -20,11 +20,13 @@ struct MousecapeHelperApp: App {
                 .onAppear {
                     // Refresh state when menu opens
                     cursorState.refresh()
+                    HelperClickAssistController.shared.refreshFromMenu()
                 }
         }
     }
 }
 
+@MainActor
 class HelperAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Initialize logging
@@ -51,6 +53,10 @@ class HelperAppDelegate: NSObject, NSApplicationDelegate {
         // Global cursor-scale hotkeys (Carbon RegisterEventHotKey — no
         // Accessibility permission required).  Config lives in prefs.
         CursorHotkeyManager.shared.start()
+
+        // Click Assist (the Helper is its sole host; retires any leftover
+        // legacy ClickAssistAgent first). Tap runs off-main.
+        HelperClickAssistController.shared.start()
     }
 
     @objc private func workspaceDidWake(_ notification: Notification) {
@@ -73,6 +79,7 @@ class HelperAppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         NSLog("[MousecapeHelper] terminating")
+        HelperClickAssistController.shared.shutdown()
         // Remove display reconfiguration callback to prevent firing during teardown
         stopSessionMonitor()
         NSWorkspace.shared.notificationCenter.removeObserver(self)

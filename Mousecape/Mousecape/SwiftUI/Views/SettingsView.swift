@@ -114,8 +114,11 @@ struct GeneralSettingsView: View {
             Section("Startup") {
                 Toggle("Apply at Login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, newValue in
-                        // Control MousecapeHelper's launch-at-login registration only
-                        let helper = SMAppService.loginItem(identifier: "com.sdmj76.MousecapeHelper")
+                        // Control MousecapeHelper's launch-at-login registration only.
+                        // SMAppService is the source of truth; skip when the toggle was
+                        // merely synced to it (onAppear) so no spurious (un)register runs.
+                        let helper = SMAppService.loginItem(identifier: ClickAssistHost.helperBundleIdentifier)
+                        guard newValue != (helper.status == .enabled) else { return }
                         do {
                             if newValue {
                                 try helper.register()
@@ -229,6 +232,7 @@ struct GeneralSettingsView: View {
             loadScaleMode()  // This now also calls loadCursorScale()
             loadHandedness()
             isPointerCustomized = isSystemPointerColorCustomized()
+            launchAtLogin = SMAppService.loginItem(identifier: ClickAssistHost.helperBundleIdentifier).status == .enabled
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willBecomeActiveNotification)) { _ in
             isPointerCustomized = isSystemPointerColorCustomized()
@@ -1291,7 +1295,7 @@ struct CursorHotkeySettingsContent: View {
 // MARK: - Click Assist Settings
 
 /// App-side Click Assist settings bridge. It only reads/writes preferences and
-/// NEVER creates a tap, resolver or overlay: the persistent ClickAssistAgent is
+/// NEVER creates a tap, resolver or overlay: the persistent MousecapeHelper is
 /// the sole runtime host. The app target does not compile the engine/host
 /// sources at all, so a second host cannot be started by accident.
 @MainActor
@@ -1322,7 +1326,7 @@ final class ClickAssistSettingsModel {
         " · Indicator \(config.indicatorEnabled ? "On" : "Off")"
     }
 
-    // MARK: - requests (prefs only; the agent reacts via Darwin notification)
+    // MARK: - requests (prefs only; the Helper reacts via Darwin notification)
 
     func requestEnabled(_ value: Bool) {
         guard value != config.enabled else { return }
@@ -1364,13 +1368,13 @@ final class ClickAssistSettingsModel {
     }
 }
 
-/// Reads the agent's runtime status record (file = truth). The Darwin
+/// Reads the Helper's runtime status record (file = truth). The Darwin
 /// notification is only a hint to re-read; the timer covers a missed hint and a
-/// stale heartbeat covers an agent that died without cleaning up.
+/// stale heartbeat covers a Helper that died without cleaning up.
 @MainActor
 @Observable
 final class ClickAssistStatusObserver {
-    private(set) var text = "Not running — agent unavailable"
+    private(set) var text = "Not running — Mousecape Helper unavailable"
     private(set) var isActive = false
 
     private var timer: Timer?
@@ -1405,13 +1409,13 @@ final class ClickAssistStatusObserver {
 
     func refresh() {
         guard let record = ClickAssistStatusStore.read() else {
-            text = "Not running — agent unavailable"
+            text = "Not running — Mousecape Helper unavailable"
             isActive = false
             return
         }
-        // Stale heartbeat => the agent is not actually running, whatever the file says.
+        // Stale heartbeat => the Helper is not actually running, whatever the file says.
         guard Date().timeIntervalSince(record.heartbeat) <= ClickAssistStatusStore.staleThreshold else {
-            text = "Not running — agent unavailable"
+            text = "Not running — Mousecape Helper unavailable"
             isActive = false
             return
         }
@@ -1428,14 +1432,11 @@ final class ClickAssistStatusObserver {
 
 /// Click Assist settings controls. Values are read from the preference bridge's
 /// validated snapshot (no @AppStorage shadow copy); every mutation writes the pref
-/// domain and the agent picks it up via Darwin notification.
+/// domain and the Helper picks it up via Darwin notification.
 struct ClickAssistSettingsView: View {
     @State private var assist = ClickAssistSettingsModel.shared
     @State private var status = ClickAssistStatusObserver()
-    @State private var agentLoginItem = SMAppService.loginItem(identifier: ClickAssistSettingsView.agentBundleIdentifier).status == .enabled
-    @State private var loginItemError: String?
     @Environment(AppState.self) private var appState
-    private static let agentBundleIdentifier = "com.sdmj76.ClickAssistAgent"
 
     var body: some View {
         Form {
@@ -1462,19 +1463,12 @@ struct ClickAssistSettingsView: View {
                     set: { assist.requestIndicatorEnabled($0) }))
             }
 
-            Section("Agent") {
-                Toggle("Run Click Assist Agent at login", isOn: $agentLoginItem)
-                    .onChange(of: agentLoginItem) { _, newValue in
-                        updateLoginItem(newValue)
-                    }
-                Text("Keeps assist running after Mousecape quits.")
+            Section("Background Helper") {
+                // Single source of truth for the Helper's login item is
+                // General › Apply at Login (same SMAppService registration).
+                Text("Click Assist runs inside the Mousecape Helper, so it keeps running after Mousecape quits. It starts at login when General › Apply at Login is on.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if let loginItemError {
-                    Text(loginItemError)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
             }
 
             Section("Status") {
@@ -1488,7 +1482,7 @@ struct ClickAssistSettingsView: View {
                     Text(status.text)
                         .foregroundStyle(.secondary)
                 }
-                Text("Runtime reported by the Click Assist Agent; requested values above are your settings.")
+                Text("Runtime reported by the Mousecape Helper; requested values above are your settings.")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -1497,26 +1491,9 @@ struct ClickAssistSettingsView: View {
         .onAppear {
             assist.refreshFromPreferences()
             status.start()
-            agentLoginItem = SMAppService.loginItem(identifier: Self.agentBundleIdentifier).status == .enabled
         }
         .onDisappear {
             status.stop()
-        }
-    }
-
-    /// Register/unregister the embedded login item from the app side.
-    private func updateLoginItem(_ enabled: Bool) {
-        let service = SMAppService.loginItem(identifier: Self.agentBundleIdentifier)
-        do {
-            if enabled {
-                try service.register()
-            } else {
-                try service.unregister()
-            }
-            loginItemError = nil
-        } catch {
-            loginItemError = error.localizedDescription
-            agentLoginItem = (service.status == .enabled)
         }
     }
 }
