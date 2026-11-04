@@ -71,7 +71,16 @@ final class AssistTap: @unchecked Sendable {
     }
     private func captureBackgroundClick(_ candidate: DecisionCore.Candidate, res: Resolution,
                                         original: CGPoint, destination: CGPoint, event: CGEvent) -> Bool {
-        let foreground = currentForegroundPID()
+        var foreground = currentForegroundPID()
+        // The activation-notification mirror can go stale (a click that only
+        // focuses the app is the "needs two clicks" symptom). Before treating
+        // the target as frontmost, re-read the live frontmost app once.
+        if let tracked = foreground, tracked == res.pid,
+           let live = NSWorkspace.shared.frontmostApplication?.processIdentifier, live != tracked {
+            setForegroundPID(live)
+            foreground = live
+            log("FOREGROUND_STALE tracked=\(tracked) live=\(live) target=\(res.pid)")
+        }
         let now = CACurrentMediaTime()
         guard activationSink != nil,
               BackgroundClickPolicy.eligible(targetPID: res.pid, foregroundPID: foreground,
@@ -85,7 +94,7 @@ final class AssistTap: @unchecked Sendable {
             if candidate.verdict == .confirmed {
                 let evidence = ClickAssistEvidence.activationState(evidenceGeneration: candidate.evidenceGeneration,
                     currentGeneration: res.generation, ageMs: (now - candidate.collectedAt) * 1000)
-                log("BACKGROUND_CLICK_SKIPPED target=\(candidate.key) role=\(candidate.role) verdict=\(candidate.verdict) evidence=\(evidence.rawValue) ageMs=\(Int((now - candidate.collectedAt) * 1000)) contains=\(candidate.rect.contains(original) ? 1 : 0) fgPID=\(foreground.map(String.init) ?? "locked") pid=\(res.pid) sink=\(activationSink != nil ? 1 : 0) winFocused=\(res.pointerWindowFocused ? 1 : 0)")
+                log("BACKGROUND_CLICK_SKIPPED target=\(candidate.key) role=\(candidate.role) verdict=\(candidate.verdict) evidence=\(evidence.rawValue) ageMs=\(Int((now - candidate.collectedAt) * 1000)) contains=\(candidate.rect.contains(original) ? 1 : 0) fgPID=\(foreground.map(String.init) ?? "locked") pid=\(res.pid) live=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0) active=\(NSRunningApplication(processIdentifier: res.pid)?.isActive == true ? 1 : 0) sink=\(activationSink != nil ? 1 : 0) winFocused=\(res.pointerWindowFocused ? 1 : 0)")
             }
             return false
         }
