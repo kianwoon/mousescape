@@ -22,6 +22,10 @@
 void ResetCursorsToDefault(void) {
     // Use the same function as main app
     resetAllCursors();
+    // macOS 27: re-engage the accessibility cursor compositor so it repaints the
+    // now-default cursors (resetAllCursors unregisters the cape, but the compositor
+    // still holds the old large-cursor surface until it's rebuilt).
+    reengageAccessibilityCursorCompositor();
 }
 
 // Simple logging wrapper for Swift (non-variadic)

@@ -12,12 +12,15 @@
 #import <AppKit/AppKit.h>
 #import "MCLogger.h"
 
-// In DEBUG mode, use file logging; in Release mode, use stdout only
+// In DEBUG mode, use file logging; in Release mode, route to the unified log (os_log)
+// so the apply trace stays observable via `log show` (previously Release wrote to
+// stdout, which is discarded for a GUI app launched via Finder/open → unobservable).
+// stdout is still written too so mousecloak CLI output/prompts (MCDefs.m) stay visible.
 #ifdef DEBUG
     #define MMOut(format, ...) MCLoggerWrite(format, ## __VA_ARGS__)
     #define MMLog(format, ...) MCLoggerWrite(format, ## __VA_ARGS__)
 #else
-    #define MMOut(format, ...) fprintf(stdout, format, ## __VA_ARGS__)
+    #define MMOut(format, ...) do { fprintf(stdout, format, ## __VA_ARGS__); MCLogToSystem(format, ## __VA_ARGS__); } while (0)
     #define MMLog(format, ...) MMOut(format "\n", ## __VA_ARGS__)
 #endif
 

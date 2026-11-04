@@ -35,6 +35,12 @@ extern volatile BOOL g_refreshingSystemDefaults;
 // No-op when pointer enlargement is off.
 extern void reengageAccessibilityCursorCompositor(void);
 
+// Cross-process apply-recency stamp (see apply.m). MCStampApplyTime() records
+// "an apply just happened"; MCSecondsSinceLastApply() lets the Helper's display
+// reconfiguration callback ignore the self-induced events that follow an apply.
+extern void MCStampApplyTime(void);
+extern double MCSecondsSinceLastApply(void);
+
 NS_ASSUME_NONNULL_END
 
 #endif

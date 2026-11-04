@@ -32,6 +32,9 @@
 // Cursor application and system default refresh
 #import "apply.h"
 
+// Reset / restore system default cursors
+#import "restore.h"
+
 // Cape creation and dump utilities
 #import "create.h"
 

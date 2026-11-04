@@ -38,6 +38,9 @@ static CFRunLoopSourceRef g_sessionMonitorRLS = NULL;
 // File-scope so both triggers share one cooldown: ONE apply per wake.
 static CFAbsoluteTime g_lastSuccessfulApplyTime = 0.0;
 #define kWakeApplyCooldown 15.0
+// Cross-process storm window: reconfiguration events within this many seconds
+// of ANY apply (main app or Helper, via MCStampApplyTime) are self-induced.
+#define kMCApplyStormWindowSeconds 4.0
 
 BOOL wakeApplyCooldownActive(void) {
     CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
@@ -160,6 +163,20 @@ void reconfigurationCallback(CGDirectDisplayID display,
     // Only acting on the "after" phase prevents double re-application.
     if (flags & kCGDisplayBeginConfigurationFlag) {
         MMLog("Display %u reconfiguration BEGIN phase — skipping", display);
+        return;
+    }
+
+    // Cross-process storm breaker: if ANY apply (this process or the main app)
+    // happened in the last few seconds, this reconfiguration event is almost
+    // certainly a side effect of that apply's cursor-scale toggling — NOT a real
+    // monitor change. Re-applying here would re-toggle the scale and fire more
+    // events, sustaining the flashing/disappearing storm. Skip it.
+    // Genuine display changes and wake-from-sleep arrive well after this window
+    // (and wake also has its own NSWorkspace.didWakeNotification backup path).
+    double sinceApply = MCSecondsSinceLastApply();
+    if (sinceApply < kMCApplyStormWindowSeconds) {
+        MMLog(YELLOW "Reconfig: skipping — cape applied %.1fs ago (self-induced event, not a real display change)" RESET, sinceApply);
+        HLOG("Reconfiguration: skipping, apply %.1fs ago (storm guard)", sinceApply);
         return;
     }
 

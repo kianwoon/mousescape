@@ -41,6 +41,44 @@ volatile BOOL g_refreshingSystemDefaults = NO;
 // ---------------------------------------------------------------------------
 static NSMutableSet<NSString *> *g_capeRegisteredNames = nil;
 
+// Cross-process apply-recency stamp.
+// The per-process g_refreshingSystemDefaults guard cannot protect the Helper
+// from an apply happening in the MAIN APP's process (different process = own
+// global). On macOS 27 the cursor-scale toggling inside an apply emits display
+// reconfiguration events; without a cross-process signal the Helper reacts to
+// the main app's apply (and to its own apply's trailing events), re-applies,
+// which re-toggles the scale, which fires more events → a re-apply storm seen
+// as the cursor flashing/disappearing. We stamp a timestamp into the SHARED
+// preferences domain on every apply; reconfigurationCallback skips events that
+// arrive shortly after any apply (ours or the main app's).
+static NSString * const kMCLastApplyTimeKey = @"MCLastApplyTime";
+
+void MCStampApplyTime(void) {
+    double now = CFAbsoluteTimeGetCurrent();
+    CFPreferencesSetValue((__bridge CFStringRef)kMCLastApplyTimeKey,
+                          (__bridge CFNumberRef)@(now),
+                          (__bridge CFStringRef)kMCDomain,
+                          kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    // Synchronize so the OTHER process (Helper vs main app) sees it immediately.
+    CFPreferencesSynchronize((__bridge CFStringRef)kMCDomain,
+                             kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+}
+
+double MCSecondsSinceLastApply(void) {
+    // Pull the latest value written by either process before reading.
+    CFPreferencesSynchronize((__bridge CFStringRef)kMCDomain,
+                             kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    CFNumberRef ref = CFPreferencesCopyValue((__bridge CFStringRef)kMCLastApplyTimeKey,
+                                             (__bridge CFStringRef)kMCDomain,
+                                             kCFPreferencesCurrentUser, kCFPreferencesCurrentHost);
+    if (!ref) {
+        return 1.0e9; // never applied → effectively "long ago"
+    }
+    double last = [(__bridge_transfer NSNumber *)ref doubleValue];
+    return CFAbsoluteTimeGetCurrent() - last;
+}
+
+
 static BOOL MCRegisterImagesForCursorName(NSUInteger frameCount, CGFloat frameDuration, CGPoint hotSpot, CGSize size, NSArray *images, NSString *name) {
     char *cursorName = (char *)name.UTF8String;
     int seed = 0;
@@ -123,8 +161,13 @@ BOOL applyCursorForIdentifier(NSUInteger frameCount, CGFloat frameDuration, CGPo
     MMLog("  Identifier: %s", ident.UTF8String);
     MMLog("  Skip synonyms: %s", skipSynonyms ? "YES" : "NO");
 
-    if (frameCount > 24 || frameCount < 1) {
-        MMLog(BOLD RED "Frame count of %s out of range [1...24]", ident.UTF8String);
+    // macOS's own animated cursors exceed the old [1...24] cap (e.g. the busy
+    // "Wait" spinner is 30 frames), so that cap rejected legitimate system cursors
+    // and any cape with >24 frames. The frame count is just passed to
+    // CGSRegisterCursorWithImages (which slices one image strip), so a higher bound
+    // is memory-safe; 256 covers any realistic animation while still rejecting garbage.
+    if (frameCount > 256 || frameCount < 1) {
+        MMLog(BOLD RED "Frame count of %s out of range [1...256]", ident.UTF8String);
         return NO;
     }
 
@@ -234,6 +277,40 @@ BOOL applyCursorForIdentifier(NSUInteger frameCount, CGFloat frameDuration, CGPo
 // system built-in cursors (com.apple.cursor.*) are still readable via CoreCursorCopyImages.
 // Unlike capeWithIdentifier, this skips the MCIsCursorRegistered check and also
 // calls CoreCursorSet first to activate the cursor before reading (required by CoreCursorCopyImages).
+// Read an ALREADY-REGISTERED cursor's images PASSIVELY via CGSCopyRegisteredCursorImages
+// — NO CoreCursorSet (which activates cursors and disturbs the accessibility compositor /
+// the cape's giant cursor surface). Used by the non-cape diff path to re-scale a
+// system-default cursor in place without blinking the cape. Normalizes to a native 32×32
+// base so the per-cursor ratio scales from native size (avoids compounding off an
+// already-scaled registration).
+static NSDictionary * _Nullable registeredCursorData(NSString *identifier) {
+    NSUInteger frameCount = 1;
+    CGFloat frameDuration = 0;
+    CGPoint hotSpot = CGPointZero;
+    CGSize size = CGSizeZero;
+    CFArrayRef reps = NULL;
+    CGError err = CGSCopyRegisteredCursorImages(CGSMainConnectionID(), (char *)identifier.UTF8String,
+                                                &size, &hotSpot, &frameCount, &frameDuration, &reps);
+    if (err || !reps || !CFArrayGetCount(reps)) {
+        if (reps) CFRelease(reps);
+        return nil;
+    }
+    if (size.width > 1.0 && size.height > 1.0) {
+        hotSpot = CGPointMake(hotSpot.x * (32.0 / size.width), hotSpot.y * (32.0 / size.height));
+    }
+    NSDictionary *dict = @{
+        MCCursorDictionaryFrameCountKey: @(frameCount),
+        MCCursorDictionaryFrameDuratiomKey: @(frameDuration),
+        MCCursorDictionaryHotSpotXKey: @(hotSpot.x),
+        MCCursorDictionaryHotSpotYKey: @(hotSpot.y),
+        MCCursorDictionaryPointsWideKey: @(32.0),
+        MCCursorDictionaryPointsHighKey: @(32.0),
+        MCCursorDictionaryRepresentationsKey: (__bridge NSArray *)reps
+    };
+    CFRelease(reps);
+    return dict;
+}
+
 static NSDictionary * _Nullable systemCapeWithIdentifier(NSString *identifier) {
     NSUInteger frameCount;
     CGFloat frameDuration;
@@ -391,9 +468,17 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
     }
 
     BOOL lefty = MCFlag(MCPreferencesHandednessKey);
-    BOOL innerShadow = MCFlag(MCPreferencesInnerShadowKey);
-    BOOL outerGlow = MCFlag(MCPreferencesOuterGlowKey);
-    BOOL outerShadow = MCFlag(MCPreferencesOuterShadowKey);
+    // Effects (inner shadow / outer glow / outer shadow) apply ONLY to the cape's own
+    // cursors — never to system-default / non-cape cursors. Two reasons:
+    //   1. The non-cape diff path re-registers from registeredCursorData (its own prior
+    //      output), so applying an effect there compounds a growing halo every apply,
+    //      muddying those cursors and undoing their sharpness.
+    //   2. Effects are meant to style the cape design, not modify plain system cursors.
+    // Also skip during backup/restore so an effect is never baked into a saved cursor.
+    BOOL effectsAllowed = (!isSystemDefault && !restore);
+    BOOL innerShadow = effectsAllowed && MCFlag(MCPreferencesInnerShadowKey);
+    BOOL outerGlow = effectsAllowed && MCFlag(MCPreferencesOuterGlowKey);
+    BOOL outerShadow = effectsAllowed && MCFlag(MCPreferencesOuterShadowKey);
     BOOL pointer = MCCursorIsPointer(identifier);
     NSNumber *frameCount    = cursor[MCCursorDictionaryFrameCountKey];
     NSNumber *frameDuration = cursor[MCCursorDictionaryFrameDuratiomKey];
@@ -486,8 +571,8 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
     CGFloat customRatio = 1.0;
     if (customScaleMode) {
         NSDictionary *perCursorScales = MCDefault(MCPreferencesPerCursorScalesKey);
-        MMLog("SCALE DEBUG per-cursor %s: perCursorScales=%@, customMode=YES, skipSynonyms=%s",
-              identifier.UTF8String, perCursorScales, skipSynonyms ? "YES" : "NO");
+        MMLog("SCALE DEBUG per-cursor %s: perCursorScales=%s, customMode=YES, skipSynonyms=%s",
+              identifier.UTF8String, perCursorScales.description.UTF8String, skipSynonyms ? "YES" : "NO");
         float desiredScale = [perCursorScales[identifier] floatValue];
         if (desiredScale <= 0.0f) desiredScale = 1.0f;
 
@@ -536,6 +621,14 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
         // registration size (after custom scaling).  On Retina (2x), a cursor
         // registered at S pt needs S*2 pixels per dimension.  Add 1.5x safety.
         // We work in LINEAR pixels first, then square for the area comparison.
+        //
+        // NOTE: the 2048 floor is deliberately aggressive. It guarantees EVERY
+        // cursor goes through the Lanczos upscale + CISharpenLuminance pass and is
+        // registered with generous downsampling headroom — which is what makes
+        // scaled cursors (incl. low-detail system/non-cape cursors) look crisp.
+        // A displayed-size-based target was tried (2026-06-23) to save memory but
+        // it SKIPS the upscale+sharpen when src≥target, making non-cape cursors look
+        // softer — user-visible regression — so it was reverted. Sharpness > memory.
         CGFloat maxNeededPt = fmax(effectiveSize.width, effectiveSize.height);
         NSUInteger minNeededLinear = (NSUInteger)(maxNeededPt * 2.0 * 1.5);
         if (minNeededLinear < 2048) minNeededLinear = 2048;
@@ -601,14 +694,20 @@ BOOL applyCapeForIdentifier(NSDictionary *cursor, NSString *identifier, BOOL res
         images = processed;
     }
 
-    // Apply outer glow effect if enabled
+    // Apply outer glow effect if enabled. Radius is proportional to each image's size
+    // (like the outer shadow) so the halo looks consistent across cursor scales —
+    // effects run on the already-upscaled image, so a fixed px radius is relatively
+    // huge on a small cursor and thin on a large one. (Scoped to cape cursors above.)
     if (outerGlow && images.count > 0) {
-        float radius = 40.0f;
-        float intensity = 0.7f;
-        MMLog("Applying outer glow effect (radius=%.1f, intensity=%.1f)", radius, intensity);
+        float intensity = 0.55f;
+        MMLog("Applying outer glow effect (tight proportional radius ~0.6%%, intensity=%.2f)", intensity);
         NSMutableArray *processed = [NSMutableArray arrayWithCapacity:images.count];
         for (id imgObj in images) {
             CGImageRef original = (__bridge CGImageRef)imgObj;
+            // Tight radius (~0.6%) so the halo hugs the silhouette instead of pooling
+            // into a bright blob at sharp tips / thin line-art (a larger radius wraps
+            // the whole arrowhead point in glow). Matches the outer shadow's tightness.
+            float radius = (float)fmax(2.0, CGImageGetWidth(original) * 0.006);
             CGImageRef glowing = MCApplyOuterGlow(original, radius, intensity);
             [processed addObject:(__bridge id)(glowing ?: original)];
             if (glowing) CGImageRelease(glowing);
@@ -1248,10 +1347,21 @@ BOOL applyCapeSurgical(NSDictionary *dictionary) {
     CGSGetCursorScale(CGSMainConnectionID(), &savedScale);
     CGSSetCursorScale(CGSMainConnectionID(), savedScale + 0.01f);
     CGSSetCursorScale(CGSMainConnectionID(), savedScale);
+    // The scale bump above can emit display-reconfiguration events in the
+    // Helper process; stamp the cross-process apply time so its
+    // reconfigurationCallback treats them as self-induced (see MCStampApplyTime).
+    MCStampApplyTime();
     MMLog(BOLD GREEN "Surgical apply complete — no unregister/ramp/uad-kill performed" RESET);
     return YES;
 }
 
+// Same as applyCape() but with a different strategy for running systems.
+// Instead of resetAllCursors() → CoreCursorUnregisterAll() → apply everything,
+// we: (1) unregister all to clear the WindowServer cache, (2) extract system
+// defaults at 8x while the cache is clean, (3) store them, (4) register cape
+// cursors + stored system defaults.  This avoids the corruption that happens
+// when CoreCursorUnregisterAll() is followed by registering many cursors on a
+// running system.
 BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
     // Re-entry guard: prevent concurrent apply calls (e.g. multiple display
     // reconfiguration events in quick succession on wake).
@@ -1260,6 +1370,9 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         return NO;
     }
     g_refreshingSystemDefaults = YES;
+    // Stamp at START so the Helper's reconfigurationCallback suppresses the
+    // reconfiguration events this apply emits while it is still running.
+    MCStampApplyTime();
 
     @try {
     @autoreleasepool {
@@ -1317,10 +1430,13 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         usleep(100000); // 100 ms
 
         // Step 2: Extract ALL system default cursors at a moderate scale.
-        // On a running system, extreme 64x extraction can degrade quality due to
-        // WindowServer's internal bitmap caching.  A moderate 8x extraction
-        // produces cleaner images, and the Lanczos upscaler in
-        // applyCapeForIdentifier handles the rest.
+        // VERIFIED (2026-06-23): boosting this beyond 8x does NOT increase non-cape
+        // cursor detail. At both 8x and 16x the system returns identical source sizes
+        // (e.g. cursor.30 = 352x352, others 384-512px) — macOS's built-in cursor
+        // assets cap at ~512px, so a higher boost just upscales the same blob at more
+        // cost (and 64x is known to degrade via the WindowServer bitmap cache). The
+        // practical ceiling: non-cape cursors stay crisp to ~5x; to exceed that, the
+        // cursor must be a cape cursor carrying its own high-res image.
         float extractScale = 8.0f;
         MMLog("--- Extracting system defaults at %.1fx ---", extractScale);
         CGSSetCursorScale(CGSMainConnectionID(), extractScale);
@@ -1460,6 +1576,10 @@ BOOL applyCapeWithoutReset(NSDictionary *dictionary) {
         return YES;
     }
     } @finally {
+        // Stamp again at END so the trailing reconfiguration events (emitted
+        // after scale restore) are also inside the suppression window. This is
+        // what breaks the self-sustaining storm.
+        MCStampApplyTime();
         g_refreshingSystemDefaults = NO;
         // Release this pass's synonym-protection set (see g_capeRegisteredNames).
         g_capeRegisteredNames = nil;
@@ -1718,6 +1838,7 @@ void refreshSystemDefaultCursors(void) {
         return;
     }
     g_refreshingSystemDefaults = YES;
+    MCStampApplyTime();
 
     @try {
         @autoreleasepool {
@@ -1778,6 +1899,7 @@ void refreshSystemDefaultCursors(void) {
         }
     }
     @finally {
+        MCStampApplyTime();
         g_refreshingSystemDefaults = NO;
     }
 }

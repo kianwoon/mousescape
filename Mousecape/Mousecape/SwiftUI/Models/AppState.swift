@@ -330,12 +330,11 @@ final class AppState: @unchecked Sendable {
             perCursorScales = dict
         }
 
-        // Update value (remove if 1.0 to keep dict clean)
-        if abs(scale - 1.0) < 0.01 {
-            perCursorScales.removeValue(forKey: identifier)
-        } else {
-            perCursorScales[identifier] = scale
-        }
+        // Always store the scale — including 1.0. Keeping the 1.0 entry lets the
+        // Helper's diff update revert a previously-scaled non-cape cursor (e.g. the
+        // Pointing hand) back to native size; if we removed the key, the Helper
+        // would have no record that the cursor needs restoring and it would stay big.
+        perCursorScales[identifier] = scale
 
         // NOTE on alias families (2026-08-27): Arrow and ArrowS are aliases of
         // one registered image (whichever family member the cape carries), so
@@ -694,8 +693,7 @@ final class AppState: @unchecked Sendable {
             debugLog("Warning: could not save cape before applying: \(error)")
         }
 
-        // Read the cape dictionary from file (avoids double HEIF encode/decode
-        // that dictionaryRepresentation causes)
+        // Read the cape dictionary from file.
         guard let capeDictNS = NSDictionary(contentsOfFile: capeURL.path) else {
             debugLog("Apply failed - could not read cape file")
             operationResultMessage = String(localized: "Failed to apply cape.")
@@ -703,12 +701,6 @@ final class AppState: @unchecked Sendable {
             showOperationResult = true
             return
         }
-
-        // Use the ObjC applyCapeWithoutReset() — same logic as applyCape() but
-        // skips resetAllCursors()/CoreCursorUnregisterAll() which corrupts the
-        // WindowServer cache on running systems.  Handles scale setup, cape cursor
-        // registration, system default re-registration (with registeredKeys to avoid
-        // shadow doubling), and MCForceCursorReevaluation.
         let capeDict = capeDictNS as! [AnyHashable: Any]
         // Surgical first (in-place update of changed cursors only — preserves
         // the stable render state); falls back to the full rebuild inside
@@ -728,7 +720,7 @@ final class AppState: @unchecked Sendable {
         appliedCape = cape
         showToastNotification("\"\(cape.name)\" \(String(localized: "applied successfully."))")
 
-        debugLog("Apply completed, saving preferences...")
+        debugLog("Apply completed (diff), saving preferences...")
         UserDefaults.standard.set(cape.identifier, forKey: "lastAppliedCapeIdentifier")
     }
 
@@ -736,7 +728,9 @@ final class AppState: @unchecked Sendable {
     func resetToDefault() {
         debugLog("=== Resetting to Default Cursors ===")
 
-        libraryController?.restoreCape()
+        // Call resetAllCursors() DIRECTLY, not via libraryController — the controller
+        // is set to nil when the window closes, which made reset a silent no-op.
+        resetAllCursors()
         appliedCape = nil
 
         debugLog("Reset completed, clearing preferences...")
