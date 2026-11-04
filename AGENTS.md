@@ -23,7 +23,7 @@ xattr -dr com.apple.quarantine /Applications/Mousecape.app
 Tools/sign-dev.sh /Applications/Mousecape.app      # BEFORE the new binary first runs (TCC)
 launchctl kickstart -k gui/$(id -u)/com.sdmj76.MousecapeHelper   # restart Helper from NEW file
 # Verify: inode of the running Helper == installed file (else it is the OLD binary)
-lsof -p $(pgrep -f MousecapeHelper.app/Contents/MacOS) | grep ' txt .*MacOS/MousecapeHelper'
+lsof -p $(pgrep -x com.sdmj76.MousecapeHelper) | grep ' txt .*MacOS/MousecapeHelper'
 stat -f %i /Applications/Mousecape.app/Contents/Library/LoginItems/MousecapeHelper.app/Contents/MacOS/MousecapeHelper
 
 # TRAP (2026-11-05): the Helper is a KeepAlive SMAppService login item. `pkill` + `sleep 2`
