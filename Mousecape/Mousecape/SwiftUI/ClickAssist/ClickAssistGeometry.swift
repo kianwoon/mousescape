@@ -115,13 +115,14 @@ enum GeometryPolicy {
             && hitRole == "AXGroup" && FrameContinuity.delta(ancestorFrame, hitFrame) <= 1
     }
 
-    /// A link's clipped label can report bounds wider than its clickable area.
-    /// Only the actual text child can vouch for that live link, at an inside point.
+    /// A link's or button's label can report bounds wider than its clickable area
+    /// (OpenCode tab links, "Effective permissions" disclosure button).
+    /// Only the actual text child can vouch for that live control, at an inside point.
     static func confirmsLinkTextHit(candidateRole: String, hitRole: String,
                                      enabled: Bool, frameMatches: Bool,
                                      hitParentIsCandidate: Bool,
                                      destinationInsideCandidate: Bool) -> Bool {
-        candidateRole == "AXLink" && hitRole == "AXStaticText" && enabled
+        (candidateRole == "AXLink" || candidateRole == "AXButton") && hitRole == "AXStaticText" && enabled
             && frameMatches && hitParentIsCandidate && destinationInsideCandidate
     }
 

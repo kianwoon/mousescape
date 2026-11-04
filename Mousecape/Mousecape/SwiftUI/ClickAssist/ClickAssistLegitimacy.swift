@@ -151,18 +151,23 @@ final class LegitimacyPolicy: @unchecked Sendable {
             diagnostic("LEGITIMACY_SYSTEM_HIT confirmed role=\(role(of: system.element)) appHitRole=\(role(of: element))")
             return .confirmed
         }
-        // OpenCode's clipped tab label extends beyond the link's AX bounds.
+        // OpenCode's tab label / disclosure-button text extends beyond the AX bounds.
         // Prove direct ownership by AX identity, rather than broadening geometry
         // acceptance to unrelated text, enclosing groups, or covered controls.
-        if candidateRole == "AXLink", role(of: element) == "AXStaticText",
+        if candidateRole == "AXLink" || candidateRole == "AXButton", role(of: element) == "AXStaticText",
            let parent = attr(element, kAXParentAttribute),
            let liveFrame = axFrame(candidateElement),
+           // Chromium may hand back a fresh proxy for the same parent per query,
+           // so identity alone is brittle: also accept a parent of the candidate's
+           // role whose live frame is the candidate's own.
            GeometryPolicy.confirmsLinkTextHit(candidateRole: candidateRole,
                hitRole: role(of: element),
                enabled: (attr(candidateElement, kAXEnabledAttribute) as? Bool) != false
                    && (attr(candidateElement, "AXHidden") as? Bool) != true,
                frameMatches: sameFrame(candidate, liveFrame),
-               hitParentIsCandidate: CFEqual(parent, candidateElement),
+               hitParentIsCandidate: CFEqual(parent, candidateElement)
+                   || (role(of: parent as! AXUIElement) == candidateRole
+                       && axFrame(parent as! AXUIElement).map { sameFrame($0, liveFrame) } == true),
                destinationInsideCandidate: liveFrame.contains(destination)) {
             return .confirmed
         }

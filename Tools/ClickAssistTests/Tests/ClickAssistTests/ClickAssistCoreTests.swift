@@ -113,6 +113,9 @@ final class ClickAssistCoreTests: XCTestCase {
                 destinationInsideCandidate: inside)
         }
         XCTAssertTrue(confirms())
+        XCTAssertTrue(confirms(role: "AXButton"), "Disclosure button whose label overflows its bounds")
+        XCTAssertFalse(confirms(role: "AXButton", parent: false))
+        XCTAssertFalse(confirms(role: "AXButton", inside: false))
         XCTAssertFalse(confirms(parent: false), "Overlaid/unrelated text cannot confirm a link")
         XCTAssertFalse(confirms(enabled: false))
         XCTAssertFalse(confirms(frame: false), "Stale link geometry must not acquire evidence")
