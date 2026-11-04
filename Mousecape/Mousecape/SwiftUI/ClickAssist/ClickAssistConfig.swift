@@ -97,6 +97,14 @@ final class ClickAssistPreferences: @unchecked Sendable {
     }
 }
 
+/// Which process hosts the Click Assist engine. During the agent → Helper
+/// consolidation the legacy standalone agent still ships; whichever host sees it
+/// running must yield so only one system-wide event tap exists.
+enum ClickAssistHost {
+    /// Bundle id of the legacy standalone ClickAssistAgent login item.
+    static let legacyAgentBundleIdentifier = "com.sdmj76.ClickAssistAgent"
+}
+
 enum ClickAssistRuntimeStatus: Equatable, Sendable {
     case active
     case pausedDisabled

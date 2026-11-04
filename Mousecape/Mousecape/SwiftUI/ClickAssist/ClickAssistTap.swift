@@ -31,6 +31,12 @@ enum TargetSource: Sendable {
 final class AssistTap: @unchecked Sendable {
     private(set) var tap: CFMachPort?
     private var source: CFRunLoopSource?
+    /// Run loop hosting the tap source (and therefore the callback). Main by
+    /// default (app / legacy agent). A host whose main thread must never gate
+    /// input delivery (MousecapeHelper: wake/apply work runs there) passes a
+    /// dedicated run loop; then every tap-state mutation is marshalled onto it so
+    /// the callback stays the single owner of its state.
+    private var hostRunLoop: CFRunLoop = CFRunLoopGetMain()
     private var latched: GestureLatch?
     /// Set when a center-snapped down turned into a drag: the rest of that
     /// gesture is passed through unmutated (no drag-to-snapped-center hijack).
@@ -134,15 +140,36 @@ final class AssistTap: @unchecked Sendable {
 
     @discardableResult
     func setTolerance(_ v: CGFloat) -> CGFloat {
-        tolerance = AssistTap.clampTolerance(v)
-        return tolerance
+        let clamped = AssistTap.clampTolerance(v)
+        onHost { [self] in tolerance = clamped }
+        return clamped
     }
 
-    deinit { stop() }
+    /// True when the caller is already on the run loop that hosts the callback
+    /// (always the case for main-hosted taps called from main).
+    private var isOnHost: Bool { CFEqual(CFRunLoopGetCurrent(), hostRunLoop) }
+
+    /// Runs `body` on the host run loop: inline when already there, otherwise
+    /// enqueued with a wake-up. Never waits, so a caller on main can never be
+    /// stalled by the tap thread.
+    private func onHost(_ body: @escaping () -> Void) {
+        if isOnHost { body(); return }
+        CFRunLoopPerformBlock(hostRunLoop, CFRunLoopMode.commonModes.rawValue, body)
+        CFRunLoopWakeUp(hostRunLoop)
+    }
+
+    /// Best-effort synchronous fallback; `stop()` is the normal teardown path.
+    /// `stop()` on a dedicated host keeps `self` alive until teardown has run
+    /// there, so deinit normally finds nothing left to tear down.
+    deinit { teardown() }
 
     /// P3 interruption gate: toggle the tap without touching latched state.
     @discardableResult
     func setTapEnabled(_ on: Bool) -> Bool {
+        guard isOnHost else {
+            onHost { [self] in _ = setTapEnabled(on) }
+            return on
+        }
         guard let tap else { return false }
         manuallyDisabled = !on
         CGEvent.tapEnable(tap: tap, enable: on)
@@ -153,8 +180,9 @@ final class AssistTap: @unchecked Sendable {
     // MARK: - tap lifecycle
 
     @discardableResult
-    func start(point: CGEventTapLocation = .cghidEventTap) -> Bool {
+    func start(point: CGEventTapLocation = .cghidEventTap, runLoop: CFRunLoop? = nil) -> Bool {
         guard tap == nil else { return true }
+        hostRunLoop = runLoop ?? CFRunLoopGetMain()
         setForegroundPID(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0)
         focusObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: nil) { [weak self] note in
@@ -177,21 +205,28 @@ final class AssistTap: @unchecked Sendable {
         tap = port
         let s = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
         source = s
-        CFRunLoopAddSource(CFRunLoopGetMain(), s, .commonModes)
+        CFRunLoopAddSource(hostRunLoop, s, .commonModes)
+        CFRunLoopWakeUp(hostRunLoop)
         CGEvent.tapEnable(tap: port, enable: true)
-        log("TAP_ACTIVE mutable=defaultTap point=\(point == .cghidEventTap ? "hid" : "session") tolerance=\(tolerance) snapshotMiss=\(cacheStoreForDelivery?.snapshotTrylockMiss ?? 0)")
+        log("TAP_ACTIVE mutable=defaultTap point=\(point == .cghidEventTap ? "hid" : "session") host=\(isOnHost ? "main" : "dedicated") tolerance=\(tolerance) snapshotMiss=\(cacheStoreForDelivery?.snapshotTrylockMiss ?? 0)")
         // Runtime invariant marker: the callback is a pure snapshot consumer; AX
         // runs only on the resolver queue (evidence) and the serial worker (press).
         log("TAP_AX_FREE invariant=callback-zero-ax displayMaxAgeMs=\(Int(ClickAssistEvidence.displayMaxAgeMs)) activationMaxAgeMs=\(Int(ClickAssistEvidence.activationMaxAgeMs)) pressExpiryMs=\(Int(AXPressGate.defaultExpiryMs))")
         return true
     }
 
+    /// Tears the tap down ON its host run loop. On a dedicated host the block
+    /// retains `self`, so an in-flight callback never sees a freed refcon.
     func stop() {
+        onHost { [self] in teardown() }
+    }
+
+    private func teardown() {
         if let focusObserver { NSWorkspace.shared.notificationCenter.removeObserver(focusObserver) }
         focusObserver = nil
         pendingBackgroundClick = nil
         if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
-        if let source { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        if let source { CFRunLoopRemoveSource(hostRunLoop, source, .commonModes) }
         if let tap { CFMachPortInvalidate(tap) }
         tap = nil
         source = nil

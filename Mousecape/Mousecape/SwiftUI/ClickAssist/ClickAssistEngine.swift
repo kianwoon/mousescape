@@ -34,6 +34,11 @@ final class ClickAssistEngine {
     /// Default preserves the existing app-hosted behavior.
     var promptsForAccessibility = true
 
+    /// Run loop that hosts the event tap. nil = main run loop (app / legacy
+    /// agent, unchanged). MousecapeHelper passes a dedicated thread's run loop so
+    /// its wake/apply work on main can never delay or time out input delivery.
+    var tapHostRunLoop: CFRunLoop?
+
     private var trustPromptRequested = false
     private var prefObserverRegistered = false
     private var cacheObserverInstalled = false
@@ -200,7 +205,7 @@ final class ClickAssistEngine {
         t.activationSink = { [weak client] request in
             client?.activate(request)
         }
-        guard t.start(point: .cghidEventTap) else {
+        guard t.start(point: .cghidEventTap, runLoop: tapHostRunLoop) else {
             debugLog("[ClickAssist] ENGINE_PAUSED reason=tap-create-failed")
             client.stop()
             serviceClient = nil

@@ -75,6 +75,7 @@ class CursorState: ObservableObject {
 
 struct MenuBarContentView: View {
     @EnvironmentObject var cursorState: CursorState
+    @ObservedObject private var clickAssist = HelperClickAssistController.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -96,6 +97,17 @@ struct MenuBarContentView: View {
 
             Button(String(localized: "Reset Cursors")) {
                 resetCursors()
+            }
+
+            Divider()
+
+            Text(String(localized: "Click Assist: \(clickAssist.statusText)"))
+                .foregroundColor(.secondary)
+            Toggle(String(localized: "Enable Click Assist"), isOn: Binding(
+                get: { clickAssist.enabled },
+                set: { clickAssist.setEnabled($0) }))
+            Button(String(localized: "Grant Accessibility…")) {
+                clickAssist.grantAccessibility()
             }
 
             Divider()
