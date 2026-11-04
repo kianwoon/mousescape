@@ -86,9 +86,9 @@ final class HelperClickAssistController: ObservableObject {
 
         // Retire a leftover legacy agent first: only one system-wide tap may exist.
         if ClickAssistHost.terminateLegacyAgentIfRunning() {
-            NSLog("[MousecapeHelper] ClickAssist terminated legacy agent")
+            clickAssistLifecycleLog("HELPER_LEGACY_AGENT_TERMINATED")
         }
-        NSLog("[MousecapeHelper] ClickAssist host engine=starting")
+        clickAssistLifecycleLog("HELPER_ENGINE_STARTING trusted=\(lastTrusted) enabled=\(engine.config.enabled)")
         // Re-sync + re-read prefs and apply: starts the tap only when the shared
         // pref is enabled.
         engine.refreshFromPreferences()
@@ -113,6 +113,7 @@ final class HelperClickAssistController: ObservableObject {
     }
 
     func grantAccessibility() {
+        clickAssistLifecycleLog("HELPER_GRANT_ACCESSIBILITY trusted=\(AXIsProcessTrusted())")
         let prompt = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(prompt)
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
@@ -139,7 +140,7 @@ final class HelperClickAssistController: ObservableObject {
         let trusted = AXIsProcessTrusted()
         defer { lastTrusted = trusted }
         guard trusted, !lastTrusted, engine.config.enabled, engine.tap == nil else { return }
-        NSLog("[MousecapeHelper] ClickAssist accessibility granted, restarting engine")
+        clickAssistLifecycleLog("HELPER_ACCESSIBILITY_GRANTED action=restart-engine")
         engine.reloadFromPreferences()
     }
 
@@ -149,7 +150,7 @@ final class HelperClickAssistController: ObservableObject {
         publishStatus()
     }
 
-    /// Runtime status record for the main app for the main app.
+    /// Runtime status record for the main app.
     private func publishStatus() {
         let state = engine.runtimeStatus.reportedState
         let tolerance = engine.config.tolerancePoints

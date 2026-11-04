@@ -17,13 +17,19 @@ xcodebuild -project Mousecape/Mousecape.xcodeproj -scheme mousecloak     -config
 
 # Install to /Applications (replace, de-quarantine, verify signature)
 SRC=~/Library/Developer/Xcode/DerivedData/Mousecape-*/Build/Products/Release/Mousecape.app
-killall Mousecape 2>/dev/null; pkill -f MousecapeHelper 2>/dev/null; sleep 2
+killall Mousecape 2>/dev/null
 rm -rf /Applications/Mousecape.app && cp -R "$SRC" /Applications/Mousecape.app
 xattr -dr com.apple.quarantine /Applications/Mousecape.app
-codesign --verify --strict /Applications/Mousecape.app
+Tools/sign-dev.sh /Applications/Mousecape.app      # BEFORE the new binary first runs (TCC)
+launchctl kickstart -k gui/$(id -u)/com.sdmj76.MousecapeHelper   # restart Helper from NEW file
+# Verify: inode of the running Helper == installed file (else it is the OLD binary)
+lsof -p $(pgrep -f MousecapeHelper.app/Contents/MacOS) | grep ' txt .*MacOS/MousecapeHelper'
+stat -f %i /Applications/Mousecape.app/Contents/Library/LoginItems/MousecapeHelper.app/Contents/MacOS/MousecapeHelper
 
-# IMPORTANT: kill running processes BEFORE replacing, or the OLD binary keeps running.
-# Helper process name is "com.sdmj76.MousecapeHelper" (pkill -f MousecapeHelper works).
+# TRAP (2026-11-05): the Helper is a KeepAlive SMAppService login item. `pkill` + `sleep 2`
+# + replace lets launchd relaunch the OLD binary inside the sleep window, then the copy
+# lands underneath it -> stale Helper (no Click Assist menu, no status.json). Always
+# restart the Helper AFTER the copy (kickstart -k) and confirm the inode.
 ```
 
 ### Binary verification traps (cost hours — memorize)

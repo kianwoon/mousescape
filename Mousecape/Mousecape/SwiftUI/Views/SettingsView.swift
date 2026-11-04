@@ -114,8 +114,11 @@ struct GeneralSettingsView: View {
             Section("Startup") {
                 Toggle("Apply at Login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { _, newValue in
-                        // Control MousecapeHelper's launch-at-login registration only
-                        let helper = SMAppService.loginItem(identifier: "com.sdmj76.MousecapeHelper")
+                        // Control MousecapeHelper's launch-at-login registration only.
+                        // SMAppService is the source of truth; skip when the toggle was
+                        // merely synced to it (onAppear) so no spurious (un)register runs.
+                        let helper = SMAppService.loginItem(identifier: ClickAssistHost.helperBundleIdentifier)
+                        guard newValue != (helper.status == .enabled) else { return }
                         do {
                             if newValue {
                                 try helper.register()
@@ -229,6 +232,7 @@ struct GeneralSettingsView: View {
             loadScaleMode()  // This now also calls loadCursorScale()
             loadHandedness()
             isPointerCustomized = isSystemPointerColorCustomized()
+            launchAtLogin = SMAppService.loginItem(identifier: ClickAssistHost.helperBundleIdentifier).status == .enabled
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.willBecomeActiveNotification)) { _ in
             isPointerCustomized = isSystemPointerColorCustomized()
@@ -1364,13 +1368,13 @@ final class ClickAssistSettingsModel {
     }
 }
 
-/// Reads the agent's runtime status record (file = truth). The Darwin
+/// Reads the Helper's runtime status record (file = truth). The Darwin
 /// notification is only a hint to re-read; the timer covers a missed hint and a
-/// stale heartbeat covers an agent that died without cleaning up.
+/// stale heartbeat covers a Helper that died without cleaning up.
 @MainActor
 @Observable
 final class ClickAssistStatusObserver {
-    private(set) var text = "Not running — agent unavailable"
+    private(set) var text = "Not running — Mousecape Helper unavailable"
     private(set) var isActive = false
 
     private var timer: Timer?
@@ -1405,13 +1409,13 @@ final class ClickAssistStatusObserver {
 
     func refresh() {
         guard let record = ClickAssistStatusStore.read() else {
-            text = "Not running — agent unavailable"
+            text = "Not running — Mousecape Helper unavailable"
             isActive = false
             return
         }
-        // Stale heartbeat => the agent is not actually running, whatever the file says.
+        // Stale heartbeat => the Helper is not actually running, whatever the file says.
         guard Date().timeIntervalSince(record.heartbeat) <= ClickAssistStatusStore.staleThreshold else {
-            text = "Not running — agent unavailable"
+            text = "Not running — Mousecape Helper unavailable"
             isActive = false
             return
         }
@@ -1432,8 +1436,6 @@ final class ClickAssistStatusObserver {
 struct ClickAssistSettingsView: View {
     @State private var assist = ClickAssistSettingsModel.shared
     @State private var status = ClickAssistStatusObserver()
-    @State private var agentLoginItem = SMAppService.loginItem(identifier: ClickAssistHost.helperBundleIdentifier).status == .enabled
-    @State private var loginItemError: String?
     @Environment(AppState.self) private var appState
 
     var body: some View {
@@ -1462,18 +1464,11 @@ struct ClickAssistSettingsView: View {
             }
 
             Section("Background Helper") {
-                Toggle("Run Click Assist at login (Mousecape Helper)", isOn: $agentLoginItem)
-                    .onChange(of: agentLoginItem) { _, newValue in
-                        updateLoginItem(newValue)
-                    }
-                Text("Keeps assist running after Mousecape quits.")
+                // Single source of truth for the Helper's login item is
+                // General › Apply at Login (same SMAppService registration).
+                Text("Click Assist runs inside the Mousecape Helper, so it keeps running after Mousecape quits. It starts at login when General › Apply at Login is on.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if let loginItemError {
-                    Text(loginItemError)
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                }
             }
 
             Section("Status") {
@@ -1496,26 +1491,9 @@ struct ClickAssistSettingsView: View {
         .onAppear {
             assist.refreshFromPreferences()
             status.start()
-            agentLoginItem = SMAppService.loginItem(identifier: ClickAssistHost.helperBundleIdentifier).status == .enabled
         }
         .onDisappear {
             status.stop()
-        }
-    }
-
-    /// Register/unregister the embedded login item from the app side.
-    private func updateLoginItem(_ enabled: Bool) {
-        let service = SMAppService.loginItem(identifier: ClickAssistHost.helperBundleIdentifier)
-        do {
-            if enabled {
-                try service.register()
-            } else {
-                try service.unregister()
-            }
-            loginItemError = nil
-        } catch {
-            loginItemError = error.localizedDescription
-            agentLoginItem = (service.status == .enabled)
         }
     }
 }
