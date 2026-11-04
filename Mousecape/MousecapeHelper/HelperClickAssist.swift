@@ -10,9 +10,8 @@
 //    - XPC client + snapshot decoding: the service client's own utility queue;
 //    - AX element work: the ClickAssistResolver XPC service (out of process);
 //    - engine state, overlay and this controller: main actor (cheap UI only).
-//  While the legacy ClickAssistAgent is running the Helper never starts its
-//  engine (single system-wide tap); it yields and resumes as the agent comes
-//  and goes.
+//  The Helper is the single resident app: at launch it terminates any leftover
+//  legacy ClickAssistAgent (single system-wide tap), then hosts unconditionally.
 //
 
 import AppKit
@@ -63,15 +62,11 @@ final class HelperClickAssistController: ObservableObject {
     @Published private(set) var statusText = ""
 
     private let engine = ClickAssistEngine.shared
-    /// True while this Helper owns the engine (legacy agent not running).
-    private var hosting = false
     private var started = false
     private var lastTrusted = false
-    private var skipLogged = false
     private var refreshTimer: Timer?
-    private var workspaceObservers: [NSObjectProtocol] = []
 
-    /// Same cadences as the legacy agent's AgentStatusController.
+    /// Status / accessibility-trust refresh cadence and status-record heartbeat.
     private static let refreshInterval: TimeInterval = 1
     private static let heartbeatInterval: TimeInterval = 2
 
@@ -89,19 +84,15 @@ final class HelperClickAssistController: ObservableObject {
         engine.tapHostRunLoop = ClickAssistTapThread.shared.runLoop
         lastTrusted = AXIsProcessTrusted()
 
-        let center = NSWorkspace.shared.notificationCenter
-        for name in [NSWorkspace.didLaunchApplicationNotification,
-                     NSWorkspace.didTerminateApplicationNotification] {
-            let token = center.addObserver(forName: name, object: nil, queue: .main) { note in
-                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
-                guard app?.bundleIdentifier == ClickAssistHost.legacyAgentBundleIdentifier else { return }
-                Task { @MainActor in HelperClickAssistController.shared.tick() }
-            }
-            workspaceObservers.append(token)
+        // Retire a leftover legacy agent first: only one system-wide tap may exist.
+        if ClickAssistHost.terminateLegacyAgentIfRunning() {
+            NSLog("[MousecapeHelper] ClickAssist terminated legacy agent")
         }
-        updateHosting()
-        // Notifications are the fast path; the timer also re-checks the legacy
-        // agent (covers missed notifications) and heartbeats the status record.
+        NSLog("[MousecapeHelper] ClickAssist host engine=starting")
+        // Re-sync + re-read prefs and apply: starts the tap only when the shared
+        // pref is enabled.
+        engine.refreshFromPreferences()
+        publishStatus()
         refreshTimer = Timer.scheduledTimer(withTimeInterval: Self.refreshInterval, repeats: true) { _ in
             Task { @MainActor in HelperClickAssistController.shared.tick() }
         }
@@ -110,24 +101,14 @@ final class HelperClickAssistController: ObservableObject {
     func shutdown() {
         refreshTimer?.invalidate()
         refreshTimer = nil
-        workspaceObservers.forEach { NSWorkspace.shared.notificationCenter.removeObserver($0) }
-        workspaceObservers.removeAll()
-        if hosting {
-            engine.shutdown()
-            hosting = false
-            ClickAssistStatusStore.remove()
-        }
+        engine.shutdown()
+        ClickAssistStatusStore.remove()
     }
 
     // MARK: - menu actions
 
     func setEnabled(_ value: Bool) {
-        if hosting {
-            engine.requestEnabled(value)
-        } else {
-            // Yielding: write intent only; the legacy agent observes the pref.
-            engine.prefs.writeEnabled(value)
-        }
+        engine.requestEnabled(value)
         refresh()
     }
 
@@ -142,45 +123,14 @@ final class HelperClickAssistController: ObservableObject {
 
     /// Called when the menu opens: re-sync prefs written by other processes.
     func refreshFromMenu() {
-        if !hosting {
-            CFPreferencesSynchronize(ClickAssistPreferences.domain as CFString,
-                                     kCFPreferencesCurrentUser, kCFPreferencesAnyHost)
-        }
         refresh()
     }
 
     // MARK: - hosting
 
     private func tick() {
-        updateHosting()
         retryAfterTrustGranted()
         refresh()
-    }
-
-    private func legacyAgentRunning() -> Bool {
-        !NSRunningApplication.runningApplications(
-            withBundleIdentifier: ClickAssistHost.legacyAgentBundleIdentifier).isEmpty
-    }
-
-    private func updateHosting() {
-        let agentRunning = legacyAgentRunning()
-        if agentRunning, hosting {
-            // The agent writes its own status record; we just stop ours.
-            engine.shutdown()
-            hosting = false
-            NSLog("[MousecapeHelper] ClickAssist yield reason=legacy-agent-running")
-        } else if agentRunning, !skipLogged {
-            skipLogged = true
-            NSLog("[MousecapeHelper] ClickAssist skip reason=legacy-agent-running")
-        } else if !agentRunning, !hosting {
-            hosting = true
-            NSLog("[MousecapeHelper] ClickAssist host engine=starting")
-            // Re-sync + re-read prefs (engine.config is stale after a yield, during
-            // which the toggle only wrote the pref), re-register the observer and
-            // apply: starts the tap only when the shared pref is enabled.
-            engine.refreshFromPreferences()
-            publishStatus()
-        }
     }
 
     /// The engine pauses (no tap) while untrusted; once the user grants access,
@@ -188,25 +138,19 @@ final class HelperClickAssistController: ObservableObject {
     private func retryAfterTrustGranted() {
         let trusted = AXIsProcessTrusted()
         defer { lastTrusted = trusted }
-        guard hosting, trusted, !lastTrusted, engine.config.enabled, engine.tap == nil else { return }
+        guard trusted, !lastTrusted, engine.config.enabled, engine.tap == nil else { return }
         NSLog("[MousecapeHelper] ClickAssist accessibility granted, restarting engine")
         engine.reloadFromPreferences()
     }
 
     private func refresh() {
-        let config = hosting ? engine.config : engine.prefs.readConfig()
-        enabled = config.enabled
-        if !hosting {
-            statusText = String(localized: "Handled by Click Assist agent")
-        } else {
-            statusText = engine.runtimeSummary
-            publishStatus()
-        }
+        enabled = engine.config.enabled
+        statusText = engine.runtimeSummary
+        publishStatus()
     }
 
-    /// Runtime status record for the main app (mirrors AgentStatusController).
+    /// Runtime status record for the main app for the main app.
     private func publishStatus() {
-        guard hosting else { return }
         let state = engine.runtimeStatus.reportedState
         let tolerance = engine.config.tolerancePoints
         let now = Date()

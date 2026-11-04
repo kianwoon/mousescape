@@ -176,7 +176,7 @@ final class AppState: @unchecked Sendable {
     // MARK: - Click Assist
 
     /// Preference-only bridge. The Mousecape app never hosts the click-assist
-    /// runtime: the persistent ClickAssistAgent is the sole owner of the HID tap,
+    /// runtime: the persistent MousecapeHelper is the sole owner of the HID tap,
     /// resolver and overlay. The app target does not compile the engine/host
     /// sources, so a second tap cannot be created here even by accident.
     let clickAssist = ClickAssistSettingsModel.shared
@@ -194,8 +194,8 @@ final class AppState: @unchecked Sendable {
         }
     }
 
-    /// Settings toggle path: write the pref only. The agent observes the pref
-    /// domain's Darwin notification and starts/stops itself.
+    /// Settings toggle path: write the pref only. The Helper observes the pref
+    /// domain's Darwin notification and starts/stops the engine itself.
     func setClickAssistEnabled(_ enabled: Bool) {
         clickAssist.requestEnabled(enabled)
     }

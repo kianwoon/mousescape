@@ -1,9 +1,9 @@
 // baseline-guard:allow new agent-only XPC client (replaces the in-process resolver)
 //
 //  ClickAssistServiceClient.swift
-//  ClickAssistAgent
+//  MousecapeHelper
 //
-//  XPC-fed CacheStore. The agent NEVER makes AX element calls: it decodes published
+//  XPC-fed CacheStore. The host NEVER makes AX element calls: it decodes published
 //  snapshots, feeds the same CacheStore the tap already reads, and forwards
 //  activation requests to the resolver service. The tap callback only ever does
 //  the existing trylock read; every call into this object is already off-callback.

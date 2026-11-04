@@ -54,8 +54,8 @@ class HelperAppDelegate: NSObject, NSApplicationDelegate {
         // Accessibility permission required).  Config lives in prefs.
         CursorHotkeyManager.shared.start()
 
-        // Click Assist (folded in from the legacy ClickAssistAgent). Skips —
-        // and logs — while the legacy agent is running; tap runs off-main.
+        // Click Assist (the Helper is its sole host; retires any leftover
+        // legacy ClickAssistAgent first). Tap runs off-main.
         HelperClickAssistController.shared.start()
     }
 

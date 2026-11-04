@@ -85,6 +85,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         migrateToHelper()
         migrateFromOldHelper()
+        retireLegacyClickAssistAgent()
 
         // Launch helper automatically when main app starts
         launchHelper()
@@ -207,6 +208,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 try? process.run()
                 process.waitUntilExit()
             }
+        }
+    }
+
+    /// One-time best-effort retirement of the removed ClickAssistAgent login
+    /// item. unregister() may be a no-op/throw once the agent is no longer in the
+    /// bundle (ServiceManagement resolves the item from the bundle); errors are
+    /// ignored. A still-running legacy process is terminated either way.
+    private func retireLegacyClickAssistAgent() {
+        let key = "clickAssistLegacyAgentRetired"
+        guard !UserDefaults.standard.bool(forKey: key) else { return }
+        UserDefaults.standard.set(true, forKey: key)
+        DispatchQueue.global(qos: .utility).async {
+            try? SMAppService.loginItem(identifier: ClickAssistHost.legacyAgentBundleIdentifier).unregister()
+            ClickAssistHost.terminateLegacyAgentIfRunning()
         }
     }
 
