@@ -866,21 +866,16 @@ struct CustomScaleView: View {
     }
 
     private func recalculateMaxScaleAndApply() {
-        // Custom mode: CGSSetCursorScale = 1.0, each cursor registers at its
-        // desired point size directly (nativeSize × desiredScale).
-        let baseScale = 1.0
-        // Save baseScale to MCCustomMaxScale for listen.m/session restore
-        CFPreferencesSetAppValue(
-            "MCCustomMaxScale" as CFString,
-            baseScale as CFNumber,
-            Self.preferenceDomain as CFString
-        )
-        CFPreferencesAppSynchronize(Self.preferenceDomain as CFString)
-        // Set system scale immediately for visual feedback (lightweight CGS call)
-        _ = setCursorScale(Float(baseScale))
-        // Do NOT call refreshSystemDefaultCursors() here — it re-registers all
-        // cursors including cape ones, causing inner shadow to double.
-        // Scale changes take effect on next explicit Apply (per v1.2.0 design).
+        // Custom mode: the base scale (MCCustomMaxScale) is OWNED by the apply
+        // path (MCCustomModeBaseScale in apply.m) — 1.0 normally, or the
+        // overflow factor k when a cursor's desired size exceeds the GPU-safe
+        // registration limit. Do NOT overwrite it or call setCursorScale here:
+        // registrations are declared at size/k, so forcing 1.0 between edits
+        // would visually shrink every cursor and corrupt session restore.
+        // Do NOT call refreshSystemDefaultCursors() here either — it
+        // re-registers all cursors including cape ones, causing inner shadow
+        // to double. Scale changes take effect on next explicit Apply
+        // (per v1.2.0 design).
     }
 }
 
