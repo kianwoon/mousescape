@@ -287,6 +287,7 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         // an accepted AppKit request alone does not establish keyboard focus.
         let axApp = AXUIElementCreateApplication(request.pid)
         AXUIElementSetMessagingTimeout(axApp, 0.05)
+        let wasActive = app.isActive
         let frontResult = AXUIElementSetAttributeValue(axApp, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
         guard app.isActive || frontResult == .success || app.activate(options: []) else {
             return (false, "activation-refused")
@@ -352,6 +353,26 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         if target.chromeEligible {
             let result = AXUIElementPerformAction(element, "AXPress" as CFString)
             return (result == .success, result == .success ? "axpress-once" : "axpress-failed-no-retry")
+        }
+        // Activated by this delivery: give the page time to start accepting input
+        // and tell it where the pointer is before the press, otherwise an
+        // Electron button logs delivered=1 and never reacts.
+        var settleMs = 0
+        if !wasActive {
+            let remaining = request.deadline - CACurrentMediaTime() - BackgroundClickPolicy.settleDeadlineMargin
+            // An explicit tuning override is honored beyond the request deadline.
+            let settle = BackgroundClickPolicy.settleOverrideSeconds()
+                ?? min(BackgroundClickPolicy.postActivationSettle, max(0, remaining))
+            if settle > 0 { Thread.sleep(forTimeInterval: settle) }
+            settleMs = Int(settle * 1000)
+            if let moveSource = CGEventSource(stateID: .hidSystemState),
+               let move = CGEvent(mouseEventSource: moveSource, mouseType: .mouseMoved,
+                                  mouseCursorPosition: click.point, mouseButton: .left) {
+                move.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
+                move.flags = []
+                move.post(tap: .cghidEventTap)
+            }
+            svcLog("BACKGROUND_CLICK_SETTLE request=\(request.requestID) settleMs=\(settleMs) activatedHere=1")
         }
         guard let source = CGEventSource(stateID: .hidSystemState),
               let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,

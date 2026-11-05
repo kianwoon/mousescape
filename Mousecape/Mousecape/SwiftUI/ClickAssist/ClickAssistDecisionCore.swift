@@ -542,6 +542,25 @@ struct BackgroundClickWire: Codable, Equatable, Sendable {
 
 enum BackgroundClickPolicy {
     static let eventMarker: Int64 = 0x4D434243
+    /// Pause between "the app reports frontmost" and the injected click when this
+    /// delivery had to activate the app itself. Chromium/Electron web content
+    /// takes a moment after activation to accept input: a click posted at once is
+    /// delivered (delivered=1) but ignored, so the button never reacts. Bounded by
+    /// the request deadline at the call site.
+    static let postActivationSettle: TimeInterval = 0.5
+    /// Margin kept before the request deadline when spending the settle pause.
+    static let settleDeadlineMargin: TimeInterval = 0.02
+    /// Optional tuning override (milliseconds) for the post-activation settle,
+    /// read from the app preferences domain at each delivery. Absent = default.
+    static let settleOverrideDomain = "com.sdmj76.Mousecape"
+    static let settleOverrideKey = "MCClickAssistSettleMs"
+    static let settleOverrideMaxMs = 2000
+    static func settleOverrideSeconds() -> TimeInterval? {
+        guard let raw = CFPreferencesCopyAppValue(settleOverrideKey as CFString,
+                                                  settleOverrideDomain as CFString) as? Int,
+              raw >= 0 else { return nil }
+        return TimeInterval(min(raw, settleOverrideMaxMs)) / 1000
+    }
     static func eligible(targetPID: Int32, foregroundPID: Int32?, candidate: DecisionCore.Candidate,
                          generation: UInt64, point: CGPoint, now: Double,
                          nativeTolerance: CGFloat = 0,
@@ -567,12 +586,20 @@ enum BackgroundClickPolicy {
     /// Releasing the captured down for that noise hands the gesture back to
     /// native routing, which only activates the background window (the user
     /// must click again). Track controls keep every drag: movement is intent.
+    /// Movement below this (points) between press and release is sensor/trackpad
+    /// jitter for ANY non-track control, position-sensitive roles included. A
+    /// sub-pixel wobble released as a "drag" sent a native click to an inactive
+    /// Electron window, which swallows it (only activation happens).
+    static let subPointJitter: CGFloat = 0.5
     static func isClickPointerNoise(role: String, down: CGPoint, current: CGPoint) -> Bool {
-        // Track controls and position-sensitive roles (sliders, text fields,
-        // menu items, radios...) keep every drag: movement is intent there.
-        !GeometryPolicy.trackRoles.contains(role)
-            && (GeometryPolicy.usesNativeRowAction(role) || !DecisionCore.positionSensitiveRoles.contains(role))
-            && hypot(current.x - down.x, current.y - down.y) <= ClickAssistEvidence.pointerMoveEpsilon
+        // Track controls keep every drag: movement is intent there.
+        if GeometryPolicy.trackRoles.contains(role) { return false }
+        let moved = hypot(current.x - down.x, current.y - down.y)
+        if moved <= subPointJitter { return true }
+        // Position-sensitive roles (text fields, menu items, radios...) keep
+        // larger movements: that is intent there.
+        return (GeometryPolicy.usesNativeRowAction(role) || !DecisionCore.positionSensitiveRoles.contains(role))
+            && moved <= ClickAssistEvidence.pointerMoveEpsilon
     }
     static func matches(_ click: BackgroundClickWire, rect: CGRect) -> Bool {
         click.x.isFinite && click.y.isFinite && GeometryPolicy.isValidFrame(click.rect)
