@@ -52,13 +52,13 @@ private enum ClickAssistLogFile {
                 }
                 try? fm.moveItem(at: fileURL, to: backup(1))
             }
-            if !fm.fileExists(atPath: fileURL.path) {
-                fm.createFile(atPath: fileURL.path, contents: nil)
-            }
-            guard let handle = FileHandle(forWritingAtPath: fileURL.path) else { return }
-            defer { try? handle.close() }
-            try handle.seekToEnd()
-            try handle.write(contentsOf: data)
+            // O_APPEND: the resolver XPC service appends to this same file from
+            // another process; seekToEnd + write let each overwrite the other.
+            let fd = open(fileURL.path, O_WRONLY | O_APPEND | O_CREAT,
+                          S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+            guard fd >= 0 else { return }
+            defer { close(fd) }
+            _ = data.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
         } catch {
             // Intentionally silent: logging is best-effort diagnostics.
         }

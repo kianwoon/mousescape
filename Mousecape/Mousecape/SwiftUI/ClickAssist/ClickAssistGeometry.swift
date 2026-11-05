@@ -272,36 +272,76 @@ enum GeometryPolicy {
             && track.height <= max(promotedTrackMaxHeightFloor, promotedTrackMaxHeightRatio * thumb.height)
     }
 
-    /// Nearest-first ancestor frames: the first that contains the thumb (with
-    /// slack) and is track-shaped is the promoted track; nil when none is.
+    /// The bar a knob rides on: the knob's centre lies within the bar's
+    /// x-span (± half a knob, so a knob parked at either end still counts) and
+    /// the bar's y-span holds the knob's centre line. A knob is usually TALLER
+    /// than its bar (x.com: 30 pt knob on a 3 pt bar), so plain containment
+    /// never holds; mere overlap would admit a control row beside the knob.
+    private static func knobRides(_ thumb: CGRect, on bar: CGRect) -> Bool {
+        let halfKnob = thumb.width / 2, slack = thumbContainmentSlack
+        return thumb.midX >= bar.minX - halfKnob && thumb.midX <= bar.maxX + halfKnob
+            && thumb.midY >= bar.minY - slack && thumb.midY <= bar.maxY + slack
+    }
+
+    /// Promoted track: x-span from the BAR (never the knob, so the published
+    /// origin/key stays put while the knob moves or sits past an end), y-span
+    /// = bar ∪ knob so the live knob always lies inside the track.
+    private static func track(bar: CGRect, thumb: CGRect) -> CGRect {
+        let minY = min(bar.minY, thumb.minY), maxY = max(bar.maxY, thumb.maxY)
+        return CGRect(x: bar.minX, y: minY, width: bar.width, height: maxY - minY)
+    }
+
+    /// Nearest-first ancestor frames: the first track-shaped ancestor the knob
+    /// rides on becomes the promoted track; nil when none is.
     static func promotedTrackRect(thumb: CGRect, ancestors: [CGRect]) -> CGRect? {
         guard isThumbLike(thumb) else { return nil }
-        let slack = thumbContainmentSlack
-        for a in ancestors where a.insetBy(dx: -slack, dy: -slack).contains(thumb) {
-            if isPromotableTrack(a, thumb: thumb) { return a }
+        for a in ancestors where isValidFrame(a) && knobRides(thumb, on: a) {
+            let t = track(bar: a, thumb: thumb)
+            if isPromotableTrack(t, thumb: thumb) { return t }
         }
         return nil
     }
 
-    /// Fallback when no ancestor is the track: union the thumb with siblings
-    /// that sit clearly on its row (vertically overlap it, same height bound).
+    /// Fallback when no ancestor is the track: the siblings that sit on the
+    /// knob's row (vertically overlap its centre, same height bound) are the
+    /// bar segments; their x-span is the bar.
     static func promotedTrackRect(thumb: CGRect, rowSiblings: [CGRect]) -> CGRect? {
         guard isThumbLike(thumb) else { return nil }
         let maxHeight = max(promotedTrackMaxHeightFloor, promotedTrackMaxHeightRatio * thumb.height)
-        var union = thumb
-        for s in rowSiblings where isValidFrame(s) && s.height <= maxHeight
-            && s.minY <= thumb.midY && s.maxY >= thumb.midY {
-            union = union.union(s)
+        let row = rowSiblings.filter { s in isValidFrame(s) && s.height <= maxHeight
+            && s.minY <= thumb.midY && s.maxY >= thumb.midY }
+        guard let first = row.first else { return nil }
+        let bar = row.dropFirst().reduce(first) { $0.union($1) }
+        guard knobRides(thumb, on: bar) else { return nil }
+        let t = track(bar: bar, thumb: thumb)
+        return isPromotableTrack(t, thumb: thumb) ? t : nil
+    }
+
+    /// Bound on the resolver's per-element promotion memo.
+    static let thumbPromoteMemoLimit = 64
+
+    enum ThumbPromotionSource: String { case promoted, remembered, thumb }
+
+    /// Which rect a thumb-sized slider publishes this cycle: a fresh promotion
+    /// wins; on a miss the last promoted track is reused while the knob still
+    /// rides on it; otherwise the knob itself.
+    static func thumbPromotionDecision(thumb: CGRect, fresh: CGRect?,
+                                       remembered: CGRect?) -> (rect: CGRect, source: ThumbPromotionSource) {
+        if let fresh { return (fresh, .promoted) }
+        if let remembered, thumbWithinPromotedTrack(thumb: thumb, track: remembered) {
+            return (remembered, .remembered)
         }
-        return isPromotableTrack(union, thumb: thumb) && union != thumb ? union : nil
+        return (thumb, .thumb)
     }
 
     /// The live slider frame is the moving thumb while the cached target is
-    /// its promoted track: identity still holds while the thumb lies inside.
+    /// its promoted track: identity still holds while the knob rides on it
+    /// (horizontally up to half a knob past either end — x.com parks the knob
+    /// there at 0 % / 100 %).
     static func thumbWithinPromotedTrack(thumb: CGRect, track: CGRect) -> Bool {
         guard isThumbLike(thumb) else { return false }
         let slack = thumbContainmentSlack
-        return track.insetBy(dx: -slack, dy: -slack).contains(thumb)
+        return track.insetBy(dx: -thumb.width / 2, dy: -slack).contains(thumb)
             && isPromotableTrack(track, thumb: thumb)
     }
     // Row 6 — wide-thin group (zoomed web seek bar collapsed to 2 pt tall).

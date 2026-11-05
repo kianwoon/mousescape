@@ -27,19 +27,17 @@ private func svcLog(_ line: String) {
     let row = "\(stamp) [ClickAssist] \(line)\n"
     svcLogLock.lock()
     defer { svcLogLock.unlock() }
-    // FileHandle(forWritingTo:) never creates the file: create it (and its
-    // directory) first or every RESOLVER line is silently dropped.
-    let fm = FileManager.default
-    if !fm.fileExists(atPath: svcLogURL.path) {
-        try? fm.createDirectory(at: svcLogURL.deletingLastPathComponent(),
-                                withIntermediateDirectories: true)
-        fm.createFile(atPath: svcLogURL.path, contents: nil)
-    }
-    if let h = try? FileHandle(forWritingTo: svcLogURL) {
-        h.seekToEndOfFile()
-        h.write(row.data(using: .utf8) ?? Data())
-        try? h.close()
-    }
+    try? FileManager.default.createDirectory(at: svcLogURL.deletingLastPathComponent(),
+                                             withIntermediateDirectories: true)
+    // O_APPEND: the Helper appends to this same file from another process.
+    // seekToEnd + write is not atomic across processes — each writer
+    // overwrote the other's lines (fragments, lost one-shot diagnostics such
+    // as SLIDER_THUMB_PROMOTE). O_APPEND makes every write land at the end.
+    let fd = open(svcLogURL.path, O_WRONLY | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+    guard fd >= 0 else { return }
+    defer { close(fd) }
+    let bytes = Array(row.utf8)
+    _ = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
 }
 
 // MARK: - Per-connection coalescing sender
