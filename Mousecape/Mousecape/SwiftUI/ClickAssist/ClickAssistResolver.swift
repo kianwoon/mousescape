@@ -237,6 +237,11 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// The live hit element behind a "hit-window" answer, reused by the
     /// hit-ancestry rescue instead of a third hit-test per cycle.
     private var pointerWindowHit: (element: AXUIElement, frame: CGRect, windowFrame: CGRect)?
+    /// This cycle's APP-level hit element (`seedAtPointer`), the rescue's second
+    /// source when the system-wide hit is the page. No extra hit-test.
+    private var seedHitElement: AXUIElement?
+    /// SLIDER_PROBE is logged once per pointer generation.
+    private var sliderProbeLoggedGeneration: UInt64 = 0
     /// Queue-confined cadence state (resolver serial queue only).
     private var lastCyclePointer: CGPoint?
     private var lastMovementAt: CFTimeInterval = 0
@@ -861,7 +866,8 @@ final class AccessibilityResolver: @unchecked Sendable {
             walkGuided(pwin, pointer: pointer, out: &out, budget: &pwinBudget, deadline: pointerDeadline,
                        screenUnion: screenUnion, appElement: appEl, pid: pid,
                        maxDepth: Self.pointerWindowGuidedMaxDepth,
-                       subtreeDepth: Self.pointerWindowMaxDepth, hit: localHit, stats: &pwinStats)
+                       subtreeDepth: Self.pointerWindowMaxDepth, hit: localHit,
+                       systemHit: pointerWindowHit, appHit: seedHitElement, stats: &pwinStats)
             // Band BFS after the guided descent: catches the controls branch the
             // guided path cannot reach (video players). Pruned by geometry, so it
             // costs tens of nodes, not thousands.
@@ -1388,8 +1394,10 @@ final class AccessibilityResolver: @unchecked Sendable {
                                budget: inout Int, deadline: CFTimeInterval,
                                screenUnion: CGRect) -> Bool {
         var element: AXUIElement?
+        seedHitElement = nil
         guard AXUIElementCopyElementAtPosition(appEl, Float(pointer.x), Float(pointer.y), &element) == .success,
               var current = element else { return false }
+        seedHitElement = current
         var found = false
         var depth = 0
         while budget > 0, depth < Self.seedAncestryDepth, CACurrentMediaTime() < deadline {
@@ -1666,7 +1674,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     private func walkGuided(_ root: AXUIElement, pointer: CGPoint, out: inout [CachedTarget],
                             budget: inout Int, deadline: CFTimeInterval, screenUnion: CGRect,
                             appElement: AXUIElement, pid: pid_t, maxDepth: Int, subtreeDepth: Int,
-                            hit: AXUIElement?, stats: inout WalkStats) {
+                            hit: AXUIElement?,
+                            systemHit: (element: AXUIElement, frame: CGRect, windowFrame: CGRect)? = nil,
+                            appHit: AXUIElement? = nil, stats: inout WalkStats) {
         var current = root
         var depth = 0
         // The deepest node whose children were scanned. When the descent dies
@@ -1747,15 +1757,41 @@ final class AccessibilityResolver: @unchecked Sendable {
         // pointer deadline on that fan-out. The live hit element (the player's
         // control strip) is already in the right branch: its small subtree holds
         // the slider (~35 nodes), so walk it while the deadline is still fresh.
-        if stats.guidedFallbackReason == "no-containing-child", let hit, budget > 0 {
-            let keysBefore = Set(out.map(\.key))
-            let hitDeadline = min(deadline, CACurrentMediaTime() + Self.hitAncestryDeadlineMs / 1000)
-            let spent = walkHitAncestry(hit, pointer: pointer, out: &out,
-                budget: min(budget, Self.hitAncestryBudget), deadline: hitDeadline,
-                screenUnion: screenUnion, appElement: appElement, pid: pid, stats: &stats)
-            budget -= spent
-            stats.hitAncestryKeys = Set(out.map(\.key)).subtracting(keysBefore)
-            log("PWIN_RESCUE hitAncestry spent=\(spent) new=\(stats.hitAncestryKeys.count) reason=\(stats.guidedFallbackReason ?? "-")")
+        // When the system-wide hit is the page itself (x.com over a playing
+        // video), the APP-level hit (seedAtPointer's, no extra hit-test) is the
+        // second source: it answers the seek-bar group there.
+        if stats.guidedFallbackReason == "no-containing-child", budget > 0 {
+            let probeStart = CACurrentMediaTime()
+            let appFrame = (hit == nil) ? appHit.flatMap { frame($0) } : nil
+            let windowFrame = (hit == nil && appFrame != nil) ? (systemHit?.windowFrame ?? frame(root)) : nil
+            let source = HitAncestryRescue.source(systemIsLocal: hit != nil, appHitFrame: appFrame,
+                windowFrame: windowFrame, maxWindowFraction: Self.hitAncestryMaxWindowFraction)
+            let chosen: AXUIElement? = source == .system ? hit : source == .app ? appHit : nil
+            var spent = 0
+            if let chosen {
+                let keysBefore = Set(out.map(\.key))
+                let hitDeadline = min(deadline, CACurrentMediaTime() + Self.hitAncestryDeadlineMs / 1000)
+                spent = walkHitAncestry(chosen, pointer: pointer, out: &out,
+                    budget: min(budget, Self.hitAncestryBudget), deadline: hitDeadline,
+                    screenUnion: screenUnion, appElement: appElement, pid: pid, stats: &stats)
+                budget -= spent
+                stats.hitAncestryKeys = Set(out.map(\.key)).subtracting(keysBefore)
+            }
+            // Once per pointer position: what each hit-test answered and whether
+            // the rescue found a slider, so a miss is diagnosable from the log.
+            if sliderProbeLoggedGeneration != pointerGeneration {
+                sliderProbeLoggedGeneration = pointerGeneration
+                let found = out.contains { stats.hitAncestryKeys.contains($0.key) && $0.role == (kAXSliderRole as String) }
+                let describe: (AXUIElement?, CGRect?) -> String = { el, rect in
+                    guard let el else { return "nil" }
+                    return "\(self.stringAttr(el, kAXRoleAttribute) ?? "?")@\((rect ?? self.frame(el)).map { "\($0)" } ?? "nil")"
+                }
+                log(String(format: "SLIDER_PROBE gen=%llu pointer=%@ hit=%@ app-level=%@ used=%@ found=%d spent=%d ms=%.1f",
+                           pointerGeneration, ScreenSpace.fmt(pointer) as NSString,
+                           describe(systemHit?.element, systemHit?.frame) as NSString,
+                           describe(appHit, appFrame) as NSString, source.rawValue as NSString,
+                           found ? 1 : 0, spent, (CACurrentMediaTime() - probeStart) * 1000))
+            }
         }
 
         // 2) Sibling-branch rescue: the guided path ended at a level where no

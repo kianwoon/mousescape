@@ -569,4 +569,20 @@ enum HitAncestryRescue {
         let windowArea = windowFrame.width * windowFrame.height
         return hitArea < windowArea * maxWindowFraction
     }
+
+    /// Which hit element seeds the rescue. The system-wide hit wins when it is
+    /// local; when it is the page (x.com over a playing video: the AXWebArea),
+    /// the APP-level hit (`seedAtPointer`'s hit-test through the application
+    /// element, which answers the 461x20 seek-bar group there) is used if it is
+    /// local and overlaps the pointer window. Otherwise nothing runs.
+    enum Source: String { case system, app, none }
+
+    static func source(systemIsLocal: Bool, appHitFrame: CGRect?, windowFrame: CGRect?,
+                       maxWindowFraction: CGFloat) -> Source {
+        if systemIsLocal { return .system }
+        guard let appHitFrame, let windowFrame, appHitFrame.intersects(windowFrame),
+              isLocal(hitFrame: appHitFrame, windowFrame: windowFrame,
+                      maxWindowFraction: maxWindowFraction) else { return .none }
+        return .app
+    }
 }

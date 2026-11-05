@@ -29,6 +29,31 @@ final class ClickAssistHitAncestryTests: XCTestCase {
                                                 windowFrame: whole, maxWindowFraction: fraction))
     }
 
+    // 16 s miss (2026-11-05): system-wide hit = page, app-level hit = seek-bar group.
+    func testPageSystemHitFallsBackToAppLevelSeekGroup() {
+        let seekGroup = CGRect(x: 5475, y: 1750, width: 461, height: 20)
+        XCTAssertEqual(HitAncestryRescue.source(systemIsLocal: false, appHitFrame: seekGroup,
+                                                windowFrame: window, maxWindowFraction: fraction), .app)
+    }
+
+    func testLocalSystemHitWinsOverAppLevel() {
+        XCTAssertEqual(HitAncestryRescue.source(systemIsLocal: true, appHitFrame: nil,
+                                                windowFrame: nil, maxWindowFraction: fraction), .system)
+    }
+
+    func testAppLevelPageOrForeignOrMissingHitIsRejected() {
+        let webArea = CGRect(x: 5137, y: 621, width: 1198, height: 1382)
+        XCTAssertEqual(HitAncestryRescue.source(systemIsLocal: false, appHitFrame: webArea,
+                                                windowFrame: window, maxWindowFraction: fraction), .none)
+        let otherWindow = CGRect(x: 100, y: 100, width: 40, height: 20)
+        XCTAssertEqual(HitAncestryRescue.source(systemIsLocal: false, appHitFrame: otherWindow,
+                                                windowFrame: window, maxWindowFraction: fraction), .none)
+        XCTAssertEqual(HitAncestryRescue.source(systemIsLocal: false, appHitFrame: nil,
+                                                windowFrame: window, maxWindowFraction: fraction), .none)
+        XCTAssertEqual(HitAncestryRescue.source(systemIsLocal: false, appHitFrame: webArea,
+                                                windowFrame: nil, maxWindowFraction: fraction), .none)
+    }
+
     func testDegenerateFramesAreNotLocal() {
         XCTAssertFalse(HitAncestryRescue.isLocal(hitFrame: .zero, windowFrame: window, maxWindowFraction: fraction))
         XCTAssertFalse(HitAncestryRescue.isLocal(hitFrame: CGRect(x: 0, y: 0, width: 10, height: 10),
