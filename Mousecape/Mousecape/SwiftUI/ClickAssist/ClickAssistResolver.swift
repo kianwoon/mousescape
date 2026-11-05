@@ -203,6 +203,14 @@ final class AccessibilityResolver: @unchecked Sendable {
     private static let hitAncestryClimb = 6
     private static let hitAncestryDescend = 8
     private static let hitAncestryBudget = 100
+    /// Own time cap for the hit-ancestry rescue (the shared pointer deadline is
+    /// still the outer ceiling). It runs right after the guided descent, BEFORE
+    /// the sibling rescue, which on x.com spends the whole pointer deadline.
+    private static let hitAncestryDeadlineMs: Double = 20
+    /// A hit element covering at least this fraction of the pointer window is
+    /// the page itself (X: the AXWebArea while controls are hidden); climbing
+    /// from it lands near the window and cannot reach the player controls.
+    private static let hitAncestryMaxWindowFraction: CGFloat = 0.5
     /// Default depth bound for the shared `walk` (rotation-style consumers).
     private static let walkMaxDepth = 12
     /// Adaptive cadence. The walk is the dominant resolver cost (measured mean
@@ -221,6 +229,14 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Last hit-window focus answer, reused by seed cycles at the same pointer.
     private var lastWindowFocus: (pid: pid_t, pointerGeneration: UInt64, focused: Bool)?
     private var lastPointerGenerationPoint: CGPoint?
+    /// SLIDER_LATENCY diagnostics: when the current pointer generation began,
+    /// cycles run since, and the generation already reported (once per hover).
+    private var pointerGenerationStamp: CFTimeInterval = 0
+    private var pointerGenerationCycles = 0
+    private var sliderLatencyLoggedGeneration: UInt64 = 0
+    /// The live hit element behind a "hit-window" answer, reused by the
+    /// hit-ancestry rescue instead of a third hit-test per cycle.
+    private var pointerWindowHit: (element: AXUIElement, frame: CGRect, windowFrame: CGRect)?
     /// Queue-confined cadence state (resolver serial queue only).
     private var lastCyclePointer: CGPoint?
     private var lastMovementAt: CFTimeInterval = 0
@@ -569,6 +585,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         // Pointer generation: the trace ID for THIS pointer position. Increment
         // only beyond the 2 pt epsilon, so sub-pixel drift cannot fragment one
         // hover into many generations.
+        let generationBefore = pointerGeneration
         if let previous = lastPointerGenerationPoint {
             let dx = pointer.x - previous.x
             let dy = pointer.y - previous.y
@@ -580,6 +597,11 @@ final class AccessibilityResolver: @unchecked Sendable {
             pointerGeneration += 1
             lastPointerGenerationPoint = pointer
         }
+        if pointerGeneration != generationBefore {
+            pointerGenerationStamp = CACurrentMediaTime()
+            pointerGenerationCycles = 0
+        }
+        pointerGenerationCycles += 1
 
         // TARGET THE WINDOW UNDER THE POINTER, not the frontmost app. The user can
         // hover a visible window of a background app; resolving frontmost-only made
@@ -829,10 +851,17 @@ final class AccessibilityResolver: @unchecked Sendable {
             var pwinBudget = min(Self.pointerWindowBudget, budget)
             collectingWindow = Int(bitPattern: CFHash(pwin))
             defer { collectingWindow = 0 }
+            // The live hit element, when it is a local control-sized element (not
+            // the page): the hit-ancestry rescue climbs from it inside walkGuided.
+            let localHit = pointerWindowHit.flatMap { hit in
+                pwinMode == "hit-window" && HitAncestryRescue.isLocal(hitFrame: hit.frame,
+                    windowFrame: hit.windowFrame, maxWindowFraction: Self.hitAncestryMaxWindowFraction)
+                    ? hit.element : nil
+            }
             walkGuided(pwin, pointer: pointer, out: &out, budget: &pwinBudget, deadline: pointerDeadline,
                        screenUnion: screenUnion, appElement: appEl, pid: pid,
                        maxDepth: Self.pointerWindowGuidedMaxDepth,
-                       subtreeDepth: Self.pointerWindowMaxDepth, stats: &pwinStats)
+                       subtreeDepth: Self.pointerWindowMaxDepth, hit: localHit, stats: &pwinStats)
             // Band BFS after the guided descent: catches the controls branch the
             // guided path cannot reach (video players). Pruned by geometry, so it
             // costs tens of nodes, not thousands.
@@ -845,15 +874,9 @@ final class AccessibilityResolver: @unchecked Sendable {
             collectingWindow = 0
             pwinSpent = (min(Self.pointerWindowBudget, budget) - pwinBudget) + bandSpent
             budget -= pwinSpent   // total work stays inside the shared node budget
-            if pwinMode == "hit-window", pwinStats.guidedFallbackReason == "no-containing-child" {
-                let hitSpent = walkHitAncestry(appEl, pointer: pointer, out: &out,
-                    budget: min(budget, Self.hitAncestryBudget), deadline: pointerDeadline,
-                    screenUnion: screenUnion, pid: pid, stats: &pwinStats)
-                pwinSpent += hitSpent
-                budget -= hitSpent
-            }
         }
-        let pwinTargets = Set(out.map { $0.key }).subtracting(keysBeforePwin).count
+        let pwinTargetKeys = Set(out.map { $0.key }).subtracting(keysBeforePwin)
+        let pwinTargets = pwinTargetKeys.count
         let pointerWalkMs = (CACurrentMediaTime() - pointerWalkStart) * 1000
 
         // Rotating BFS slice: resumes the persisted frontier so each cycle visits a
@@ -1126,6 +1149,20 @@ final class AccessibilityResolver: @unchecked Sendable {
                    pwinMode as NSString,
                    pidSrc as NSString, pointerWindowFocused ? 1 : 0, otherWindowDropped, windowFocusFacts as NSString))
 
+        // Time-to-first-publish of a slider near the resting pointer, once per
+        // pointer generation: settledMs since the pointer last moved, cycles run.
+        if sliderLatencyLoggedGeneration != pointerGeneration,
+           let slider = out.first(where: { $0.role == (kAXSliderRole as String)
+               && Self.boundaryDistance(cyclePointer, $0.rect) <= Self.pointerRescueNearRadius }) {
+            sliderLatencyLoggedGeneration = pointerGeneration
+            let via = pwinStats.hitAncestryKeys.contains(slider.key) ? "hit-ancestry"
+                : keysBeforePwin.contains(slider.key) ? "seed" : pwinTargetKeys.contains(slider.key) ? "pwin" : "slice"
+            log(String(format: "SLIDER_LATENCY gen=%llu key=%@ settledMs=%.0f cycles=%d via=%@ pwinFallbackReason=%@",
+                       pointerGeneration, String(slider.key.prefix(40)) as NSString,
+                       (CACurrentMediaTime() - pointerGenerationStamp) * 1000, pointerGenerationCycles,
+                       via as NSString, (pwinStats.guidedFallbackReason ?? "-") as NSString))
+        }
+
         // Diagnostics only: why a hovered control never became a candidate. Separate
         // line so RESOLVER_PUBLISH stays byte-compatible for existing parsers.
         if !rejectedNear.isEmpty {
@@ -1271,6 +1308,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         // by frame containment. The live hit's AXWindow supplies that identity.
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, 0.05)
+        pointerWindowHit = nil
         var hit: AXUIElement?
         if AXUIElementCopyElementAtPosition(system, Float(pointer.x), Float(pointer.y), &hit) == .success,
            let hit, let hitFrame = frame(hit),
@@ -1283,6 +1321,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                GeometryPolicy.hitWindowIsCoherent(expectedPID: ownerPid, hitPID: hitPID,
                    hitFrame: hitFrame, windowFrame: windowFrame, pointer: pointer),
                let kids = attr(window, kAXChildrenAttribute).flatMap(axArray), !kids.isEmpty {
+                pointerWindowHit = (hit, hitFrame, windowFrame)
                 return (window, "hit-window")
             }
         }
@@ -1599,6 +1638,8 @@ final class AccessibilityResolver: @unchecked Sendable {
         /// Descent bound in force this cycle, published so a cap hit is legible
         /// as `pwinDepthCapped=1 pwinGuidedBound=<value>`.
         var guidedBound = 0
+        /// Keys first collected by the hit-ancestry rescue this cycle (SLIDER_LATENCY via=).
+        var hitAncestryKeys: Set<String> = []
     }
 
     /// POINTER-GUIDED DESCENT + bounded subtree walk for the pointer window.
@@ -1625,7 +1666,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     private func walkGuided(_ root: AXUIElement, pointer: CGPoint, out: inout [CachedTarget],
                             budget: inout Int, deadline: CFTimeInterval, screenUnion: CGRect,
                             appElement: AXUIElement, pid: pid_t, maxDepth: Int, subtreeDepth: Int,
-                            stats: inout WalkStats) {
+                            hit: AXUIElement?, stats: inout WalkStats) {
         var current = root
         var depth = 0
         // The deepest node whose children were scanned. When the descent dies
@@ -1700,6 +1741,23 @@ final class AccessibilityResolver: @unchecked Sendable {
         stats.guidedLevel = depth
         stats.guidedFallback = !cappedByDepth
 
+        // 1b) Hit-ancestry rescue FIRST: on x.com the descent dies at the web
+        // area (its children are 1 px collapsed wrappers) ~50 levels above the
+        // seek slider, and the sibling rescue below is a DFS that spends the whole
+        // pointer deadline on that fan-out. The live hit element (the player's
+        // control strip) is already in the right branch: its small subtree holds
+        // the slider (~35 nodes), so walk it while the deadline is still fresh.
+        if stats.guidedFallbackReason == "no-containing-child", let hit, budget > 0 {
+            let keysBefore = Set(out.map(\.key))
+            let hitDeadline = min(deadline, CACurrentMediaTime() + Self.hitAncestryDeadlineMs / 1000)
+            let spent = walkHitAncestry(hit, pointer: pointer, out: &out,
+                budget: min(budget, Self.hitAncestryBudget), deadline: hitDeadline,
+                screenUnion: screenUnion, appElement: appElement, pid: pid, stats: &stats)
+            budget -= spent
+            stats.hitAncestryKeys = Set(out.map(\.key)).subtracting(keysBefore)
+            log("PWIN_RESCUE hitAncestry spent=\(spent) new=\(stats.hitAncestryKeys.count) reason=\(stats.guidedFallbackReason ?? "-")")
+        }
+
         // 2) Sibling-branch rescue: the guided path ended at a level where no
         // child contained the pointer (or at a leaf). Walk the deepest scanned
         // parent's children so a sibling branch (player controls next to the
@@ -1770,14 +1828,17 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// player's own control strip ~58 levels down). The hit element is already
     /// deep in the right branch: climb a few levels from it and walk that
     /// container's subtree, so the neighbouring controls (seek slider, buttons)
-    /// are collected. Returns the nodes spent.
-    private func walkHitAncestry(_ appElement: AXUIElement, pointer: CGPoint, out: inout [CachedTarget],
+    /// are collected. `hit` is the live hit element `windowUnderPointer` already
+    /// resolved (no extra hit-test). `deadline` is this rescue's own short cap;
+    /// running out of it does not mark the whole cycle deadline-truncated.
+    /// Returns the nodes spent.
+    private func walkHitAncestry(_ hit: AXUIElement, pointer: CGPoint, out: inout [CachedTarget],
                                  budget: Int, deadline: CFTimeInterval, screenUnion: CGRect,
-                                 pid: pid_t, stats: inout WalkStats) -> Int {
+                                 appElement: AXUIElement, pid: pid_t, stats: inout WalkStats) -> Int {
         guard budget > 0, CACurrentMediaTime() < deadline else { return 0 }
-        var hit: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(appElement, Float(pointer.x), Float(pointer.y), &hit) == .success,
-              var top = hit else { return 0 }
+        let truncatedBefore = truncatedByDeadline
+        defer { truncatedByDeadline = truncatedBefore }
+        var top = hit
         for _ in 0..<Self.hitAncestryClimb {
             guard let parent = attr(top, kAXParentAttribute),
                   CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }

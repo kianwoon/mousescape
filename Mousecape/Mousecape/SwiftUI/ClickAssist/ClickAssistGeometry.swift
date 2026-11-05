@@ -554,3 +554,19 @@ enum GuidedAlternates {
             .prefix(limit))
     }
 }
+
+/// Gate for the pointer hit-test ancestry rescue. Climbing a few levels from
+/// the hit element only reaches the hovered control's neighbours when the hit
+/// is a LOCAL element (x.com: the 461x20 seek-bar group). When a page answers
+/// with itself (the AXWebArea while the player controls are hidden), the climb
+/// lands near the window and the bounded walk cannot reach the controls, so the
+/// rescue is skipped. Pure so the bound is unit-testable offline.
+enum HitAncestryRescue {
+    static func isLocal(hitFrame: CGRect, windowFrame: CGRect, maxWindowFraction: CGFloat) -> Bool {
+        guard hitFrame.width > 0, hitFrame.height > 0,
+              windowFrame.width > 0, windowFrame.height > 0 else { return false }
+        let hitArea = hitFrame.width * hitFrame.height
+        let windowArea = windowFrame.width * windowFrame.height
+        return hitArea < windowArea * maxWindowFraction
+    }
+}
