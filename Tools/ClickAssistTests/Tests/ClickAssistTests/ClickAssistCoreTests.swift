@@ -577,28 +577,79 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertEqual(shown.map(\.candidate.key), ["inner"])
     }
 
-    /// Guarded failure (MyHome footer): a first-class wrapper around the Settings
-    /// button won because the pointer sat inside the wrapper but just outside the
-    /// button's frame; the ring boxed the whole footer instead of Settings.
-    func testC6_wrapperYieldsToNearerInnerControl() {
-        let wrapper = cand("wrapper", rect(48, 255, 182, 85))
-        let settings = cand("settings", rect(52, 265, 90, 24))
-        let point = CGPoint(x: 150, y: 277)
-        for perm in [[wrapper, settings], [settings, wrapper]] {
-            let shown = DecisionCore.displayCandidates(point: point, candidates: perm, tolerance: 13)
-            XCTAssertEqual(shown.first?.candidate.key, "settings")
-        }
+    // MARK: Overlap ownership (later AX siblings are painted on top)
+
+    /// MyHome (live AX dump): the childless Settings button is followed, in its
+    /// parent's children, by the status image/text, the sparkle image and the
+    /// input field it spills over (plus a non-overlapping scroll area). It keeps
+    /// only its top row, full width.
+    func testOwnership_settingsLosesAreaOfLaterSiblings() {
+        let button = rect(6053, 990, 175, 93)
+        let later = [rect(6229, 58, 1163, 966),   // AXScrollArea, abuts only
+                     rect(6066, 1035, 11, 11),    // AXImage 'Selected'
+                     rect(6086, 1032, 144, 15),   // AXStaticText status
+                     rect(6066, 1057, 11, 14),    // AXImage 'Sparkle'
+                     rect(6086, 1053, 1262, 22)]  // AXTextField
+        let out = OverlapOwnership.trimmedRects([("settings", button)]) { _ in later }
+        XCTAssertEqual(out["settings"]?.rect, rect(6053, 990, 175, 42))
+        XCTAssertEqual(out["settings"]?.cutBy.count, 4)
     }
 
-    /// Guarded failure (MyHome): the Settings button's AX frame also covers the
-    /// input row below; the ring boxed both. Only the visible share is a target.
-    func testC7_overlappingNeighbourIsCutAwayFromButtonFrame() {
-        let settings = cand("settings", rect(4932, 1954, 175, 72))
-        let field = cand("field", rect(4965, 1996, 1029, 22), role: "AXTextField")
-        let shown = DecisionCore.displayCandidates(point: CGPoint(x: 5023, y: 1971),
-                                                   candidates: [settings, field], tolerance: 13)
-        XCTAssertEqual(shown.first?.candidate.key, "settings")
-        XCTAssertEqual(shown.first?.candidate.rect, rect(4932, 1954, 175, 42))
+    /// YouTube card: the menu button comes AFTER the title link, so the link
+    /// loses the corner and the button (no later sibling) keeps its full frame.
+    func testOwnership_laterMenuButtonCutsLinkButKeepsItsFrame() {
+        let link = rect(2934, 1338, 540, 40)
+        let dots = rect(3447, 1333, 36, 36)
+        let above: [String: [CGRect]] = ["link": [dots], "dots": []]
+        let out = OverlapOwnership.trimmedRects([("dots", dots), ("link", link)]) { above[$0] }
+        XCTAssertNil(out["dots"])
+        XCTAssertEqual(out["link"]?.rect, rect(2934, 1338, 513, 40))
+        let shown = DecisionCore.displayCandidates(
+            point: CGPoint(x: 3464, y: 1350),
+            candidates: [cand("link", out["link"]!.rect, role: "AXLink"), cand("dots", dots)],
+            tolerance: 13)
+        XCTAssertEqual(shown.first?.candidate.key, "dots")
+        XCTAssertEqual(shown.first?.candidate.rect, dots)
+    }
+
+    /// Wide sidebar: the later full-width field is enclosed by the button.
+    func testOwnership_enclosedLaterRowIsCutFromButton() {
+        let out = OverlapOwnership.trimmedRects([("settings", rect(4624, 1897, 577, 68))]) { _ in
+            [rect(4624, 1937, 577, 28)]
+        }
+        XCTAssertEqual(out["settings"]?.rect, rect(4624, 1897, 577, 40))
+    }
+
+    /// A later sibling that ENCLOSES the candidate is an overlay/wrapper, not
+    /// content on part of it: fail closed, untouched (even with other cutters).
+    func testOwnership_enclosingLaterSiblingLeavesCandidateUntouched() {
+        let button = rect(100, 100, 100, 50)
+        let out = OverlapOwnership.trimmedRects([("b", button)]) { _ in
+            [rect(150, 130, 50, 20), rect(90, 90, 200, 100)]
+        }
+        XCTAssertTrue(out.isEmpty)
+    }
+
+    /// No later siblings, unknown siblings, or later siblings that do not overlap
+    /// (or are degenerate/huge) leave the candidate untouched.
+    func testOwnership_noOverlappingLaterSiblingIsUntouched() {
+        let button = rect(100, 100, 100, 50)
+        XCTAssertTrue(OverlapOwnership.trimmedRects([("b", button)]) { _ in [] }.isEmpty)
+        XCTAssertTrue(OverlapOwnership.trimmedRects([("b", button)]) { _ in nil }.isEmpty)
+        XCTAssertTrue(OverlapOwnership.trimmedRects([("b", button)]) { _ in
+            [rect(300, 100, 50, 50), rect(200, 100, 10, 50), rect(120, 110, 0, 10),
+             rect(120, 110, OverlapOwnership.maxSiblingExtent + 1, 10)]
+        }.isEmpty)
+    }
+
+    /// The per-cycle candidate cap bounds the sibling reads.
+    func testOwnership_candidateCapBoundsSiblingReads() {
+        var reads = 0
+        let items = (0..<(OverlapOwnership.maxCandidatesPerCycle + 3)).map {
+            (key: "k\($0)", rect: rect(CGFloat($0) * 100, 0, 50, 50))
+        }
+        _ = OverlapOwnership.trimmedRects(items) { _ in reads += 1; return [] }
+        XCTAssertEqual(reads, OverlapOwnership.maxCandidatesPerCycle)
     }
 
     /// Guarded failure: the shown winner changed with AX walk order, so the ring

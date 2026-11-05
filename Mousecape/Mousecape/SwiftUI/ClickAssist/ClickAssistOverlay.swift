@@ -127,6 +127,9 @@ final class TargetingOverlay {
     private var lastDrawnDim: Bool = false
     private var lastSuppressLog: [String: CFTimeInterval] = [:]
     private static let suppressLogInterval: CFTimeInterval = 5
+    /// Diagnostic RING_CANDS: radius (pt) and max entries of targets listed.
+    private static let diagNearRadius: CGFloat = 80
+    private static let diagNearMax = 6
 
     init(tolerance: CGFloat, log: @escaping (String) -> Void) {
         self.tolerance = tolerance
@@ -298,6 +301,19 @@ final class TargetingOverlay {
         let sig = "\(s.generation)|\(action)|\(primary?.key ?? "-")|\(secondary?.key ?? "-")|\(confirmedCount)|\(reason)"
         if sig != lastSig {
             lastSig = sig
+            // Diagnostics: every snapshot target near the pointer, so a wrong ring
+            // can be traced to what the resolver actually published.
+            var nearParts: [String] = []
+            for t in s.targets {
+                let d = DecisionCore.boundaryDistance(pointer, t.rect)
+                if d > Self.diagNearRadius || nearParts.count >= Self.diagNearMax { continue }
+                let tier = t.tier == .firstClass ? 1 : 2
+                let r = t.rect
+                let rectText = "\(Int(r.minX)),\(Int(r.minY)),\(Int(r.width)),\(Int(r.height))"
+                nearParts.append("\(t.key)|\(t.role)|t\(tier)|(\(rectText))|\(t.verdict)|d=\(Int(d))")
+            }
+            let near: [String] = nearParts
+            log("RING_CANDS gen=\(s.generation) pointer=(\(Int(pointer.x)),\(Int(pointer.y))) n=\(s.targets.count) near=[\(near.joined(separator: "; "))]")
             if action == "show", let primary {
                 log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed tier=%d named=%d cands=%d weak=%d winner=1",
                            s.generation, primary.key as NSString, primary.rect.origin.x, primary.rect.origin.y,

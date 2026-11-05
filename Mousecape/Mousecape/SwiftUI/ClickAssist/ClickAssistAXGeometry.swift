@@ -90,6 +90,28 @@ enum AXGeometry {
         return (GeometryPolicy.promotedTrackRect(thumb: thumb, rowSiblings: siblings), trail)
     }
 
+    /// Frames of the siblings AFTER `el` in its parent's children (AX children
+    /// are back-to-front, so these are painted on top of it), at most
+    /// `maxSiblings`. nil = unknown (no parent, `el` not among the children, or
+    /// more than `maxChildren` children). Each read runs under `timeout`.
+    static func laterSiblingFrames(of el: AXUIElement, maxChildren: Int,
+                                   maxSiblings: Int, timeout: Float) -> [CGRect]? {
+        func attr(_ e: AXUIElement, _ key: String) -> CFTypeRef? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(e, key as CFString, &value) == .success else { return nil }
+            return value
+        }
+        guard let raw = attr(el, kAXParentAttribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+        let parent = raw as! AXUIElement
+        AXUIElementSetMessagingTimeout(parent, timeout)
+        guard let kids = attr(parent, kAXChildrenAttribute) as? [AXUIElement], kids.count <= maxChildren,
+              let index = kids.firstIndex(where: { CFEqual($0, el) }) else { return nil }
+        return kids[(index + 1)...].prefix(maxSiblings).compactMap { kid in
+            AXUIElementSetMessagingTimeout(kid, timeout)
+            return frame(kid)
+        }
+    }
+
     /// One live round trip on supporting apps. A partial/unsupported batch uses
     /// the original reader, preserving apps with incomplete batch support.
     /// Nothing is cached, and both paths use the same finite-frame validation.

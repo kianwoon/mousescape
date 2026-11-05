@@ -118,6 +118,9 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Last VALID published target set. Kept resolver-side so a transient invalid
     /// snapshot cannot erase the union before the next walk re-merges it.
     private var unionTargets: [CachedTarget] = []
+    /// Overlap-ownership hit answers (resolver queue only).
+    private let laterSiblings = LaterSiblingCache()
+    private var lastOverlapTrimLog = ""
     /// Delivery side table: the live AX element behind each admitted candidate
     /// key, published into CacheStore at the end of each cycle. Persists across
     /// cycles so union-held targets keep a usable reference; pruned to the keys
@@ -1060,6 +1063,10 @@ final class AccessibilityResolver: @unchecked Sendable {
         let beforeContainers = out.count
         out.removeAll { $0.role == "AXPressGroup" && GeometryPolicy.isVisualContainer($0.rect, among: controlRects) }
         for _ in 0..<(beforeContainers - out.count) { record(.containsControls) }
+        // Overlap ownership by sibling z-order: a later AX sibling painted over part
+        // of a candidate owns that part; the candidate's ring/click rect excludes
+        // it. Legitimacy below keeps the ORIGINAL AX frame.
+        let originalRect = applyOverlapOwnership(&out, pointer: pointer, pid: pid)
         let evidenceStart = CACurrentMediaTime()
         if let legitimacy {
             for _ in 0..<ClickAssistEvidence.maxEvidenceCandidatesPerCycle {
@@ -1071,8 +1078,9 @@ final class AccessibilityResolver: @unchecked Sendable {
                     point: pointer, candidates: candidates, tolerance: selectionTolerance),
                     let idx = out.firstIndex(where: { $0.key == winner.candidate.key }),
                     let el = elementRefs[out[idx].key] else { break }
-                let siblings = out.filter { $0.tier == .firstClass }.map(\.rect)
+                let siblings = out.filter { $0.tier == .firstClass }.map { originalRect[$0.key] ?? $0.rect }
                 let target = out[idx]
+                let axRect = originalRect[target.key] ?? target.rect
                 let probe = DecisionCore.Candidate(key: target.key, rect: target.rect,
                                                    inset: target.inset, tier: target.tier,
                                                    role: target.role, label: target.label)
@@ -1080,9 +1088,9 @@ final class AccessibilityResolver: @unchecked Sendable {
                     ? DecisionCore.centerPoint(into: target.rect)
                     : DecisionCore.clampPoint(pointer, into: target.rect, inset: target.inset)
                 out[idx].verdict = legitimacy.validate(
-                    pid: pid, generation: gen, key: target.key, candidate: target.rect,
+                    pid: pid, generation: gen, key: target.key, candidate: axRect,
                     candidateRole: target.role, destination: destination,
-                    siblings: siblings.filter { $0 != target.rect }, candidateElement: el,
+                    siblings: siblings.filter { $0 != axRect }, candidateElement: el,
                     diagnostic: { msg in
                         if msg.hasPrefix("VERDICT_REJECT") { self.log("FINAL \(target.key.prefix(24)) \(msg)") }
                         else if gen % 20 == 0 { self.log(msg) }
@@ -1426,6 +1434,58 @@ final class AccessibilityResolver: @unchecked Sendable {
         let label = stringAttr(el, kAXTitleAttribute)
             ?? stringAttr(el, kAXDescriptionAttribute) ?? "-"
         rejectedNear.append((role: role, label: label, rect: rect, dist: dist))
+    }
+
+    /// Trims, in place, each first-class target near the pointer that a LATER
+    /// AX sibling partly covers (see OverlapOwnership); returns the original AX
+    /// frame of every trimmed key, for legitimacy. Bounded: candidates within
+    /// the selection tolerance, at most OverlapOwnership.maxCandidatesPerCycle,
+    /// maxLaterSiblings frame reads each, memoised for siblingCacheTTL.
+    private func applyOverlapOwnership(_ out: inout [CachedTarget], pointer: CGPoint,
+                                       pid: pid_t) -> [String: CGRect] {
+        let tolerance = selectionTolerance
+        let near = out.filter {
+            $0.tier == .firstClass && Self.boundaryDistance(pointer, $0.rect) <= tolerance
+        }.sorted { Self.boundaryDistance(pointer, $0.rect) < Self.boundaryDistance(pointer, $1.rect) }
+        guard !near.isEmpty else { return [:] }
+        let now = CACurrentMediaTime()
+        let timeout = GeometryPolicy.legitimacyHitTimeout
+        let rectOf = Dictionary(near.map { ($0.key, $0.rect) }, uniquingKeysWith: { a, _ in a })
+        let trimmed = OverlapOwnership.trimmedRects(near.map { (key: $0.key, rect: $0.rect) }) { key in
+            guard let el = elementRefs[key], let rect = rectOf[key] else { return nil }
+            return laterSiblings.frames(pid: pid, key: key, rect: rect, now: now) {
+                // The element must still BE this candidate (not a promoted track
+                // or a synthetic row target): otherwise its siblings say nothing.
+                AXUIElementSetMessagingTimeout(el, timeout)
+                guard let live = AXGeometry.frame(el),
+                      abs(live.minX - rect.minX) <= OverlapOwnership.frameEpsilon,
+                      abs(live.minY - rect.minY) <= OverlapOwnership.frameEpsilon,
+                      abs(live.width - rect.width) <= OverlapOwnership.frameEpsilon,
+                      abs(live.height - rect.height) <= OverlapOwnership.frameEpsilon else { return nil }
+                return AXGeometry.laterSiblingFrames(of: el, maxChildren: OverlapOwnership.maxParentChildren,
+                                                     maxSiblings: OverlapOwnership.maxLaterSiblings,
+                                                     timeout: timeout)
+            }
+        }
+        var original: [String: CGRect] = [:]
+        for idx in out.indices {
+            guard let cut = trimmed[out[idx].key] else { continue }
+            let old = out[idx]
+            original[old.key] = old.rect
+            out[idx] = CachedTarget(key: old.key, role: old.role, label: old.label, rect: cut.rect,
+                                    inset: old.inset, tier: old.tier, verdict: old.verdict,
+                                    chromeEligible: old.chromeEligible,
+                                    evidenceGeneration: old.evidenceGeneration,
+                                    collectedAt: old.collectedAt)
+        }
+        let sig = original.keys.sorted().map { k in
+            "\(k.prefix(24)) \(original[k]!)->\(trimmed[k]!.rect) cutBy=\(trimmed[k]!.cutBy)"
+        }.joined(separator: "; ")
+        if sig != lastOverlapTrimLog {   // log changes only, never every cycle
+            lastOverlapTrimLog = sig
+            log("OVERLAP_TRIM near=\(near.count) [\(sig)]")
+        }
+        return original
     }
 
     /// Merge near-identical candidates: the same control is often exposed twice
