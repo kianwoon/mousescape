@@ -413,6 +413,9 @@ final class AssistTap: @unchecked Sendable {
             unlatchedForDrag = false
             pressGestureToken = nil
             gestureUnsupported = false
+            if let pending = pendingBackgroundClick {
+                log("BACKGROUND_CLICK_CANCELLED reason=tap-interrupted-\(reason) target=\(pending.candidate.key) original=consumed action=none")
+            }
             pendingBackgroundClick = nil
             log("TAP_INTERRUPTED reason=\(reason) state=cleared")
             if type == .tapDisabledByUserInput, manuallyDisabled {
@@ -443,9 +446,10 @@ final class AssistTap: @unchecked Sendable {
         // and secure input is the system-wide signal for it. Evaluated per event
         // (cheap), never polled.
         if IsSecureEventInputEnabled() {
-            if pendingBackgroundClick != nil {
+            if let pending = pendingBackgroundClick {
                 pendingBackgroundClick = nil
                 pressGestureToken = UUID()
+                log("BACKGROUND_CLICK_CANCELLED reason=secure-input target=\(pending.candidate.key) original=consumed action=none")
             }
             if consumeAXPressOwned(isDown: isDown, isDrag: isDrag, isUp: isUp,
                                    label: label, original: original, observed: observed,
@@ -469,9 +473,20 @@ final class AssistTap: @unchecked Sendable {
         let supported = button == 0 && gestureFlags.isEmpty && clicks <= 1
         let continuedUnsupported = gestureUnsupported && !isDown
         if !supported || continuedUnsupported {
-            if pendingBackgroundClick != nil {
+            if let pending = pendingBackgroundClick {
                 pendingBackgroundClick = nil
-                pressGestureToken = UUID()
+                if !isDown {
+                    // A swallowed down must never vanish: release it natively ahead
+                    // of this up/drag (same as the drag release) instead of owning
+                    // the gesture with no replay.
+                    log("BACKGROUND_CLICK_CANCELLED reason=unsupported-gesture(supported=\(supported ? 1 : 0) continued=\(continuedUnsupported ? 1 : 0)) target=\(pending.candidate.key) original=consumed action=repost-native")
+                    pending.down.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
+                    pending.down.tapPostEvent(proxy)
+                    gestureUnsupported = true
+                } else {
+                    log("BACKGROUND_CLICK_CANCELLED reason=unsupported-gesture-new-down target=\(pending.candidate.key) original=consumed action=none")
+                    pressGestureToken = UUID()
+                }
             }
             if consumeAXPressOwned(isDown: isDown, isDrag: isDrag, isUp: isUp,
                                    label: label, original: original, observed: observed,
@@ -522,10 +537,18 @@ final class AssistTap: @unchecked Sendable {
                                                                   rect: target.rect)
                     dispatchAXPress(request: request)
                     log("BACKGROUND_CLICK_QUEUED target=\(target.key) request=\(request.requestID) original=consumed")
-                } else {
-                    log("BACKGROUND_CLICK_CANCELLED reason=target-or-evidence-changed original=consumed")
+                    return nil
                 }
-                return nil
+                // The swallowed down can no longer be proven safe to redirect (the
+                // target or its evidence changed between down and up). Dropping it
+                // would lose the user's click outright (ring shown, nothing
+                // happens). Release the native down ahead of this up instead, the
+                // same way a drag releases it: the app gets a normal click.
+                log("BACKGROUND_CLICK_CANCELLED reason=target-or-evidence-changed original=consumed action=repost-native")
+                pending.down.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
+                pending.down.tapPostEvent(proxy)
+                gestureUnsupported = true
+                return Unmanaged.passUnretained(event)
             }
             pendingBackgroundClick = nil
         }
