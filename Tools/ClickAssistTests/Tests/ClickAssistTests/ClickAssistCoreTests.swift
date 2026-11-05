@@ -577,6 +577,30 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertEqual(shown.map(\.candidate.key), ["inner"])
     }
 
+    /// Guarded failure (MyHome footer): a first-class wrapper around the Settings
+    /// button won because the pointer sat inside the wrapper but just outside the
+    /// button's frame; the ring boxed the whole footer instead of Settings.
+    func testC6_wrapperYieldsToNearerInnerControl() {
+        let wrapper = cand("wrapper", rect(48, 255, 182, 85))
+        let settings = cand("settings", rect(52, 265, 90, 24))
+        let point = CGPoint(x: 150, y: 277)
+        for perm in [[wrapper, settings], [settings, wrapper]] {
+            let shown = DecisionCore.displayCandidates(point: point, candidates: perm, tolerance: 13)
+            XCTAssertEqual(shown.first?.candidate.key, "settings")
+        }
+    }
+
+    /// Guarded failure (MyHome): the Settings button's AX frame also covers the
+    /// input row below; the ring boxed both. Only the visible share is a target.
+    func testC7_overlappingNeighbourIsCutAwayFromButtonFrame() {
+        let settings = cand("settings", rect(4932, 1954, 175, 72))
+        let field = cand("field", rect(4965, 1996, 1029, 22), role: "AXTextField")
+        let shown = DecisionCore.displayCandidates(point: CGPoint(x: 5023, y: 1971),
+                                                   candidates: [settings, field], tolerance: 13)
+        XCTAssertEqual(shown.first?.candidate.key, "settings")
+        XCTAssertEqual(shown.first?.candidate.rect, rect(4932, 1954, 175, 42))
+    }
+
     /// Guarded failure: the shown winner changed with AX walk order, so the ring
     /// and the click disagreed between two consecutive cycles.
     func testC5_permutationKeepsWinnerAtIndexZero() {

@@ -158,6 +158,7 @@ enum DecisionCore {
     ///    with a tie guard that is the same on both paths.
     static func resolve(point: CGPoint, candidates: [Candidate], tolerance: CGFloat,
                         tieEpsilon: CGFloat = DecisionCore.tieEpsilon) -> Resolution {
+        let candidates = trimOverlaps(candidates)
         var scored: [(Candidate, CGFloat)] = []
         for c in candidates {
             let d = boundaryDistance(point, c.rect)
@@ -181,7 +182,27 @@ enum DecisionCore {
         let containing = filtered.filter { $0.1 == 0 }
         let pool: [(Candidate, CGFloat)]
         if !containing.isEmpty {
-            let fc = containing.filter { $0.0.tier == .firstClass }.sorted { area($0.0) < area($1.0) }
+            // A first-class wrapper that visually holds another in-tolerance
+            // first-class control (a footer bar around its Settings button) must
+            // yield to that nearer, innermost control: the pointer being inside
+            // the wrapper's slack does not make the wrapper the target.
+            let firstClassAll = filtered.filter { $0.0.tier == .firstClass }
+            let enclosedBy = { (outer: Candidate) in
+                firstClassAll.filter { other, d in
+                    other.key != outer.key && other.rect != outer.rect
+                        && DecisionCore.isNested(outer.rect, other.rect, margin: 0)
+                        && d <= DecisionCore.wrapperYieldProximity * max(other.rect.width, other.rect.height)
+                }
+            }
+            var fcPool: [(Candidate, CGFloat)] = []
+            var seenFC = Set<String>()
+            for entry in containing where entry.0.tier == .firstClass {
+                let kids = enclosedBy(entry.0)
+                for e in (kids.isEmpty ? [entry] : kids) where seenFC.insert(e.0.key).inserted {
+                    fcPool.append(e)
+                }
+            }
+            let fc = fcPool.sorted { $0.1 != $1.1 ? $0.1 < $1.1 : area($0.0) < area($1.0) }
             if !fc.isEmpty {
                 pool = fc
             } else {
@@ -254,6 +275,48 @@ enum DecisionCore {
             }
         guard let winner = targets.first else { return .none }
         return .winner(winner, alternates: Array(targets.dropFirst().prefix(4)))
+    }
+
+    /// A first-class control whose AX frame spills over a first-class
+    /// neighbour it does not enclose (MyHome: the Settings button's frame also
+    /// covers the input row below it) keeps only its VISIBLE share (if it is the more-covered of the pair): the largest
+    /// rectangle left after cutting the neighbour away. Containment (a tab around
+    /// its close button) is left alone. Pure geometry, applied identically by the
+    /// indicator and the click.
+    static func trimOverlaps(_ candidates: [Candidate]) -> [Candidate] {
+        guard candidates.count > 1 else { return candidates }
+        return candidates.map { a in
+            guard a.tier == .firstClass else { return a }
+            var rect = a.rect
+            for b in candidates where b.key != a.key && b.tier == .firstClass {
+                let area = { (r: CGRect) in r.width * r.height }
+                guard rect.intersects(b.rect),
+                      !rect.insetBy(dx: -0.5, dy: -0.5).contains(b.rect),
+                      !b.rect.contains(rect) else { continue }
+                // Only the control MORE covered by the overlap gives way (the
+                // button whose frame spills, not the field it spills onto).
+                let inter = rect.intersection(b.rect)
+                let share = area(inter) / max(area(rect), 1)
+                let otherShare = area(inter) / max(area(b.rect), 1)
+                guard share > otherShare || (share == otherShare && area(rect) > area(b.rect))
+                else { continue }
+                // Raw extents: CGRect.width/height are absolute, so a negative
+                // slice must be rejected before a rect is built from it.
+                let slices: [(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat)] = [
+                    (rect.minX, rect.minY, rect.width, b.rect.minY - rect.minY),
+                    (rect.minX, b.rect.maxY, rect.width, rect.maxY - b.rect.maxY),
+                    (rect.minX, rect.minY, b.rect.minX - rect.minX, rect.height),
+                    (b.rect.maxX, rect.minY, rect.maxX - b.rect.maxX, rect.height),
+                ]
+                let cuts = slices.filter { $0.w > 0 && $0.h > 0 }
+                    .map { CGRect(x: $0.x, y: $0.y, width: $0.w, height: $0.h) }
+                if let best = cuts.max(by: { area($0) < area($1) }) { rect = best }
+            }
+            guard rect != a.rect else { return a }
+            return Candidate(key: a.key, rect: rect, inset: a.inset, tier: a.tier, role: a.role,
+                             label: a.label, verdict: a.verdict, chromeEligible: a.chromeEligible,
+                             evidenceGeneration: a.evidenceGeneration, collectedAt: a.collectedAt)
+        }
     }
 
     /// Fresh pointer-area targets can be published without waiting for global
@@ -337,6 +400,11 @@ enum DecisionCore {
     /// `margin` points; the default margin is the ring's tolerance. `margin: 0`
     /// is the strict containment used by the resolver's wrapper filter, so both
     /// places express containment the same way.
+    /// A first-class wrapper yields to an enclosed first-class control only when the
+    /// pointer is within this fraction of that control's longest side from it —
+    /// "nearly on" the control, not merely somewhere inside the wrapper.
+    static let wrapperYieldProximity: CGFloat = 0.25
+
     static func isNested(_ outer: CGRect, _ inner: CGRect,
                          margin: CGFloat = nestMargin) -> Bool {
         outer.insetBy(dx: -margin, dy: -margin).contains(inner)
