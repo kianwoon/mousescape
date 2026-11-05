@@ -49,6 +49,47 @@ enum AXGeometry {
         return viewports
     }
 
+    /// Thumb-sized slider → its track. Walks up to `maxDepth` parents (nearest
+    /// first, each read under `timeout`), stopping at the web document/window,
+    /// and asks GeometryPolicy for the first track-shaped ancestor; falls back
+    /// to the thumb's same-row siblings. `trail` lists role+frame per step for
+    /// the SLIDER_THUMB_PROMOTE diagnostic. Callers gate on `isThumbLike`.
+    static func promotedTrack(for el: AXUIElement, thumb: CGRect, maxDepth: Int,
+                              siblingLimit: Int, timeout: Float) -> (track: CGRect?, trail: [String]) {
+        func attr(_ e: AXUIElement, _ key: String) -> CFTypeRef? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(e, key as CFString, &value) == .success else { return nil }
+            return value
+        }
+        func parent(of e: AXUIElement) -> AXUIElement? {
+            guard let raw = attr(e, kAXParentAttribute), CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+            let p = raw as! AXUIElement
+            AXUIElementSetMessagingTimeout(p, timeout)
+            return p
+        }
+        var trail: [String] = []
+        var ancestors: [CGRect] = []
+        var node = parent(of: el)
+        let directParent = node
+        for _ in 0..<maxDepth {
+            guard let current = node else { break }
+            let role = attr(current, kAXRoleAttribute) as? String ?? "-"
+            if role == "AXWebArea" || role == (kAXWindowRole as String) { break }
+            let f = frame(current)
+            trail.append("\(role)\(f.map { "\($0)" } ?? "nil")")
+            if let f { ancestors.append(f) }
+            node = parent(of: current)
+        }
+        if let track = GeometryPolicy.promotedTrackRect(thumb: thumb, ancestors: ancestors) {
+            return (track, trail)
+        }
+        guard let directParent,
+              let kids = attr(directParent, kAXChildrenAttribute) as? [AXUIElement] else { return (nil, trail) }
+        let siblings = kids.prefix(siblingLimit).filter { !CFEqual($0, el) }.compactMap { frame($0) }
+        trail.append("siblings=\(siblings.count)")
+        return (GeometryPolicy.promotedTrackRect(thumb: thumb, rowSiblings: siblings), trail)
+    }
+
     /// One live round trip on supporting apps. A partial/unsupported batch uses
     /// the original reader, preserving apps with incomplete batch support.
     /// Nothing is cached, and both paths use the same finite-frame validation.

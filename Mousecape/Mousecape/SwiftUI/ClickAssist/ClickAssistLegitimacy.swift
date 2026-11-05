@@ -249,7 +249,12 @@ final class LegitimacyPolicy: @unchecked Sendable {
                     hitNode = (parent as! AXUIElement)
                 }
             }
-            let liveFrameMatches = axFrame(candidateElement).map { sameFrame($0, candidate) } == true
+            // A thumb-sized slider was promoted to its track: its live frame is
+            // the moving knob, which must lie inside the candidate track.
+            let liveFrameMatches = axFrame(candidateElement).map {
+                sameFrame($0, candidate)
+                    || GeometryPolicy.thumbWithinPromotedTrack(thumb: $0, track: candidate)
+            } == true
             let enabled = (attr(candidateElement, kAXEnabledAttribute) as? Bool) != false
                 && (attr(candidateElement, "AXHidden") as? Bool) != true
             diagnostic("SLIDER_CONTAINER adjustable=\(adjustable) frameMatches=\(liveFrameMatches) enabled=\(enabled) ancestor=\(hitIsAncestor)")

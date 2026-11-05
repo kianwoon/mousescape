@@ -243,6 +243,67 @@ enum GeometryPolicy {
     /// 2289 × 963 "slider" is a player container, not a track.
     static let trackShortMinSide: CGFloat = 60
     static let trackMinAspect: CGFloat = 8
+    // Thumb-sized sliders (x.com's video "Seek slider" reports its 30 × 30
+    // knob as the AXSlider frame, not the bar). Promote to the enclosing
+    // track so the whole bar is a candidate. Never applies to a slider whose
+    // own frame is already bar-shaped (isThumbLike gates every path).
+    static let thumbMaxSide: CGFloat = 48
+    static let thumbMaxAspect: CGFloat = 1.6
+    static let promotedTrackMinWidthRatio: CGFloat = 4
+    static let promotedTrackMaxHeightFloor: CGFloat = 60
+    static let promotedTrackMaxHeightRatio: CGFloat = 3
+    static let thumbContainmentSlack: CGFloat = 1
+    static let thumbPromoteAncestorDepth = 6
+    static let thumbPromoteSiblingLimit = 16
+    static let thumbPromoteTimeout: Float = 0.05
+
+    /// A knob-sized, roughly square frame — not a track.
+    static func isThumbLike(_ r: CGRect) -> Bool {
+        guard isValidFrame(r), r.width > 0, r.height > 0 else { return false }
+        let minSide = min(r.width, r.height)
+        let aspect = max(r.width, r.height) / minSide
+        return r.width <= thumbMaxSide && r.height <= thumbMaxSide && aspect <= thumbMaxAspect
+    }
+
+    /// Shape a track promoted from `thumb` must have: wide, and not much taller.
+    private static func isPromotableTrack(_ track: CGRect, thumb: CGRect) -> Bool {
+        isValidFrame(track)
+            && track.width >= promotedTrackMinWidthRatio * thumb.width
+            && track.height <= max(promotedTrackMaxHeightFloor, promotedTrackMaxHeightRatio * thumb.height)
+    }
+
+    /// Nearest-first ancestor frames: the first that contains the thumb (with
+    /// slack) and is track-shaped is the promoted track; nil when none is.
+    static func promotedTrackRect(thumb: CGRect, ancestors: [CGRect]) -> CGRect? {
+        guard isThumbLike(thumb) else { return nil }
+        let slack = thumbContainmentSlack
+        for a in ancestors where a.insetBy(dx: -slack, dy: -slack).contains(thumb) {
+            if isPromotableTrack(a, thumb: thumb) { return a }
+        }
+        return nil
+    }
+
+    /// Fallback when no ancestor is the track: union the thumb with siblings
+    /// that sit clearly on its row (vertically overlap it, same height bound).
+    static func promotedTrackRect(thumb: CGRect, rowSiblings: [CGRect]) -> CGRect? {
+        guard isThumbLike(thumb) else { return nil }
+        let maxHeight = max(promotedTrackMaxHeightFloor, promotedTrackMaxHeightRatio * thumb.height)
+        var union = thumb
+        for s in rowSiblings where isValidFrame(s) && s.height <= maxHeight
+            && s.minY <= thumb.midY && s.maxY >= thumb.midY {
+            union = union.union(s)
+        }
+        return isPromotableTrack(union, thumb: thumb) && union != thumb ? union : nil
+    }
+
+    /// The live slider frame is the moving thumb while the cached target is
+    /// its promoted track: identity still holds while the thumb lies inside.
+    static func thumbWithinPromotedTrack(thumb: CGRect, track: CGRect) -> Bool {
+        guard isThumbLike(thumb) else { return false }
+        let slack = thumbContainmentSlack
+        return track.insetBy(dx: -slack, dy: -slack).contains(thumb)
+            && isPromotableTrack(track, thumb: thumb)
+    }
     // Row 6 — wide-thin group (zoomed web seek bar collapsed to 2 pt tall).
     static let wideThinMinWidth: CGFloat = 300
     static let wideThinMinHeight: CGFloat = 2

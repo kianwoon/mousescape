@@ -99,6 +99,7 @@ final class AccessibilityResolver: @unchecked Sendable {
     private var lastResolvedPid: pid_t = 0
     private var running = false
     private var loggedSecure: Set<String> = []
+    private var loggedThumbPromotions: Set<String> = []
     private var loggedRowCapabilities: Set<String> = []
     /// Per-cycle: enclosing AXScrollArea frames keyed by a row's parent (rows
     /// of one list share it, so the ancestor walk runs once per list).
@@ -929,7 +930,13 @@ final class AccessibilityResolver: @unchecked Sendable {
             if heldByPointer {
                 let element = elementRefs[previous.key]
                 let liveFrame = element.flatMap { frame($0) }
-                if FrameContinuity.needsGeometryRefresh(cached: previous.rect, live: liveFrame) {
+                // A promoted thumb slider's live frame is the moving knob; it
+                // stays the same target (and keeps its verdict) while inside.
+                let thumbInsideTrack = previous.role == "AXSlider"
+                    && liveFrame.map { GeometryPolicy.thumbWithinPromotedTrack(thumb: $0,
+                                                                               track: previous.rect) } == true
+                if !thumbInsideTrack,
+                   FrameContinuity.needsGeometryRefresh(cached: previous.rect, live: liveFrame) {
                     // Chromium reuses elements while a new video/window layout
                     // moves their frame. Replace the old key/rect BEFORE choosing
                     // evidence, rather than validating the obsolete winner forever.
@@ -1478,7 +1485,10 @@ final class AccessibilityResolver: @unchecked Sendable {
             record(.secure)
             return false
         }
-        guard let rect = frame(el) else { return false }
+        guard var rect = frame(el) else { return false }
+        if GeometryPolicy.admittedTrackRoles.contains(role), GeometryPolicy.isThumbLike(rect) {
+            rect = promoteThumb(el, thumb: rect)
+        }
         let verdict = GeometryPolicy.classify(role: role, hasPressAction: hasPressAction,
                                               rect: rect,
                                               displayBounds: cycleDisplayBounds,
@@ -1889,6 +1899,23 @@ final class AccessibilityResolver: @unchecked Sendable {
 
     private func frame(_ el: AXUIElement) -> CGRect? {
         AXGeometry.frame(el)   // single validated reader (ClickAssistGeometry.swift)
+    }
+
+    /// Thumb-sized AXSlider (x.com seek knob) → its track rect, else the thumb.
+    /// Logged once per key; the key derives from the TRACK so it stays stable
+    /// while the knob moves during playback.
+    private func promoteThumb(_ el: AXUIElement, thumb: CGRect) -> CGRect {
+        let result = AXGeometry.promotedTrack(for: el, thumb: thumb,
+            maxDepth: GeometryPolicy.thumbPromoteAncestorDepth,
+            siblingLimit: GeometryPolicy.thumbPromoteSiblingLimit,
+            timeout: GeometryPolicy.thumbPromoteTimeout)
+        let name = stringAttr(el, kAXIdentifierAttribute).flatMap { $0.isEmpty ? nil : $0 }
+            ?? stringAttr(el, kAXTitleAttribute) ?? "AXSlider"
+        let key = result.track.map { "\(name)@\(Int($0.minX)),\(Int($0.minY))" } ?? "\(name)@none"
+        if loggedThumbPromotions.insert(key).inserted {
+            log("SLIDER_THUMB_PROMOTE key=\(key) thumb=\(thumb) ancestors=[\(result.trail.joined(separator: ", "))] result=\(result.track == nil ? "none" : "promoted")")
+        }
+        return result.track ?? thumb
     }
 
     /// Union of all displays expressed in AX/CG global coordinates. Keeps stale or
