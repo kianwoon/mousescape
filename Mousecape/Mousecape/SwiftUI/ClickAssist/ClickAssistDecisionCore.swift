@@ -545,11 +545,9 @@ enum BackgroundClickPolicy {
     /// Pause between "the app reports frontmost" and the injected click when this
     /// delivery had to activate the app itself. Chromium/Electron web content
     /// takes a moment after activation to accept input: a click posted at once is
-    /// delivered (delivered=1) but ignored, so the button never reacts. Bounded by
-    /// the request deadline at the call site.
-    static let postActivationSettle: TimeInterval = 0.5
-    /// Margin kept before the request deadline when spending the settle pause.
-    static let settleDeadlineMargin: TimeInterval = 0.02
+    /// delivered (delivered=1) but ignored, so the button never reacts. 80 ms and ~340 ms
+    /// were ignored by the permission card; 700 ms worked.
+    static let postActivationSettle: TimeInterval = 0.7
     /// Optional tuning override (milliseconds) for the post-activation settle,
     /// read from the app preferences domain at each delivery. Absent = default.
     static let settleOverrideDomain = "com.sdmj76.Mousecape"

@@ -359,10 +359,10 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         // Electron button logs delivered=1 and never reacts.
         var settleMs = 0
         if !wasActive {
-            let remaining = request.deadline - CACurrentMediaTime() - BackgroundClickPolicy.settleDeadlineMargin
-            // An explicit tuning override is honored beyond the request deadline.
+            // The settle must run in full: capping it by the request deadline cut a
+            // 500 ms setting to ~340 ms, which the approval card still ignored.
             let settle = BackgroundClickPolicy.settleOverrideSeconds()
-                ?? min(BackgroundClickPolicy.postActivationSettle, max(0, remaining))
+                ?? BackgroundClickPolicy.postActivationSettle
             if settle > 0 { Thread.sleep(forTimeInterval: settle) }
             settleMs = Int(settle * 1000)
             if let moveSource = CGEventSource(stateID: .hidSystemState),
