@@ -154,12 +154,12 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
 
     func configure(_ json: Data, reply: @escaping (Bool) -> Void) {
         let obj = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any] ?? [:]
-        let agentPid = (obj["agentPid"] as? NSNumber)?.int32Value ?? 0
+        // Exclusion is by overlay WINDOW only. The agent pid is deliberately NOT
+        // excluded: that hid the agent's own menu-bar item from the resolver.
+        // The resolver's own process stays excluded structurally (getpid()).
         let ids = (obj["overlayWindowIDs"] as? [NSNumber])?.map { $0.intValue } ?? []
-        var pids = Set<pid_t>()
-        if agentPid > 0 { pids.insert(agentPid) }
-        resolver.setExclusions(pids: pids, windowIDs: Set(ids))
-        svcLog("CONFIGURED excludedPids=\(pids) overlayWindows=\(ids.count)")
+        resolver.setExclusions(windowIDs: Set(ids))
+        svcLog("CONFIGURED excludedPids=[] overlayWindows=\(ids.count) ids=\(ids.sorted())")
         reply(true)
     }
 

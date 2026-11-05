@@ -51,6 +51,8 @@ final class ClickAssistServiceClient: @unchecked Sendable {
     private var movementMonitor: Any?
     private var movementSignal: DispatchSourceUserDataAdd?
     private var lastMovementSent: CFTimeInterval = 0
+    /// Current overlay window ids (client queue only); see `setOverlayWindowIDs`.
+    private var overlayWindowIDs: [Int] = []
 
     /// Epoch/generation are client-local so stale-epoch and old-generation
     /// payloads can be dropped without trusting the service to self-police.
@@ -174,21 +176,9 @@ final class ClickAssistServiceClient: @unchecked Sendable {
             log("XPC_UNAVAILABLE reason=proxy-unavailable")
             return
         }
-        // Tell the service which processes/windows are OURS: the service cannot
-        // know the agent's pid, so without this the agent's click-through overlay
-        // claims pointer ownership and the real window beneath is never resolved.
-        // Window IDs are unnecessary: every overlay window belongs to THIS
-        // agent process, and the service excludes the agent pid wholesale. Asking
-        // AppKit for window numbers here would touch NSApplication off the main
-        // actor (crash: dispatch_assert_queue in Swift 6 isolation checking).
-        let overlayIDs: [Int] = []
-        let cfg: [String: Any] = ["agentPid": Int(ProcessInfo.processInfo.processIdentifier),
-                                  "overlayWindowIDs": overlayIDs]
-        if let cfgData = try? JSONSerialization.data(withJSONObject: cfg),
-           let cproxy = conn.remoteObjectProxy as? ClickAssistXPCProtocol {
-            cproxy.configure(cfgData) { _ in }
-            log("XPC_CONFIGURE agentPid=\(ProcessInfo.processInfo.processIdentifier) overlayWindows=\(overlayIDs.count)")
-        }
+        // Every (re)connect re-sends the overlay window ids: a respawned service
+        // instance starts with no exclusions.
+        sendConfiguration(reason: "connect")
         proxy.serviceInfo { [weak self] data in
             guard let self else { return }
             self.queue.async {
@@ -207,6 +197,30 @@ final class ClickAssistServiceClient: @unchecked Sendable {
                                version, pid, epoch, latencyUs))
             }
         }
+    }
+
+    /// The overlay's CGWindowIDs (`NSWindow.windowNumber`), captured by the
+    /// overlay on the main actor whenever its panel is created or torn down and
+    /// pushed here. The service excludes exactly these windows from pointer
+    /// ownership — never the agent's whole pid, which would also hide this
+    /// agent's own menu-bar item from the resolver.
+    func setOverlayWindowIDs(_ ids: [Int]) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            let normalized = Array(Set(ids)).sorted()
+            guard normalized != self.overlayWindowIDs else { return }
+            self.overlayWindowIDs = normalized
+            self.sendConfiguration(reason: "overlay-windows-changed")
+        }
+    }
+
+    /// Client queue only. No-op while disconnected: `connect()` re-sends.
+    private func sendConfiguration(reason: String) {
+        guard !stopped, let proxy = connection?.remoteObjectProxy as? ClickAssistXPCProtocol else { return }
+        let cfg: [String: Any] = ["overlayWindowIDs": overlayWindowIDs]
+        guard let data = try? JSONSerialization.data(withJSONObject: cfg) else { return }
+        proxy.configure(data) { _ in }
+        log("XPC_CONFIGURE reason=\(reason) overlayWindows=\(overlayWindowIDs.count) ids=\(overlayWindowIDs)")
     }
 
     private func handleFailure(reason: String) {

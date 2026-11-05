@@ -586,3 +586,21 @@ enum HitAncestryRescue {
         return .app
     }
 }
+
+/// Pointer ownership from the system-wide AX hit (pure). Exclusion is by
+/// WINDOW, never by process: the agent's click-through overlay windows must not
+/// claim the pointer, but the agent's other windows (its menu-bar item) are
+/// ordinary targets. Only the resolver's OWN process is excluded wholesale —
+/// the structural self-RPC guard (AX queries into self deadlock).
+enum PointerOwnerPolicy {
+    /// - Returns: the owner pid, or nil when the hit is unusable/excluded, in
+    ///   which case the caller falls back to the frontmost app. The AX hit test
+    ///   yields one element, not a z-ordered list, so there is no "next window
+    ///   below" to descend to.
+    static func owner(hitPid: Int32?, hitWindowID: Int?, selfPid: Int32,
+                      excludedWindowIDs: Set<Int>) -> Int32? {
+        guard let hitPid, hitPid > 0, hitPid != selfPid else { return nil }
+        if let hitWindowID, excludedWindowIDs.contains(hitWindowID) { return nil }
+        return hitPid
+    }
+}

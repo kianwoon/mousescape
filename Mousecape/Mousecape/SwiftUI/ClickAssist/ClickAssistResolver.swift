@@ -41,22 +41,19 @@ final class AXElementTable: @unchecked Sendable {
 ///  * app activation / deactivation (NSWorkspace, NSApplication)
 /// Any of those publishes an INVALID snapshot first (fail-open) and then refreshes.
 final class AccessibilityResolver: @unchecked Sendable {
-    /// Processes whose windows must never be treated as the pointer's window.
-    /// When the resolver runs inside an XPC service, `getpid()` is the SERVICE —
-    /// the agent that owns the click-through overlay windows is a DIFFERENT
-    /// process, so self-exclusion alone lets the overlay (or the agent itself)
-    /// claim pointer ownership and the real app beneath is never resolved.
-    /// Set once by the service from the client handshake.
+    /// Windows that must never be treated as the pointer's window: the agent's
+    /// click-through overlay panels (CGWindowIDs pushed by the client whenever
+    /// they change). Exclusion is per WINDOW, never per process — excluding the
+    /// agent pid wholesale also hid the agent's own menu-bar item. The only
+    /// process excluded wholesale is this one (`getpid()`, self-RPC guard).
     private let exclusionLock = NSLock()
-    private var excludedOwnerPids: Set<pid_t> = []
     private var excludedWindowIDs: Set<Int> = []
-    func setExclusions(pids: Set<pid_t>, windowIDs: Set<Int>) {
-        exclusionLock.lock(); excludedOwnerPids = pids; excludedWindowIDs = windowIDs; exclusionLock.unlock()
+    func setExclusions(windowIDs: Set<Int>) {
+        exclusionLock.lock(); excludedWindowIDs = windowIDs; exclusionLock.unlock()
     }
-    private func isExcluded(owner pid: pid_t) -> Bool {
-        if pid == getpid() { return true }
-        exclusionLock.lock(); let e = excludedOwnerPids.contains(pid); exclusionLock.unlock()
-        return e
+    private func currentExcludedWindowIDs() -> Set<Int> {
+        exclusionLock.lock(); defer { exclusionLock.unlock() }
+        return excludedWindowIDs
     }
     // Admission geometry — role sets, envelopes, frame floor, giant/area bounds —
     // all live in `GeometryPolicy` (ClickAssistGeometry.swift). This class only
@@ -1289,16 +1286,20 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// ONLY source: CGWindowListCopyWindowInfo answers nil inside this XPC service
     /// (logged 2026-11-02), so there is no window-list fallback.
     private func pointerOwnerPid(_ pointer: CGPoint) -> (pid: pid_t?, source: String) {
-        if let hit = systemWideHitPid(pointer), hit > 0, !isExcluded(owner: hit) {
-            return (hit, "ax-hit")
+        guard let hit = systemWideHit(pointer) else { return (nil, "ax-hit-failed") }
+        if let owner = PointerOwnerPolicy.owner(hitPid: hit.pid, hitWindowID: hit.windowID,
+                                                selfPid: getpid(),
+                                                excludedWindowIDs: currentExcludedWindowIDs()) {
+            return (owner, "ax-hit")
         }
-        return (nil, "ax-hit-failed")
+        return (nil, "ax-hit-excluded")
     }
 
     /// `AXUIElementCopyElementAtPosition` on the SYSTEM-WIDE element: the same
     /// routing a real click takes. 100 ms messaging timeout keeps the fast path
     /// inside the 250 ms resolver deadline (typically single-digit ms).
-    private func systemWideHitPid(_ pointer: CGPoint) -> pid_t? {
+    /// `windowID` is the hit's CGWindowID (nil when AX cannot map it).
+    private func systemWideHit(_ pointer: CGPoint) -> (pid: pid_t, windowID: Int?)? {
         let sysWide = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(sysWide, 0.1)
         var element: AXUIElement?
@@ -1307,7 +1308,10 @@ final class AccessibilityResolver: @unchecked Sendable {
               let element else { return nil }
         var pid: pid_t = 0
         guard AXUIElementGetPid(element, &pid) == .success, pid > 0 else { return nil }
-        return pid
+        var wid: CGWindowID = 0
+        let windowID: Int? = _AXUIElementGetWindow(element, &wid) == .success && wid != 0
+            ? Int(wid) : nil
+        return (pid, windowID)
     }
 
     /// The AX window of `ownerPid` under the pointer. The live hit's AXWindow is
@@ -2257,3 +2261,9 @@ private func axObserverCallback(_ observer: AXObserver,
     let me = Unmanaged<AccessibilityResolver>.fromOpaque(refcon).takeUnretainedValue()
     me.handleAXNotification(notification as String)
 }
+
+/// HIServices SPI: the CGWindowID backing an AX element (the documented AX API
+/// has no element->window-server-id mapping). Used only to match the agent's
+/// overlay window ids; a failure yields nil and no exclusion.
+@_silgen_name("_AXUIElementGetWindow")
+private func _AXUIElementGetWindow(_ element: AXUIElement, _ windowID: UnsafeMutablePointer<CGWindowID>) -> AXError

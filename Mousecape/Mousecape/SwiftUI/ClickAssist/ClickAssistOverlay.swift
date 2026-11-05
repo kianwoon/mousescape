@@ -204,7 +204,25 @@ final class TargetingOverlay {
         if let panel { panel.orderOut(nil); panel.contentView = nil }
         panel = nil
         view = nil
+        publishWindowIDs()
         log("OVERLAY_DEAD action=observer-dead taps-unaffected=true")
+    }
+
+    /// Fired on the main actor whenever the set of overlay windows changes
+    /// (panel created / torn down). The resolver service excludes exactly these
+    /// CGWindowIDs from pointer ownership.
+    var onWindowIDsChanged: (([Int]) -> Void)?
+
+    /// CGWindowIDs of every live overlay window (`windowNumber` is the
+    /// window-server id; it is > 0 once the window has a device).
+    var windowIDs: [Int] {
+        [panel].compactMap { $0?.windowNumber }.filter { $0 > 0 }
+    }
+
+    private func publishWindowIDs() {
+        let ids = windowIDs
+        log("OVERLAY_WINDOW_IDS ids=\(ids)")
+        onWindowIDsChanged?(ids)
     }
 
     /// Gate 6 evidence: non-interactivity flags of the live panel (main thread only).
@@ -390,6 +408,7 @@ final class TargetingOverlay {
             p.contentView = v
             panel = p
             view = v
+            publishWindowIDs()
         }
         guard let panel, let view else { return }
         if panel.frame != cocoa { panel.setFrame(cocoa, display: false) }   // AX-churn guard

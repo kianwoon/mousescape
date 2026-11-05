@@ -266,6 +266,10 @@ final class ClickAssistEngine {
             debugLog("[ClickAssist] \(line)")
         }
         overlay = o
+        // Overlay windows -> resolver exclusions, re-sent on every panel
+        // create/teardown (the client also re-sends on every reconnect).
+        o.onWindowIDsChanged = { [weak self] ids in self?.serviceClient?.setOverlayWindowIDs(ids) }
+        serviceClient?.setOverlayWindowIDs(o.windowIDs)
         // One permanent forwarder: overlay identity changes, observer count stays 1.
         if !cacheObserverInstalled {
             cache.addObserver { [weak self] snap in
@@ -278,7 +282,8 @@ final class ClickAssistEngine {
 
     private func stopOverlay() {
         guard let o = overlay else { return }
-        o.kill()
+        o.kill()   // publishes an empty id set through onWindowIDsChanged
+        o.onWindowIDsChanged = nil
         overlay = nil
     }
 }
