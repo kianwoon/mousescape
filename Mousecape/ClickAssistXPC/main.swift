@@ -366,6 +366,35 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
             let result = AXUIElementPerformAction(element, "AXPress" as CFString)
             return (result == .success, result == .success ? "axpress-once" : "axpress-failed-no-retry")
         }
+        // Background Electron/Chromium web button: AXPress goes through the
+        // accessibility tree, so no settle is needed. One attempt; only an
+        // outright AXPress error falls through to the mouse-pair path below.
+        if !wasActive, BackgroundClickPolicy.webAXPressEnabled(role: target.role) {
+            // Web content only: native controls keep the mouse-pair path.
+            var inWebArea = false
+            var node: AXUIElement? = element
+            var depth = 0
+            while let current = node, depth < BackgroundClickPolicy.webAXPressAncestorDepth {
+                depth += 1
+                if (attribute(current, kAXRoleAttribute) as? String) == "AXWebArea" { inWebArea = true; break }
+                guard let parent = attribute(current, kAXParentAttribute),
+                      CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
+                node = (parent as! AXUIElement)
+            }
+            if inWebArea {
+            AXUIElementSetMessagingTimeout(element, BackgroundClickPolicy.webAXPressTimeout)
+            let pressStart = CACurrentMediaTime()
+            let result = AXUIElementPerformAction(element, "AXPress" as CFString)
+            svcLog("BACKGROUND_WEB_AXPRESS request=\(request.requestID) role=\(target.role) code=\(result.rawValue) elapsedMs=\(Int((CACurrentMediaTime()-request.issuedAt)*1000)) pressMs=\(Int((CACurrentMediaTime()-pressStart)*1000))")
+            if result == .success {
+                // Diagnostic only: does the control survive the press?
+                Thread.sleep(forTimeInterval: BackgroundClickPolicy.webAXPressProbeDelay)
+                let stillThere = AXGeometry.frame(element) != nil
+                svcLog("BACKGROUND_WEB_AXPRESS_PROBE request=\(request.requestID) stillPresent=\(stillThere ? 1 : 0)")
+                return (true, "web-axpress-once")
+            }
+            }
+        }
         // Activated by this delivery: give the page time to start accepting input
         // and tell it where the pointer is before the press, otherwise an
         // Electron button logs delivered=1 and never reacts.
