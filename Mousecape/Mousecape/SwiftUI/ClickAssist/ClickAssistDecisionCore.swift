@@ -548,6 +548,9 @@ enum BackgroundClickPolicy {
     /// delivered (delivered=1) but ignored, so the button never reacts. 80 ms and ~340 ms
     /// were ignored by the permission card; 700 ms worked.
     static let postActivationSettle: TimeInterval = 0.7
+    /// How long the ring stays filled after a captured click: the settle plus
+    /// time for the app to react, so the acknowledgement covers the whole wait.
+    static let clickAckDuration: TimeInterval = postActivationSettle + 0.3
     /// Optional tuning override (milliseconds) for the post-activation settle,
     /// read from the app preferences domain at each delivery. Absent = default.
     static let settleOverrideDomain = "com.sdmj76.Mousecape"

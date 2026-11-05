@@ -110,11 +110,14 @@ final class AssistTap: @unchecked Sendable {
         pendingBackgroundClick = PendingBackgroundClick(down: down, candidate: candidate,
             pid: res.pid, point: destination)
         log("BACKGROUND_CLICK_CAPTURED target=\(candidate.key) pid=\(res.pid) winFocused=\(res.pointerWindowFocused ? 1 : 0) original=consumed")
+        onBackgroundClickCaptured?()
         return true
     }
     /// Off-callback activation transport (XPC to the resolver service). The tap
     /// hands ownership to the service; the reply is advisory only.
     var activationSink: ((AXPressRequest) -> Void)?
+    /// Fired when a background click is captured (before delivery), for UI feedback.
+    var onBackgroundClickCaptured: (() -> Void)?
     /// The callback's own last successfully read snapshot: the non-blocking read
     /// path returns it when the publish lock is contended.
     private var lastSnapshot = CacheSnapshot.empty

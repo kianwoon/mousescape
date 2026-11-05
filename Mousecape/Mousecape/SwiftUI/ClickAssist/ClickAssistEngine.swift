@@ -205,6 +205,9 @@ final class ClickAssistEngine {
         t.activationSink = { [weak client] request in
             client?.activate(request)
         }
+        t.onBackgroundClickCaptured = { [weak self] in
+            Task { @MainActor in self?.overlay?.acknowledgeClick() }
+        }
         guard t.start(point: .cghidEventTap, runLoop: tapHostRunLoop) else {
             debugLog("[ClickAssist] ENGINE_PAUSED reason=tap-create-failed")
             client.stop()

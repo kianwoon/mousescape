@@ -27,6 +27,9 @@ final class OverlayView: NSView {
     var tolerance: CGFloat = 12
     var mode = "redirect"
     var isBlank = true
+    /// Until this time the target rect is filled: the click was captured and is
+    /// being delivered (activation settle), so the user sees it registered.
+    var ackUntil: CFTimeInterval = 0
 
     override var isFlipped: Bool { true }
 
@@ -66,6 +69,10 @@ final class OverlayView: NSView {
         framePath.lineWidth = primaryDim ? 1 : 2
         (mode == "direct-hit" ? NSColor.systemGreen : NSColor.systemBlue).setStroke()
         framePath.stroke()
+        if CACurrentMediaTime() < ackUntil {
+            NSColor.systemGreen.withAlphaComponent(0.3).setFill()
+            framePath.fill()
+        }
         // Pointer marker at the REAL cursor position (never moved by us).
         let p = local(cgPointer)
         NSColor.systemRed.setFill()
@@ -130,6 +137,14 @@ final class TargetingOverlay {
         repaintTimer = Timer.scheduledTimer(withTimeInterval: Self.repaintInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.repaintFromLivePointer() }
         }
+    }
+
+    /// A background click was captured: fill the ring for the delivery window so
+    /// the user can tell the click registered while activation settles.
+    func acknowledgeClick() {
+        guard let view, !view.isBlank else { return }
+        view.ackUntil = CACurrentMediaTime() + BackgroundClickPolicy.clickAckDuration
+        view.needsDisplay = true
     }
 
     func setTolerance(_ v: CGFloat) {
