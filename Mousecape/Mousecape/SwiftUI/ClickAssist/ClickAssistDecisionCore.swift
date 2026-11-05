@@ -607,6 +607,46 @@ enum BackgroundClickPolicy {
             && click.rect.width > 0 && click.rect.height > 0 && rect.contains(click.point)
             && FrameContinuity.delta(click.rect, rect) <= 1
     }
+
+    /// Published-vs-LIVE geometry. The published rect may be the visible share
+    /// of the control's AX frame (OverlapOwnership trims the part a later
+    /// sibling paints over: a Brave tab 248 pt wide published as 246 pt), so it
+    /// is compared as a subset, never edge-for-edge with the raw AX frame. The
+    /// live frame must still contain the click and the published rect, and keep
+    /// at least one of its edges (a translated or wholly regrown frame fails).
+    enum LiveGeometry: String, Equatable {
+        case matches
+        case invalidClick = "invalid-click"
+        case pointOutside = "point-outside-live"
+        case publishedOutside = "published-outside-live"
+        case noSharedEdge = "no-shared-edge"
+    }
+    /// Edge tolerance (pt) for published-vs-live: the same 1 pt FrameContinuity
+    /// and OverlapOwnership use for "the same frame".
+    static let liveFrameEpsilon: CGFloat = 1
+    static func liveGeometry(_ click: BackgroundClickWire, live: CGRect) -> LiveGeometry {
+        guard click.x.isFinite, click.y.isFinite, GeometryPolicy.isValidFrame(click.rect),
+              click.rect.width > 0, click.rect.height > 0,
+              GeometryPolicy.isValidFrame(live) else { return .invalidClick }
+        guard live.contains(click.point) else { return .pointOutside }
+        let eps = liveFrameEpsilon
+        guard live.insetBy(dx: -eps, dy: -eps).contains(click.rect) else { return .publishedOutside }
+        let shared = abs(click.rect.minX - live.minX) <= eps || abs(click.rect.maxX - live.maxX) <= eps
+            || abs(click.rect.minY - live.minY) <= eps || abs(click.rect.maxY - live.maxY) <= eps
+        return shared ? .matches : .noSharedEdge
+    }
+
+    /// XPC rejection reasons after which NOTHING was posted or performed for the
+    /// consumed physical click, so posting that click once natively is the only
+    /// delivery (never a double fire). Excluded: attempted-action failures, and a
+    /// re-sent request id (the first copy already owns that click).
+    static let attemptedDeliveryReasons: Set<String> = [
+        "axpress-failed-no-retry", "native-row-action-failed-no-retry", "event-allocation-failed",
+        "duplicate-request",
+    ]
+    static func shouldDeliverOriginalAfterRejection(_ reason: String) -> Bool {
+        !attemptedDeliveryReasons.contains(reason)
+    }
 }
 
 struct AXPressRequest: Sendable {

@@ -112,4 +112,44 @@ final class ClickAssistBackgroundClickTests: XCTestCase {
         XCTAssertFalse(GeometryPolicy.isOtherWindowTarget(targetWindow: 0, pointerWindow: 1))
         XCTAssertFalse(GeometryPolicy.isOtherWindowTarget(targetWindow: 6, pointerWindow: 0))
     }
+
+    /// Guarded failure (Brave, live log): overlap ownership published the YouTube
+    /// tab as its visible share (2207,423,246,40) while the live AX frame stays
+    /// (2207,423,248,40). The edge-for-edge check rejected it as
+    /// "target-changed" before activation, so all 10 clicks were lost.
+    func testLiveGeometryAcceptsVisibleShareOfAXFrame() {
+        let published = CGRect(x: 2207, y: 423, width: 246, height: 40)
+        let live = CGRect(x: 2207, y: 423, width: 248, height: 40)
+        let click = BackgroundClickWire(x: 2386.8, y: 437.5, rect: published)
+        XCTAssertFalse(BackgroundClickPolicy.matches(click, rect: live), "regression premise")
+        XCTAssertEqual(BackgroundClickPolicy.liveGeometry(click, live: live), .matches)
+        // Untrimmed (published == live) is the common path.
+        XCTAssertEqual(BackgroundClickPolicy.liveGeometry(
+            BackgroundClickWire(x: 2386.8, y: 437.5, rect: live), live: live), .matches)
+    }
+
+    func testLiveGeometryStillRejectsRealGeometryChanges() {
+        let published = CGRect(x: 2207, y: 423, width: 246, height: 40)
+        let click = BackgroundClickWire(x: 2386.8, y: 437.5, rect: published)
+        XCTAssertEqual(BackgroundClickPolicy.liveGeometry(click, live: published.offsetBy(dx: 5, dy: 0)),
+                       .publishedOutside)
+        XCTAssertEqual(BackgroundClickPolicy.liveGeometry(click, live: published.insetBy(dx: -5, dy: -5)),
+                       .noSharedEdge)
+        XCTAssertEqual(BackgroundClickPolicy.liveGeometry(click,
+                       live: CGRect(x: 2000, y: 423, width: 100, height: 40)), .pointOutside)
+        XCTAssertEqual(BackgroundClickPolicy.liveGeometry(
+            BackgroundClickWire(x: .nan, y: 437.5, rect: published), live: published), .invalidClick)
+    }
+
+    /// A consumed click is delivered natively only when nothing else owns it.
+    func testRejectedBackgroundClickFallbackOwnership() {
+        for reason in ["geometry-published-outside-live", "focus-not-established", "expired",
+                       "unknown-target", "invalid-background-evidence", "duplicate-target"] {
+            XCTAssertTrue(BackgroundClickPolicy.shouldDeliverOriginalAfterRejection(reason), reason)
+        }
+        for reason in ["axpress-failed-no-retry", "native-row-action-failed-no-retry",
+                       "event-allocation-failed", "duplicate-request"] {
+            XCTAssertFalse(BackgroundClickPolicy.shouldDeliverOriginalAfterRejection(reason), reason)
+        }
+    }
 }

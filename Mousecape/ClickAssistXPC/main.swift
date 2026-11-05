@@ -204,9 +204,9 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         } else {
             backgroundEligible = false
         }
-        if request.backgroundClick != nil, !backgroundEligible {
-            svcLog("BACKGROUND_CLICK_REJECTED reason=invalid-evidence request=\(request.requestID)")
-            reply(Self.reply(status: "rejected", reason: "invalid-background-evidence"))
+        if let click = request.backgroundClick, !backgroundEligible {
+            svcLog("BACKGROUND_CLICK_REJECTED reason=invalid-evidence request=\(request.requestID) point=\(click.point) published=\(click.rect) cached=\(String(describing: target?.rect))")
+            reply(Self.backgroundFailureReply(request, reason: "invalid-background-evidence"))
             return
         }
 
@@ -221,7 +221,7 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
 
         if let rejection {
             svcLog("AXPRESS_REJECTED reason=\(rejection.rawValue) target=\(request.targetKey) request=\(request.requestID) generation=\(request.generation) current=\(snapshot.generation)")
-            reply(Self.reply(status: "rejected", reason: rejection.rawValue))
+            reply(Self.backgroundFailureReply(request, reason: rejection.rawValue))
             return
         }
 
@@ -235,7 +235,7 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
             let execNow = CACurrentMediaTime()
             guard execNow < request.deadline else {
                 svcLog("AXPRESS_REJECTED reason=\(ActivationRejection.expired.rawValue) target=\(request.targetKey) request=\(request.requestID)")
-                reply(Self.reply(status: "rejected", reason: ActivationRejection.expired.rawValue))
+                reply(Self.backgroundFailureReply(request, reason: ActivationRejection.expired.rawValue))
                 return
             }
             let currentSnapshot = self.cache.current()
@@ -247,7 +247,7 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
             guard let live = self.resolver.element(for: request.targetKey, pid: pid),
                   let expectedElement, CFEqual(live, expectedElement) else {
                 svcLog("AXPRESS_REJECTED reason=\(ActivationRejection.unknownTarget.rawValue) target=\(request.targetKey) request=\(request.requestID)")
-                reply(Self.reply(status: "rejected", reason: ActivationRejection.unknownTarget.rawValue))
+                reply(Self.backgroundFailureReply(request, reason: ActivationRejection.unknownTarget.rawValue))
                 return
             }
             AXUIElementSetMessagingTimeout(live, 0.05)
@@ -255,7 +255,8 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
                 let outcome = self.performBackgroundClick(request, click: click, target: target,
                                                          element: live, snapshot: snapshot)
                 svcLog("BACKGROUND_CLICK_RESULT request=\(request.requestID) target=\(request.targetKey) delivered=\(outcome.delivered ? 1 : 0) reason=\(outcome.reason)")
-                reply(Self.reply(status: outcome.delivered ? "done" : "rejected", reason: outcome.reason))
+                reply(outcome.delivered ? Self.reply(status: "done", reason: outcome.reason)
+                      : Self.backgroundFailureReply(request, reason: outcome.reason))
                 return
             }
             let result = AXUIElementPerformAction(live, "AXPress" as CFString)
@@ -274,12 +275,18 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
             guard AXUIElementCopyAttributeValue(e, name as CFString, &value) == .success else { return nil }
             return value
         }
-        guard !IsSecureEventInputEnabled(),
-              let app = NSRunningApplication(processIdentifier: request.pid),
-              let rawWindow = attribute(element, kAXWindowAttribute),
-              CFGetTypeID(rawWindow) == AXUIElementGetTypeID(),
-              let before = AXGeometry.frame(element),
-              BackgroundClickPolicy.matches(click, rect: before) else { return (false, "target-changed") }
+        guard !IsSecureEventInputEnabled() else { return (false, "secure-input") }
+        guard let app = NSRunningApplication(processIdentifier: request.pid) else { return (false, "app-gone") }
+        guard let rawWindow = attribute(element, kAXWindowAttribute),
+              CFGetTypeID(rawWindow) == AXUIElementGetTypeID() else { return (false, "no-window") }
+        guard let before = AXGeometry.frame(element) else { return (false, "frame-unreadable") }
+        // The published rect may be the visible share of the AX frame (overlap
+        // ownership); compare it as a subset, never edge-for-edge.
+        let beforeGeometry = BackgroundClickPolicy.liveGeometry(click, live: before)
+        guard beforeGeometry == .matches else {
+            svcLog("BACKGROUND_CLICK_GEOMETRY request=\(request.requestID) stage=pre-activation check=\(beforeGeometry.rawValue) point=\(click.point) published=\(click.rect) live=\(before)")
+            return (false, "geometry-\(beforeGeometry.rawValue)")
+        }
         let window = rawWindow as! AXUIElement
         AXUIElementSetMessagingTimeout(window, 0.05)
         // An XPC worker is not the foreground application. Express the user's
@@ -328,9 +335,14 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
             svcLog("BACKGROUND_CLICK_FOCUS_DIAG request=\(request.requestID) expectedPID=\(request.pid) frontPID=\(NSWorkspace.shared.frontmostApplication?.processIdentifier ?? 0) liveFront=\(String(describing: attribute(axApp, kAXFrontmostAttribute))) windowReady=\(windowReady) axFront=\(frontResult.rawValue) elapsedMs=\(Int((CACurrentMediaTime()-request.issuedAt)*1000))")
             return (false, "focus-not-established")
         }
-        guard let frame = AXGeometry.frame(element), BackgroundClickPolicy.matches(click, rect: frame),
-              (attribute(element, kAXEnabledAttribute) as? Bool) != false,
-              (attribute(element, "AXHidden") as? Bool) != true else { return (false, "live-target-changed") }
+        guard let frame = AXGeometry.frame(element) else { return (false, "live-frame-unreadable") }
+        let liveGeometry = BackgroundClickPolicy.liveGeometry(click, live: frame)
+        guard liveGeometry == .matches else {
+            svcLog("BACKGROUND_CLICK_GEOMETRY request=\(request.requestID) stage=post-activation check=\(liveGeometry.rawValue) point=\(click.point) published=\(click.rect) live=\(frame)")
+            return (false, "live-geometry-\(liveGeometry.rawValue)")
+        }
+        guard (attribute(element, kAXEnabledAttribute) as? Bool) != false,
+              (attribute(element, "AXHidden") as? Bool) != true else { return (false, "live-target-disabled-or-hidden") }
         // New policy instance forces a real post-activation hit-test; a cached
         // pre-focus verdict cannot authorize this delivery.
         let verdict = LegitimacyPolicy().validate(pid: request.pid, generation: request.generation,
@@ -391,6 +403,36 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
             event.post(tap: .cghidEventTap)
         }
         return (true, "mouse-pair-once")
+    }
+
+    /// Rejection reply for any request. A background request's physical click
+    /// was consumed by the tap before this request existed: when nothing was
+    /// posted or performed for it, deliver that click ONCE through the normal
+    /// input path at the original point (what the app would have received had
+    /// the tap never taken it) instead of losing it.
+    private static func backgroundFailureReply(_ request: ActivationRequestWire, reason: String) -> Data {
+        guard let click = request.backgroundClick else { return reply(status: "rejected", reason: reason) }
+        guard BackgroundClickPolicy.shouldDeliverOriginalAfterRejection(reason) else {
+            svcLog("BACKGROUND_CLICK_FALLBACK request=\(request.requestID) reason=\(reason) mode=none-owned-elsewhere")
+            return reply(status: "rejected", reason: reason)
+        }
+        guard click.x.isFinite, click.y.isFinite,
+              let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
+                                 mouseCursorPosition: click.point, mouseButton: .left),
+              let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
+                               mouseCursorPosition: click.point, mouseButton: .left) else {
+            svcLog("BACKGROUND_CLICK_FALLBACK request=\(request.requestID) reason=\(reason) mode=event-allocation-failed")
+            return reply(status: "rejected", reason: reason)
+        }
+        for event in [down, up] {
+            event.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
+            event.setIntegerValueField(.mouseEventClickState, value: 1)
+            event.flags = []
+            event.post(tap: .cghidEventTap)
+        }
+        svcLog("BACKGROUND_CLICK_FALLBACK request=\(request.requestID) reason=\(reason) point=\(click.point) mode=native-pair-once")
+        return reply(status: "done", reason: "native-fallback-\(reason)")
     }
 
     private static func reply(status: String, reason: String) -> Data {
