@@ -540,6 +540,37 @@ struct BackgroundClickWire: Codable, Equatable, Sendable {
     var point: CGPoint { CGPoint(x: x, y: y) }
 }
 
+/// Ring pause while the user drags (window resize/move, text selection): the
+/// targets under a moving pointer are stale and the ring only gets in the way.
+/// Pure state machine fed by the overlay's repaint tick; no event tap involved.
+struct RingDragPause {
+    /// Pointer travel (pt) with the left button held that turns a press into a drag.
+    static let dragThreshold: CGFloat = 4
+    /// Ring stays hidden this long after a drag ends, while frames settle and the
+    /// next snapshot republishes the moved window's targets.
+    static let releaseCooldown: TimeInterval = 0.35
+
+    private var pressOrigin: CGPoint?
+    private var dragging = false
+    private var pausedUntil: TimeInterval = 0
+
+    /// Feed one sample; returns true while the ring must stay hidden.
+    mutating func update(leftButtonDown: Bool, pointer: CGPoint, now: TimeInterval) -> Bool {
+        if leftButtonDown {
+            if pressOrigin == nil { pressOrigin = pointer }
+            if let o = pressOrigin, !dragging,
+               hypot(pointer.x - o.x, pointer.y - o.y) > Self.dragThreshold {
+                dragging = true
+            }
+        } else {
+            if dragging { pausedUntil = now + Self.releaseCooldown }
+            dragging = false
+            pressOrigin = nil
+        }
+        return dragging || now < pausedUntil
+    }
+}
+
 enum BackgroundClickPolicy {
     static let eventMarker: Int64 = 0x4D434243
     /// Pause between "the app reports frontmost" and the injected click when this

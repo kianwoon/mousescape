@@ -103,6 +103,7 @@ final class TargetingOverlay {
     /// Latest immutable snapshot the tap router also reads. Kept only to re-run
     /// the same pure route against the LIVE pointer between snapshot publishes.
     private var latestSnapshot: CacheSnapshot?
+    private var dragPause = RingDragPause()
     /// Pointer sampling cadence (~60 Hz): visually attached to the real cursor,
     /// but each tick is just one pure DecisionCore.route() plus a few rect draws.
     private static let repaintInterval: TimeInterval = 0.016
@@ -240,11 +241,14 @@ final class TargetingOverlay {
         let ageMs = (now - s.stamp) * 1000
         // Render ONLY from published evidence. Stale/missing evidence (including
         // a snapshot from a replaced service epoch) shows nothing.
-        let fresh = s.valid && ageMs <= ClickAssistEvidence.displayMaxAgeMs
-            && s.epoch != ""
         let pointer = CGEvent(source: nil)?.location ?? .zero
+        let dragPaused = dragPause.update(leftButtonDown: NSEvent.pressedMouseButtons & 1 != 0,
+                                          pointer: pointer, now: now)
+        let fresh = s.valid && ageMs <= ClickAssistEvidence.displayMaxAgeMs
+            && s.epoch != "" && !dragPaused
         var action = "none"
-        var reason = s.valid ? String(format: "stale:age(%.0fms)", ageMs) : s.reason
+        var reason = dragPaused ? "paused:drag"
+            : (s.valid ? String(format: "stale:age(%.0fms)", ageMs) : s.reason)
         var primary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool, tier: Int, named: Bool, weakVerdict: Bool)?
         var secondary: (key: String, rect: CGRect, tier: Int, named: Bool)?
         var confirmedCount = 0
