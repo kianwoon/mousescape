@@ -260,7 +260,7 @@ final class TargetingOverlay {
                                                                verdict: $0.verdict,
                                                                chromeEligible: $0.chromeEligible,
                                                                evidenceGeneration: $0.evidenceGeneration,
-                                                               collectedAt: $0.collectedAt) }
+                                                               collectedAt: $0.collectedAt, windowRect: $0.windowRect) }
             // Indicate only the shared click winner, with fresh confirmation
             // at its delivery point. Never substitute a farther confirmed target.
             let scored = DecisionCore.displayCandidates(point: pointer, candidates: cands,

@@ -107,11 +107,14 @@ enum DecisionCore {
         /// Collection time of the evidence (0 = none). Age is measured from here,
         /// never from snapshot publish time.
         let collectedAt: CFTimeInterval
+        /// Owning window frame (nil = unknown, no window gate).
+        let windowRect: CGRect?
 
         init(key: String, rect: CGRect, inset: CGFloat, tier: Tier, role: String = "",
              label: String = "", verdict: ClickAssistVerdict = .unknown,
              chromeEligible: Bool = false, evidenceGeneration: UInt64 = 0,
-             collectedAt: CFTimeInterval = 0) {
+             collectedAt: CFTimeInterval = 0, windowRect: CGRect? = nil) {
+            self.windowRect = windowRect
             self.key = key
             self.rect = rect
             self.inset = inset
@@ -156,12 +159,27 @@ enum DecisionCore {
     ///    smallest) — a row is indicated and clicked on itself;
     /// 3. otherwise the nearest in-tolerance candidate, regardless of category,
     ///    with a tie guard that is the same on both paths.
+    /// Depth (pt) inside a window's frame where macOS offers window resize; a
+    /// pointer in this band (or outside the frame) is never snapped into it.
+    static let windowEdgeBand: CGFloat = 4
+
+    static func pointerAllowsSnap(_ point: CGPoint, windowRect: CGRect?) -> Bool {
+        guard let w = windowRect, w.width > 2 * windowEdgeBand, w.height > 2 * windowEdgeBand
+        else { return true }
+        return w.insetBy(dx: windowEdgeBand, dy: windowEdgeBand).contains(point)
+    }
+
     static func resolve(point: CGPoint, candidates: [Candidate], tolerance: CGFloat,
                         tieEpsilon: CGFloat = DecisionCore.tieEpsilon) -> Resolution {
         var scored: [(Candidate, CGFloat)] = []
         for c in candidates {
             let d = boundaryDistance(point, c.rect)
             guard d <= tolerance else { continue }
+            // A snap never crosses its window's edge: outside the window, or in
+            // the band where macOS shows the resize cursor, a press resizes (or
+            // hits whatever is behind), so it must not be redirected to a control
+            // inside - e.g. the close button next to a window's top-left corner.
+            if d > 0, !pointerAllowsSnap(point, windowRect: c.windowRect) { continue }
             scored.append((c, d))
         }
         guard !scored.isEmpty else { return .none }

@@ -90,6 +90,8 @@ struct SnapshotWireTarget: Codable, Equatable, Sendable {
     /// from the snapshot's `publishedAt` so encode/send latency cannot make
     /// evidence look younger than it is.
     var collectedAt: Double
+    /// Owning window frame; optional so older payloads still decode.
+    var windowRect: SnapshotWireRect?
 
     init(_ t: CachedTarget) {
         key = t.key
@@ -102,6 +104,7 @@ struct SnapshotWireTarget: Codable, Equatable, Sendable {
         verdict = t.verdict.rawValue
         evidenceGeneration = t.evidenceGeneration
         collectedAt = t.collectedAt
+        windowRect = t.windowRect.map(SnapshotWireRect.init)
     }
 
     var cachedTarget: CachedTarget {
@@ -111,7 +114,8 @@ struct SnapshotWireTarget: Codable, Equatable, Sendable {
                      verdict: ClickAssistVerdict(rawValue: verdict) ?? .unknown,
                      chromeEligible: chromeEligible,
                      evidenceGeneration: evidenceGeneration,
-                     collectedAt: collectedAt)
+                     collectedAt: collectedAt,
+                     windowRect: windowRect?.cgRect)
     }
 }
 

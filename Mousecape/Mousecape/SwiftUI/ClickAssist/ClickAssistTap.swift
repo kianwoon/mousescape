@@ -297,7 +297,7 @@ final class AssistTap: @unchecked Sendable {
                                                                      verdict: $0.verdict,
                                                                      chromeEligible: $0.chromeEligible,
                                                                      evidenceGeneration: $0.evidenceGeneration,
-                                                                     collectedAt: $0.collectedAt) },
+                                                                     collectedAt: $0.collectedAt, windowRect: $0.windowRect) },
                               valid: fresh, reason: reason, generation: s.generation,
                               ageMs: ageMs, source: "cache", pid: s.pid,
                               pointerWindowFocused: s.pointerWindowFocused)

@@ -167,6 +167,10 @@ final class AccessibilityResolver: @unchecked Sendable {
     /// Root-window identity (CFHash) of each collected target, tagged cheaply from
     /// the root it was walked under. 0/absent = not window-owned (menus, menu bar).
     private var windowOfKey: [String: Int] = [:]
+    /// Window-tag -> (frame, read time) for CachedTarget.windowRect.
+    private var windowFrameOfTag: [Int: (frame: CGRect, at: CFTimeInterval)] = [:]
+    private static let windowFrameCacheTTL: CFTimeInterval = 0.25
+    private static let windowFrameCacheMax = 64
     /// Window currently being walked (0 = none) and this cycle's live hit window.
     private var collectingWindow = 0
     private var pointerWindowTag = 0
@@ -1029,7 +1033,7 @@ final class AccessibilityResolver: @unchecked Sendable {
             out[idx] = CachedTarget(key: old.key, role: "AXNativeRowButton", label: old.label,
                 rect: old.rect, inset: old.inset, tier: old.tier, verdict: old.verdict,
                 chromeEligible: false, evidenceGeneration: old.evidenceGeneration,
-                collectedAt: old.collectedAt)
+                collectedAt: old.collectedAt, windowRect: old.windowRect)
         }
         // Candidates from OTHER (occluded) windows of the same app share screen
         // coordinates with the hit window; the system hit-test answers with the
@@ -1480,7 +1484,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                                     inset: old.inset, tier: old.tier, verdict: old.verdict,
                                     chromeEligible: old.chromeEligible,
                                     evidenceGeneration: old.evidenceGeneration,
-                                    collectedAt: old.collectedAt)
+                                    collectedAt: old.collectedAt, windowRect: old.windowRect)
         }
         let sig = original.keys.sorted().map { k in
             "\(k.prefix(24)) \(original[k]!)->\(trimmed[k]!.rect) cutBy=\(trimmed[k]!.cutBy)"
@@ -1681,8 +1685,10 @@ final class AccessibilityResolver: @unchecked Sendable {
         let label = title ?? stringAttr(el, kAXDescriptionAttribute) ?? role
         // Tier comes from the policy class: control roles and capability-admitted
         // press groups are first-class; envelope-only admissions are second-class.
-        out.append(CachedTarget(key: key, role: admittedRole, label: label, rect: rect,
-                                inset: 2, tier: GeometryPolicy.tier(for: cls)))
+        var target = CachedTarget(key: key, role: admittedRole, label: label, rect: rect,
+                                  inset: 2, tier: GeometryPolicy.tier(for: cls))
+        target.windowRect = owningWindowFrame(el)
+        out.append(target)
         // Delivery side table: the tap needs the live element reference to decide
         // AXPress vs synthetic. Same-process reference, stored outside the snapshot.
         elementRefs[key] = el
@@ -2072,6 +2078,25 @@ final class AccessibilityResolver: @unchecked Sendable {
     private func axElement(_ raw: CFTypeRef) -> AXUIElement? {
         guard CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
         return (raw as! AXUIElement)
+    }
+
+    /// Owning-window frame for a collected element, cached per window tag for
+    /// `windowFrameCacheTTL` so a walk costs one AX read per window, not per target.
+    private func owningWindowFrame(_ el: AXUIElement) -> CGRect? {
+        let now = CACurrentMediaTime()
+        if collectingWindow != 0, let hit = windowFrameOfTag[collectingWindow],
+           now - hit.at < Self.windowFrameCacheTTL {
+            return hit.frame
+        }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(el, kAXWindowAttribute as CFString, &value) == .success,
+              let value, CFGetTypeID(value) == AXUIElementGetTypeID(),
+              let wf = frame(value as! AXUIElement) else { return nil }
+        if collectingWindow != 0 {
+            if windowFrameOfTag.count > Self.windowFrameCacheMax { windowFrameOfTag.removeAll() }
+            windowFrameOfTag[collectingWindow] = (wf, now)
+        }
+        return wf
     }
 
     private func frame(_ el: AXUIElement) -> CGRect? {

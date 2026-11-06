@@ -24,6 +24,10 @@ struct CachedTarget: Sendable {
     /// Monotonic CACurrentMediaTime when this evidence was COLLECTED/VALIDATED.
     /// 0 means no evidence. Publication/encode time never refreshes this.
     var collectedAt: CFTimeInterval = 0
+    /// Frame of the window that owns this target (global, top-left origin), when
+    /// known. A tolerance snap is refused while the pointer is outside it or in
+    /// its resize band (see DecisionCore.windowEdgeBand). nil = no window gate.
+    var windowRect: CGRect? = nil
 }
 
 /// Immutable snapshot published by the background resolver and read by the tap.
