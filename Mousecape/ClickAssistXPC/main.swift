@@ -265,6 +265,22 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         }
     }
 
+    /// True when `element` sits inside Chromium/WebKit web content (an
+    /// AXWebArea ancestor within `BackgroundClickPolicy.webAXPressAncestorDepth`).
+    private func isInWebArea(_ element: AXUIElement,
+                             attribute: (AXUIElement, String) -> CFTypeRef?) -> Bool {
+        var node: AXUIElement? = element
+        var depth = 0
+        while let current = node, depth < BackgroundClickPolicy.webAXPressAncestorDepth {
+            depth += 1
+            if (attribute(current, kAXRoleAttribute) as? String) == "AXWebArea" { return true }
+            guard let parent = attribute(current, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            node = (parent as! AXUIElement)
+        }
+        return false
+    }
+
     /// The original physical gesture is consumed before this request exists.
     /// Never retry an AXPress or a posted pair: delivery has exactly one owner.
     private func performBackgroundClick(_ request: ActivationRequestWire, click: BackgroundClickWire,
@@ -289,6 +305,42 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         }
         let window = rawWindow as! AXUIElement
         AXUIElementSetMessagingTimeout(window, 0.05)
+        // Background Electron/Chromium web button: press it while the app is
+        // still in the background, THEN activate. Activating first swallows the
+        // press: Chromium returns AXPress success but the page drops the click
+        // while it handles the activation (reproduced on Claude desktop's
+        // approval-card Submit; pressing first works). Only when the press can
+        // be legitimised without activation; otherwise the settle + mouse-pair
+        // path below runs unchanged.
+        if !app.isActive, BackgroundClickPolicy.webAXPressEnabled(role: target.role),
+           isInWebArea(element, attribute: attribute),
+           (attribute(element, kAXEnabledAttribute) as? Bool) != false,
+           (attribute(element, "AXHidden") as? Bool) != true {
+            let verdict = LegitimacyPolicy().validate(pid: request.pid, generation: request.generation,
+                key: request.targetKey, candidate: before, candidateRole: target.role,
+                destination: click.point,
+                siblings: snapshot.targets.filter { $0.tier == .firstClass && $0.key != target.key }.map(\.rect),
+                candidateElement: element, diagnostic: { svcLog($0) })
+            if verdict == .confirmed, CACurrentMediaTime() < request.deadline, !IsSecureEventInputEnabled() {
+                AXUIElementSetMessagingTimeout(element, BackgroundClickPolicy.webAXPressTimeout)
+                let pressStart = CACurrentMediaTime()
+                let result = AXUIElementPerformAction(element, "AXPress" as CFString)
+                svcLog("BACKGROUND_WEB_AXPRESS request=\(request.requestID) role=\(target.role) code=\(result.rawValue) order=press-then-activate elapsedMs=\(Int((CACurrentMediaTime()-request.issuedAt)*1000)) pressMs=\(Int((CACurrentMediaTime()-pressStart)*1000))")
+                if result == .success {
+                    // Bring the app forward as a real click would; best effort,
+                    // the press has already been delivered.
+                    let axApp = AXUIElementCreateApplication(request.pid)
+                    AXUIElementSetMessagingTimeout(axApp, 0.05)
+                    if AXUIElementSetAttributeValue(axApp, kAXFrontmostAttribute as CFString, kCFBooleanTrue) != .success {
+                        _ = app.activate(options: [])
+                    }
+                    _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+                    return (true, "web-axpress-before-activation")
+                }
+            } else {
+                svcLog("BACKGROUND_WEB_AXPRESS_SKIPPED request=\(request.requestID) verdict=\(verdict) fallback=settle-mouse-pair")
+            }
+        }
         // An XPC worker is not the foreground application. Express the user's
         // captured click through Accessibility as well as AppKit activation;
         // an accepted AppKit request alone does not establish keyboard focus.
@@ -365,35 +417,6 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         if target.chromeEligible {
             let result = AXUIElementPerformAction(element, "AXPress" as CFString)
             return (result == .success, result == .success ? "axpress-once" : "axpress-failed-no-retry")
-        }
-        // Background Electron/Chromium web button: AXPress goes through the
-        // accessibility tree, so no settle is needed. One attempt; only an
-        // outright AXPress error falls through to the mouse-pair path below.
-        if !wasActive, BackgroundClickPolicy.webAXPressEnabled(role: target.role) {
-            // Web content only: native controls keep the mouse-pair path.
-            var inWebArea = false
-            var node: AXUIElement? = element
-            var depth = 0
-            while let current = node, depth < BackgroundClickPolicy.webAXPressAncestorDepth {
-                depth += 1
-                if (attribute(current, kAXRoleAttribute) as? String) == "AXWebArea" { inWebArea = true; break }
-                guard let parent = attribute(current, kAXParentAttribute),
-                      CFGetTypeID(parent) == AXUIElementGetTypeID() else { break }
-                node = (parent as! AXUIElement)
-            }
-            if inWebArea {
-            AXUIElementSetMessagingTimeout(element, BackgroundClickPolicy.webAXPressTimeout)
-            let pressStart = CACurrentMediaTime()
-            let result = AXUIElementPerformAction(element, "AXPress" as CFString)
-            svcLog("BACKGROUND_WEB_AXPRESS request=\(request.requestID) role=\(target.role) code=\(result.rawValue) elapsedMs=\(Int((CACurrentMediaTime()-request.issuedAt)*1000)) pressMs=\(Int((CACurrentMediaTime()-pressStart)*1000))")
-            if result == .success {
-                // Diagnostic only: does the control survive the press?
-                Thread.sleep(forTimeInterval: BackgroundClickPolicy.webAXPressProbeDelay)
-                let stillThere = AXGeometry.frame(element) != nil
-                svcLog("BACKGROUND_WEB_AXPRESS_PROBE request=\(request.requestID) stillPresent=\(stillThere ? 1 : 0)")
-                return (true, "web-axpress-once")
-            }
-            }
         }
         // Activated by this delivery: give the page time to start accepting input
         // and tell it where the pointer is before the press, otherwise an

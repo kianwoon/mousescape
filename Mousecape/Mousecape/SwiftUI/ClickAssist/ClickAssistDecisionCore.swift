@@ -558,9 +558,10 @@ enum BackgroundClickPolicy {
     static let settleOverrideMaxMs = 2000
     /// AXPress-first delivery for plain AXButtons inside web content of a
     /// background app (Electron/Chromium). AXPress dispatches through the
-    /// accessibility tree, so it does not wait for the page to accept input and
-    /// needs no post-activation settle. A failed AXPress still falls through to
-    /// the settle + mouse-pair path. Set MCClickAssistWebAXPress=0 to disable.
+    /// accessibility tree, so it needs no settle - but it must be performed
+    /// BEFORE activating the app: pressing right after activation returns
+    /// success and the page drops the click. A press that cannot be legitimised
+    /// pre-activation, or fails, falls through to the settle + mouse-pair path. Set MCClickAssistWebAXPress=0 to disable.
     static let webAXPressKey = "MCClickAssistWebAXPress"
     static let webAXPressRoles: Set<String> = ["AXButton"]
     static func webAXPressEnabled(role: String) -> Bool {
@@ -569,9 +570,6 @@ enum BackgroundClickPolicy {
                                             settleOverrideDomain as CFString) as? Int
         return raw != 0
     }
-    /// Post-AXPress diagnostic delay before sampling whether the control is
-    /// still present (logging only; never triggers a second delivery).
-    static let webAXPressProbeDelay: TimeInterval = 0.15
     /// Ancestor walk bound when looking for the AXWebArea, and the AX messaging
     /// timeout for the press (a timeout falls through to the mouse-pair path).
     static let webAXPressAncestorDepth = 64
