@@ -215,10 +215,20 @@ enum GeometryPolicy {
     /// An AX ANCESTOR of the candidate can never occlude it: when Brave answers
     /// the whole AXWebArea for x.com's pill, the renderer simply failed to
     /// descend, so enclosing frames are admitted when they are ancestors.
+    /// An inert LEAF (a text run, a picture) is content, never a cover layer:
+    /// modals, sheets and page layers answer as groups/dialogs/web areas. When
+    /// Brave answers x.com's pill centre with the tweet text that runs
+    /// underneath it (474x150, enclosing the 180x38 pill), that text is noise,
+    /// so an enclosing inert leaf is admitted like a partial-overlap answer.
+    /// The re-probe must still land on the candidate itself to confirm.
+    static let inertLeafRoles: Set<String> = ["AXStaticText", "AXImage"]
+
     static func admitsOcclusionProbe(candidate: CGRect, centreHit: CGRect,
                                      centreHitActionable: Bool,
-                                     centreHitIsAncestor: Bool = false) -> Bool {
+                                     centreHitIsAncestor: Bool = false,
+                                     centreHitIsInertLeaf: Bool = false) -> Bool {
         if centreHitIsAncestor { return true }
+        if centreHitIsInertLeaf && !centreHitActionable { return true }
         return !centreHitActionable && !centreHit.contains(candidate)
     }
 

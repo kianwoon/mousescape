@@ -589,6 +589,41 @@ struct RingDragPause {
     }
 }
 
+/// Ring hold across a brief evidence gap. When the ring's own target comes
+/// back "unknown" (evidence not fresh this generation — e.g. a truncated
+/// resolver walk), that is missing information, not a rejection: keep the
+/// last confirmed ring for a short window instead of blinking it off.
+/// A MISMATCH, a different target, a pointer leaving tolerance, or the window
+/// elapsing all drop it. Only real confirmations restart the window, so a
+/// run of unknowns can never hold the ring indefinitely.
+struct RingUnknownHold {
+    /// Longest the last confirmed ring survives a run of "unknown" verdicts.
+    static let holdInterval: TimeInterval = 0.15
+    /// OVERLAY_STATE reason for a held ring (logged with legitimacy=held).
+    static let reason = "hold:unknown"
+
+    private(set) var key: String?
+    private var rect: CGRect = .null
+    private var confirmedAt: TimeInterval = 0
+
+    mutating func confirmed(key: String, rect: CGRect, now: TimeInterval) {
+        self.key = key
+        self.rect = rect
+        confirmedAt = now
+    }
+
+    /// True while the held ring may stay for `unknownKey`; resets otherwise.
+    mutating func holds(unknownKey: String, pointer: CGPoint, tolerance: CGFloat,
+                        now: TimeInterval) -> Bool {
+        guard let key, key == unknownKey, now - confirmedAt <= Self.holdInterval,
+              DecisionCore.boundaryDistance(pointer, rect) <= tolerance
+        else { reset(); return false }
+        return true
+    }
+
+    mutating func reset() { key = nil }
+}
+
 enum BackgroundClickPolicy {
     static let eventMarker: Int64 = 0x4D434243
     /// Pause between "the app reports frontmost" and the injected click when this

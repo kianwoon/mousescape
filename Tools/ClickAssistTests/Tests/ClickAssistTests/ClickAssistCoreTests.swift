@@ -64,6 +64,24 @@ final class ClickAssistCoreTests: XCTestCase {
                                                            centreHitActionable: false,
                                                            centreHitIsAncestor: false))
 
+        // 2026-11-06 live: Brave answered the pill centre with tweet text that
+        // ENCLOSES it (474x150 around 180x38). Inert leaf text is noise, not a
+        // cover: admitted. An enclosing inert GROUP (a modal layer) is not, and
+        // actionable enclosing text never is.
+        let wideText = CGRect(x: 5340, y: 606, width: 474, height: 150)
+        let livePill = CGRect(x: 5467, y: 620, width: 180, height: 38)
+        XCTAssertTrue(GeometryPolicy.inertLeafRoles.contains("AXStaticText"))
+        XCTAssertFalse(GeometryPolicy.inertLeafRoles.contains("AXGroup"))
+        XCTAssertTrue(GeometryPolicy.admitsOcclusionProbe(candidate: livePill, centreHit: wideText,
+                                                          centreHitActionable: false,
+                                                          centreHitIsInertLeaf: true))
+        XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: livePill, centreHit: wideText,
+                                                           centreHitActionable: false,
+                                                           centreHitIsInertLeaf: false))
+        XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: livePill, centreHit: wideText,
+                                                           centreHitActionable: true,
+                                                           centreHitIsInertLeaf: true))
+
         let points = GeometryPolicy.occlusionProbePoints(in: pill)
         XCTAssertEqual(points.count, GeometryPolicy.occlusionProbeFractions.count)
         let centre = CGPoint(x: pill.midX, y: pill.midY)
