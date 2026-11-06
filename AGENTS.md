@@ -30,7 +30,27 @@ stat -f %i /Applications/Mousecape.app/Contents/Library/LoginItems/MousecapeHelp
 # + replace lets launchd relaunch the OLD binary inside the sleep window, then the copy
 # lands underneath it -> stale Helper (no Click Assist menu, no status.json). Always
 # restart the Helper AFTER the copy (kickstart -k) and confirm the inode.
+
+# TRAP (2026-11-06): launching a SECOND copy of Mousecape.app from any other path
+# (scratch dir, DerivedData) re-points the Helper login item at THAT copy's Helper.
+# Deleting the copy afterwards leaves launchd at `last exit code = 78: EX_CONFIG`.
+# `kickstart` and re-opening /Applications/Mousecape.app do NOT fix it; only an
+# SMAppService unregister+register does (toggle General -> Apply at Login off/on).
+# Then kickstart -k and confirm the running Helper's inode is the /Applications file.
 ```
+
+### Self-updater (Settings → Advanced → Check for Updates)
+
+- Config: `MCUpdater` dict in `Mousecape-Info.plist` (repo, API base, asset pattern).
+  Test against a local server with `defaults write com.sdmj76.Mousecape MCUpdaterAPIBaseURL
+  http://127.0.0.1:<port>` — and `defaults delete` it afterwards.
+- Picks the HIGHEST semver release (not `/releases/latest`, which is by publish date).
+- Refuses a bundle whose `CFBundleShortVersionString` is not newer than the running app,
+  so a release MUST be built with `MARKETING_VERSION` bumped to match its tag.
+- Refuses a bundle that doesn't satisfy the running app's designated requirement, so
+  release builds MUST be signed with `Tools/sign-dev.sh` before zipping
+  (`ditto -ck --keepParent Mousecape.app Mousecape-v<ver>.zip`).
+- Tests: `cd Tools/UpdaterTests && swift test` (delete `.build/` afterwards).
 
 ### Binary verification traps (cost hours — memorize)
 
