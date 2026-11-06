@@ -782,7 +782,7 @@ final class AccessibilityResolver: @unchecked Sendable {
            !out.contains(where: { GeometryPolicy.usesNativeRowAction($0.role) }) {
             var seedCandidates = out.map {
                 DecisionCore.Candidate(key: $0.key, rect: $0.rect, inset: $0.inset,
-                    tier: $0.tier, role: $0.role, label: $0.label)
+                    tier: $0.tier, role: $0.role, label: $0.label, windowRect: $0.windowRect)
             }
             if case .winner(let winner, _) = DecisionCore.resolve(point: pointer,
                 candidates: seedCandidates, tolerance: selectionTolerance),
@@ -805,7 +805,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                     })
                 seedCandidates[index] = DecisionCore.Candidate(key: target.key, rect: target.rect,
                     inset: target.inset, tier: target.tier, role: target.role, label: target.label,
-                    verdict: seedVerdict)
+                    verdict: seedVerdict, windowRect: target.windowRect)
                 directSeed = DecisionCore.canDeferPointerWalk(point: pointer,
                     freshCandidates: seedCandidates, tolerance: selectionTolerance,
                     consecutiveLocalSkips: consecutiveLocalRotationSkips)
@@ -905,7 +905,7 @@ final class AccessibilityResolver: @unchecked Sendable {
         // needs help; cached/stale union entries cannot suppress that discovery.
         let freshLocalCandidates = out.map {
             DecisionCore.Candidate(key: $0.key, rect: $0.rect, inset: $0.inset,
-                                   tier: $0.tier, role: $0.role, label: $0.label)
+                                   tier: $0.tier, role: $0.role, label: $0.label, windowRect: $0.windowRect)
         }
         let needsDiscovery = DecisionCore.needsGlobalDiscovery(point: pointer,
             freshCandidates: freshLocalCandidates, tolerance: selectionTolerance,
@@ -1073,7 +1073,7 @@ final class AccessibilityResolver: @unchecked Sendable {
             for _ in 0..<ClickAssistEvidence.maxEvidenceCandidatesPerCycle {
                 let candidates = out.map {
                     DecisionCore.Candidate(key: $0.key, rect: $0.rect, inset: $0.inset,
-                                           tier: $0.tier, role: $0.role, label: $0.label)
+                                           tier: $0.tier, role: $0.role, label: $0.label, windowRect: $0.windowRect)
                 }
                 guard case .winner(let winner, _) = DecisionCore.resolve(
                     point: pointer, candidates: candidates, tolerance: selectionTolerance),
@@ -1084,7 +1084,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                 let axRect = originalRect[target.key] ?? target.rect
                 let probe = DecisionCore.Candidate(key: target.key, rect: target.rect,
                                                    inset: target.inset, tier: target.tier,
-                                                   role: target.role, label: target.label)
+                                                   role: target.role, label: target.label, windowRect: target.windowRect)
                 let destination = DecisionCore.snapMode(for: probe) == .center
                     ? DecisionCore.centerPoint(into: target.rect)
                     : DecisionCore.clampPoint(pointer, into: target.rect, inset: target.inset)
