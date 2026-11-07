@@ -63,6 +63,21 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: pill, centreHit: webArea,
                                                            centreHitActionable: false,
                                                            centreHitIsAncestor: false))
+        // 2026-11-07 live: Brave answered the pill centre with the tweet card's
+        // AXGroup (5406,378 476x250) — encloses, not an ancestor — while an
+        // interior probe returned the pill element itself. Identity proof wins,
+        // even when the card is clickable.
+        let card = CGRect(x: 5406, y: 378, width: 476, height: 250)
+        let livePill = CGRect(x: 5532, y: 419, width: 180, height: 38)
+        for actionable in [false, true] {
+            XCTAssertTrue(GeometryPolicy.admitsOcclusionProbe(candidate: livePill, centreHit: card,
+                centreHitActionable: actionable, probeHitOwnedByCandidate: true))
+            XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: livePill, centreHit: card,
+                centreHitActionable: actionable, probeHitOwnedByCandidate: false))
+        }
+        // A genuine cover never answers the covered control's own element.
+        XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: pill, centreHit: modal,
+                                                           centreHitActionable: true))
 
         // 2026-11-06 live: Brave answered the pill centre with tweet text that
         // ENCLOSES it (474x150 around 180x38). Inert leaf text is noise, not a

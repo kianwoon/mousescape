@@ -346,6 +346,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
                                    centreHitActionable: GeometryPolicy.isActionable(
                                        role: role(of: element), hasPressAction: hasPress),
                                    centreHitElement: element, candidateElement: candidateElement,
+                                   candidateRole: candidateRole,
                                    diagnostic: diagnostic) {
             return .confirmed
         }
@@ -397,6 +398,28 @@ final class LegitimacyPolicy: @unchecked Sendable {
         return false
     }
 
+    /// True when `hit` IS the candidate's element or lies beneath it. Chromium
+    /// can hand back a fresh proxy per query, so a node of the candidate's
+    /// role whose live frame equals the candidate's live frame also counts
+    /// (same rule as the link-text proof). Running out of time = not owned.
+    private static func isOwned(_ hit: AXUIElement, by candidateElement: AXUIElement,
+                                candidateRole: String, deadline: CFTimeInterval) -> Bool {
+        guard let liveFrame = axFrame(candidateElement) else { return false }
+        var node: AXUIElement? = hit
+        for _ in 0..<GeometryPolicy.occlusionAncestorDepth {
+            guard CACurrentMediaTime() < deadline, let current = node else { return false }
+            if CFEqual(current, candidateElement) { return true }
+            let currentRole = role(of: current)
+            if currentRole == candidateRole,
+               axFrame(current).map({ sameFrame($0, liveFrame) }) == true { return true }
+            if currentRole == "AXWebArea" || currentRole == "AXWindow" { return false }
+            guard let parent = attr(current, kAXParentAttribute),
+                  CFGetTypeID(parent) == AXUIElementGetTypeID() else { return false }
+            node = (parent as! AXUIElement)
+        }
+        return false
+    }
+
     /// Floating controls (position:fixed pills) can make the renderer's AX
     /// hit-test fall through to the content underneath at some interior
     /// points. When the centre answer is a partial-overlap surface (never a
@@ -408,6 +431,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
                                                 centreHit: CGRect, centreHitActionable: Bool,
                                                 centreHitElement: AXUIElement,
                                                 candidateElement: AXUIElement,
+                                                candidateRole: String,
                                                 diagnostic: (String) -> Void) -> Bool {
         // One deadline covers the probes AND the ancestry proof.
         let start = CACurrentMediaTime()
@@ -427,18 +451,19 @@ final class LegitimacyPolicy: @unchecked Sendable {
             diagnostic("VERDICT_REJECT probe=not-admitted actionable=\(centreHitActionable)")
             return false
         }
-        for point in GeometryPolicy.occlusionProbePoints(in: candidate) {
-            guard CACurrentMediaTime() < deadline else { break }
-            var element: AXUIElement?
+        /// nil = this point missed; true/false = final verdict.
+        func probe(_ point: CGPoint, deadline: CFTimeInterval) -> Bool? {
+            var probed: AXUIElement?
             guard AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y),
-                                                   &element) == .success,
-                  let element, let hit = axFrame(element), hit.contains(point),
+                                                   &probed) == .success,
+                  let element = probed, let hit = axFrame(element), hit.contains(point),
                   (attr(element, kAXEnabledAttribute) as? Bool) != false,
                   sameFrame(candidate, hit) || candidate.contains(hit) else {
-                var miss: AXUIElement?
-                _ = AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &miss)
+                // Reuse the answer already in hand: a second hit-test per miss
+                // spent the 15 ms budget before the ownership walk could run.
+                let miss = probed
                 diagnostic("VERDICT_REJECT probe=miss at=\(point) role=\(miss.map { role(of: $0) } ?? "nil") frame=\(String(describing: miss.flatMap { axFrame($0) })) t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
-                continue
+                return nil
             }
             // Admitted only because the enclosing answer is inert text: the
             // probe must reach the candidate ITSELF (or its own child). Any
@@ -450,20 +475,58 @@ final class LegitimacyPolicy: @unchecked Sendable {
                 continue
             }
             if enclosing {
-                let ancestor = isAncestor(centreHitElement, of: candidateElement, deadline: deadline)
+                // Ownership first: the probe hit is the candidate or a few hops
+                // below it, while a failing ancestor walk can spend the whole
+                // budget (measured: timedOut=true at 15 ms on x.com's pill).
+                let owned = isOwned(element, by: candidateElement,
+                                    candidateRole: candidateRole, deadline: deadline)
+                let ancestor = !owned && isAncestor(centreHitElement, of: candidateElement,
+                                                    deadline: deadline)
                 guard GeometryPolicy.admitsOcclusionProbe(candidate: candidate, centreHit: centreHit,
-                          centreHitActionable: centreHitActionable, centreHitIsAncestor: ancestor)
+                          centreHitActionable: centreHitActionable, centreHitIsAncestor: ancestor,
+                          probeHitOwnedByCandidate: owned)
                 else {
-                    diagnostic("VERDICT_REJECT probe=enclosing-not-ancestor t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
+                    let timedOut = CACurrentMediaTime() >= deadline
+                    diagnostic("VERDICT_REJECT probe=enclosing-not-ancestor owned=false actionable=\(centreHitActionable) timedOut=\(timedOut) probeRole=\(role(of: element)) t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
                     return false
+                }
+                if owned {
+                    diagnostic("LEGITIMACY_INTERIOR_PROBE confirmed owner=candidate at=\(point) hitRole=\(role(of: element)) centreHit=\(centreHit) actionable=\(centreHitActionable)")
+                    return true
                 }
             }
             diagnostic("LEGITIMACY_INTERIOR_PROBE confirmed at=\(point) hitRole=\(role(of: element)) centreHit=\(centreHit)")
             return true
         }
+        for point in GeometryPolicy.occlusionProbePoints(in: candidate) {
+            guard CACurrentMediaTime() < deadline else { break }
+            if let verdict = probe(point, deadline: deadline) { return verdict }
+        }
+        // Chromium answers from its LAST hover hit-test while the point lies
+        // in that result's bounds, and fires an async renderer hit-test per
+        // query. The probes above have just fired those requests, so the
+        // centre re-asked now (and once more after a frame) reaches the real
+        // top element. Measured on x.com's pill (diagnostic build, 19/19):
+        // every probe answered the covered card, the centre re-ask answered
+        // the pill's own avatar. Same identity rule; nothing frame-only.
+        let centre = CGPoint(x: candidate.midX, y: candidate.midY)
+        let settleDeadline = CACurrentMediaTime() + GeometryPolicy.hitCacheSettleBudget
+        for attempt in 0..<GeometryPolicy.hitCacheSettleAttempts {
+            if attempt > 0 {
+                // Never sleep into an already-spent budget.
+                guard CACurrentMediaTime() + GeometryPolicy.hitCacheSettleWait < settleDeadline else { break }
+                usleep(useconds_t(GeometryPolicy.hitCacheSettleWait * 1_000_000))
+            }
+            guard CACurrentMediaTime() < settleDeadline else { break }
+            if let verdict = probe(centre, deadline: settleDeadline) {
+                if verdict { diagnostic("VERDICT_REJECT_OVERRIDDEN settle=confirmed attempt=\(attempt)") }
+                return verdict
+            }
+        }
         diagnostic("VERDICT_REJECT probe=exhausted t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
         return false
     }
+
 
     /// Drop cached verdicts (called on soft/hard invalidation).
     func invalidate() {

@@ -201,5 +201,12 @@ working baseline ("it was working before your changes" was the user's correct di
 - Very large cursor bitmaps (>= ~2000 pt registered) can hit persistent surface-upload failures in
   a **damaged** session; a fresh session (reboot/logout) renders the same size fine. A session gets
   "damaged" by apply storms — which is exactly what the shared debounce prevents.
+- **Chromium AX hit-test is cached + async (Brave/Chrome, 2026-11-07):** `AXUIElementCopyElementAtPosition`
+  answers from the LAST hover result while the point lies inside that result's bounds, and fires an
+  async renderer hit-test per query. A floating control (x.com "posted" pill) over a card is answered
+  as the card at every interior probe; re-asking the centre right after the probes reaches the pill
+  (19/19). Click Assist's legitimacy probe therefore ends with a settle re-ask
+  (`GeometryPolicy.hitCacheSettle*`). Removing delay between probes likely regresses it (the build that
+  dropped a redundant per-miss hit-test fell from ~95% to ~22% pill rings).
 - Blank-cursor state is diagnosable: `CGSGetGlobalCursorDataSize` returning **4 bytes** = 1×1
   transparent current-cursor slot (registered images still readable — registration ≠ rendering).
