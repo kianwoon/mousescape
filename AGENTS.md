@@ -57,6 +57,8 @@ stat -f %i /Applications/Mousecape.app/Contents/Library/LoginItems/MousecapeHelp
 - `MMLog()`/`HLOG()` with **plain ASCII** → stored as **C strings** → check with `b'literal' in data`.
 - `NSLog()`/Swift strings with **non-ASCII (em-dash etc.)** → stored as **UTF-16** → check with
   `'literal'.encode('utf-16-le') in data`. `strings` misses UTF-16 — "missing string" ≠ "stale build".
+- Swift string literals **≤15 bytes** (e.g. `"hold:unknown"`) are stored inline as small strings —
+  `strings` never finds them. Grep a type/property name (e.g. `RingUnknownHold`) instead.
 - "log show" output can be cached/stale — match **PID + lstart** when attributing log lines.
 
 ### Live cursor state inspection (compile once, reuse)

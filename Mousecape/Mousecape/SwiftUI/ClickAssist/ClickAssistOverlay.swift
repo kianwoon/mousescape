@@ -104,6 +104,9 @@ final class TargetingOverlay {
     /// the same pure route against the LIVE pointer between snapshot publishes.
     private var latestSnapshot: CacheSnapshot?
     private var dragPause = RingDragPause()
+    private var unknownHold = RingUnknownHold()
+    private var heldPrimary: (key: String, rect: CGRect, dest: CGPoint, dist: CGFloat, direct: Bool,
+                              tier: Int, named: Bool, weakVerdict: Bool)?
     /// Pointer sampling cadence (~60 Hz): visually attached to the real cursor,
     /// but each tick is just one pure DecisionCore.route() plus a few rect draws.
     private static let repaintInterval: TimeInterval = 0.016
@@ -307,6 +310,24 @@ final class TargetingOverlay {
                 reason = "no-candidate-in-radius"
             }
         }
+        // Bridge a brief "unknown" gap on the ring's own target (see RingUnknownHold).
+        // Direct hits only, pointer still inside: a held redirect ring would
+        // promise a snap the click path may refuse on the same unknown evidence.
+        if action == "show", let shown = primary {
+            unknownHold.confirmed(key: shown.key, rect: shown.rect, now: now)
+            heldPrimary = shown
+        } else if let gap = suppressed, gap.verdict == .unknown, let held = heldPrimary,
+                  held.direct,
+                  unknownHold.holds(unknownKey: gap.key, pointer: pointer,
+                                    tolerance: 0, now: now) {
+            primary = held
+            action = "show"
+            reason = RingUnknownHold.reason
+            suppressed = nil
+        } else {
+            unknownHold.reset()
+            heldPrimary = nil
+        }
         // Fail-closed suppression log (rate-limited, additive format).
         if action == "none", let suppressed {
             let now = CACurrentMediaTime()
@@ -337,10 +358,11 @@ final class TargetingOverlay {
             let near: [String] = nearParts
             log("RING_CANDS gen=\(s.generation) pointer=(\(Int(pointer.x)),\(Int(pointer.y))) n=\(s.targets.count) near=[\(near.joined(separator: "; "))]")
             if action == "show", let primary {
-                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=confirmed tier=%d named=%d cands=%d weak=%d winner=1",
+                log(String(format: "OVERLAY_STATE gen=%llu action=show target=%@ frame=(%.1f,%.1f,%.1f,%.1f) tol=%.1f pointer=(%.1f,%.1f) reason=%@ mode=%@ legitimacy=%@ tier=%d named=%d cands=%d weak=%d winner=1",
                            s.generation, primary.key as NSString, primary.rect.origin.x, primary.rect.origin.y,
                            primary.rect.width, primary.rect.height, tolerance, pointer.x, pointer.y,
                            reason as NSString, (primary.direct ? "direct-hit" : "redirect") as NSString,
+                           (reason == RingUnknownHold.reason ? "held" : "confirmed") as NSString,
                            primary.tier, primary.named ? 1 : 0, confirmedCount,
                            primary.weakVerdict ? 1 : 0))
                 if let secondary {

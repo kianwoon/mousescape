@@ -415,9 +415,14 @@ final class LegitimacyPolicy: @unchecked Sendable {
         // A partial-overlap inert answer is admitted on geometry alone; an
         // enclosing answer needs ancestry, proven lazily (only after a probe
         // has confirmed) so the walk is never paid on the common miss path.
-        let enclosing = centreHit.contains(candidate)
+        let inertLeaf = GeometryPolicy.inertLeafRoles.contains(role(of: centreHitElement))
+        // An enclosing inert leaf (tweet text under a floating pill) needs no
+        // ancestry proof: text is never a cover layer.
+        let viaInertLeaf = centreHit.contains(candidate) && inertLeaf && !centreHitActionable
+        let enclosing = centreHit.contains(candidate) && !viaInertLeaf
         guard enclosing || GeometryPolicy.admitsOcclusionProbe(candidate: candidate,
-                  centreHit: centreHit, centreHitActionable: centreHitActionable)
+                  centreHit: centreHit, centreHitActionable: centreHitActionable,
+                  centreHitIsInertLeaf: inertLeaf)
         else {
             diagnostic("VERDICT_REJECT probe=not-admitted actionable=\(centreHitActionable)")
             return false
@@ -433,6 +438,15 @@ final class LegitimacyPolicy: @unchecked Sendable {
                 var miss: AXUIElement?
                 _ = AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &miss)
                 diagnostic("VERDICT_REJECT probe=miss at=\(point) role=\(miss.map { role(of: $0) } ?? "nil") frame=\(String(describing: miss.flatMap { axFrame($0) })) t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
+                continue
+            }
+            // Admitted only because the enclosing answer is inert text: the
+            // probe must reach the candidate ITSELF (or its own child). Any
+            // element merely inside its rect could be a small control of a
+            // text-bodied cover sitting over a hidden candidate.
+            if viaInertLeaf, !sameFrame(candidate, hit), !CFEqual(element, candidateElement),
+               !isAncestor(candidateElement, of: element, deadline: deadline) {
+                diagnostic("VERDICT_REJECT probe=inert-leaf-not-own at=\(point) role=\(role(of: element)) t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
                 continue
             }
             if enclosing {
