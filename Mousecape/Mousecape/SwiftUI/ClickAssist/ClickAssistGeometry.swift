@@ -198,6 +198,15 @@ enum GeometryPolicy {
     /// candidate's own ancestor (measured: x.com's pill sits 15 hops below
     /// Brave's AXWebArea; headroom for deeper SPA trees).
     static let occlusionAncestorDepth = 40
+    /// Centre re-asks after the interior probes miss (Chromium answers from
+    /// its last hover hit-test; the probes' async replies land meanwhile).
+    /// Measured on x.com's pill: the immediate re-ask hit 18/19, after one
+    /// 30 ms wait 19/19.
+    static let hitCacheSettleAttempts = 2
+    /// Wait (s) between centre re-asks: about one display frame.
+    static let hitCacheSettleWait: TimeInterval = 0.016
+    /// Wall-clock cap (s) on the re-asks plus the ownership walk.
+    static let hitCacheSettleBudget: CFTimeInterval = 0.03
 
     static func occlusionProbePoints(in rect: CGRect) -> [CGPoint] {
         occlusionProbeFractions.map {
@@ -215,10 +224,17 @@ enum GeometryPolicy {
     /// An AX ANCESTOR of the candidate can never occlude it: when Brave answers
     /// the whole AXWebArea for x.com's pill, the renderer simply failed to
     /// descend, so enclosing frames are admitted when they are ancestors.
+    /// A probe that answers the candidate's OWN element (or a descendant of
+    /// it) is identity proof the candidate is the top surface there: a real
+    /// cover answers itself, never the control it covers. Brave on x.com
+    /// answers the tweet card's AXGroup (encloses, not an ancestor, may carry
+    /// AXPress) at the "posted" pill's centre while an interior probe returns
+    /// the pill itself — that proof outranks the centre answer's shape/role.
     static func admitsOcclusionProbe(candidate: CGRect, centreHit: CGRect,
                                      centreHitActionable: Bool,
-                                     centreHitIsAncestor: Bool = false) -> Bool {
-        if centreHitIsAncestor { return true }
+                                     centreHitIsAncestor: Bool = false,
+                                     probeHitOwnedByCandidate: Bool = false) -> Bool {
+        if centreHitIsAncestor || probeHitOwnedByCandidate { return true }
         return !centreHitActionable && !centreHit.contains(candidate)
     }
 
