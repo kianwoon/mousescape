@@ -472,7 +472,7 @@ final class LegitimacyPolicy: @unchecked Sendable {
             if viaInertLeaf, !sameFrame(candidate, hit), !CFEqual(element, candidateElement),
                !isAncestor(candidateElement, of: element, deadline: deadline) {
                 diagnostic("VERDICT_REJECT probe=inert-leaf-not-own at=\(point) role=\(role(of: element)) t=\(Int((CACurrentMediaTime() - start) * 1000))ms")
-                continue
+                return false
             }
             if enclosing {
                 // Ownership first: the probe hit is the candidate or a few hops

@@ -84,16 +84,16 @@ final class ClickAssistCoreTests: XCTestCase {
         // cover: admitted. An enclosing inert GROUP (a modal layer) is not, and
         // actionable enclosing text never is.
         let wideText = CGRect(x: 5340, y: 606, width: 474, height: 150)
-        let livePill = CGRect(x: 5467, y: 620, width: 180, height: 38)
+        let textPill = CGRect(x: 5467, y: 620, width: 180, height: 38)
         XCTAssertTrue(GeometryPolicy.inertLeafRoles.contains("AXStaticText"))
         XCTAssertFalse(GeometryPolicy.inertLeafRoles.contains("AXGroup"))
-        XCTAssertTrue(GeometryPolicy.admitsOcclusionProbe(candidate: livePill, centreHit: wideText,
+        XCTAssertTrue(GeometryPolicy.admitsOcclusionProbe(candidate: textPill, centreHit: wideText,
                                                           centreHitActionable: false,
                                                           centreHitIsInertLeaf: true))
-        XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: livePill, centreHit: wideText,
+        XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: textPill, centreHit: wideText,
                                                            centreHitActionable: false,
                                                            centreHitIsInertLeaf: false))
-        XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: livePill, centreHit: wideText,
+        XCTAssertFalse(GeometryPolicy.admitsOcclusionProbe(candidate: textPill, centreHit: wideText,
                                                            centreHitActionable: true,
                                                            centreHitIsInertLeaf: true))
 
