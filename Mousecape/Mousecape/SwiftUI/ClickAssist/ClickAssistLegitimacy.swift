@@ -154,21 +154,21 @@ final class LegitimacyPolicy: @unchecked Sendable {
         // OpenCode's tab label / disclosure-button text extends beyond the AX bounds.
         // Prove direct ownership by AX identity, rather than broadening geometry
         // acceptance to unrelated text, enclosing groups, or covered controls.
+        // The label may sit under wrapper groups (ChatGPT sidebar rows:
+        // AXStaticText → AXGroup → AXButton), so walk the ancestry rather than
+        // requiring the direct parent. isOwned also accepts a fresh Chromium
+        // proxy of the candidate's role whose live frame is the candidate's own.
         if candidateRole == "AXLink" || candidateRole == "AXButton", role(of: element) == "AXStaticText",
-           let parent = attr(element, kAXParentAttribute),
            let liveFrame = axFrame(candidateElement),
-           // Chromium may hand back a fresh proxy for the same parent per query,
-           // so identity alone is brittle: also accept a parent of the candidate's
-           // role whose live frame is the candidate's own.
            GeometryPolicy.confirmsLinkTextHit(candidateRole: candidateRole,
                hitRole: role(of: element),
                enabled: (attr(candidateElement, kAXEnabledAttribute) as? Bool) != false
                    && (attr(candidateElement, "AXHidden") as? Bool) != true,
                frameMatches: sameFrame(candidate, liveFrame),
-               hitParentIsCandidate: CFEqual(parent, candidateElement)
-                   || (role(of: parent as! AXUIElement) == candidateRole
-                       && axFrame(parent as! AXUIElement).map { sameFrame($0, liveFrame) } == true),
+               hitOwnedByCandidate: isOwned(element, by: candidateElement, candidateRole: candidateRole,
+                   deadline: CACurrentMediaTime() + GeometryPolicy.textOwnershipBudget),
                destinationInsideCandidate: liveFrame.contains(destination)) {
+            diagnostic("LEGITIMACY_TEXT_OWNED confirmed role=\(candidateRole) hit=\(hitFrame) candidate=\(candidate)")
             return .confirmed
         }
         // Browser chrome can answer an inner close button with its parent tab.
@@ -454,11 +454,26 @@ final class LegitimacyPolicy: @unchecked Sendable {
         /// nil = this point missed; true/false = final verdict.
         func probe(_ point: CGPoint, deadline: CFTimeInterval) -> Bool? {
             var probed: AXUIElement?
+            // A truncated row label overflows its own row; it is admitted only
+            // with ancestry proof (checked inside the guard, so the later
+            // non-enclosing confirm never becomes frame-only).
+            func ownedOverflowLeaf(_ element: AXUIElement, _ hit: CGRect) -> Bool {
+                let leafRole = role(of: element)
+                guard GeometryPolicy.inertLeafRoles.contains(leafRole) else { return false }
+                let owned = isOwned(element, by: candidateElement, candidateRole: candidateRole,
+                                    deadline: deadline)
+                if !owned {
+                    diagnostic("VERDICT_REJECT probe=overflow-text-not-owned at=\(point) role=\(leafRole) frame=\(hit)")
+                }
+                return GeometryPolicy.admitsOwnedOverflowLeaf(hitRole: leafRole,
+                    hitCoversPoint: hit.contains(point), ownedByCandidate: owned)
+            }
             guard AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y),
                                                    &probed) == .success,
                   let element = probed, let hit = axFrame(element), hit.contains(point),
                   (attr(element, kAXEnabledAttribute) as? Bool) != false,
-                  sameFrame(candidate, hit) || candidate.contains(hit) else {
+                  sameFrame(candidate, hit) || candidate.contains(hit)
+                      || ownedOverflowLeaf(element, hit) else {
                 // Reuse the answer already in hand: a second hit-test per miss
                 // spent the 15 ms budget before the ownership walk could run.
                 let miss = probed

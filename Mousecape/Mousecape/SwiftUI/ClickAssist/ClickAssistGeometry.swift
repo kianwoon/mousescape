@@ -154,10 +154,25 @@ enum GeometryPolicy {
     /// Only the actual text child can vouch for that live control, at an inside point.
     static func confirmsLinkTextHit(candidateRole: String, hitRole: String,
                                      enabled: Bool, frameMatches: Bool,
-                                     hitParentIsCandidate: Bool,
+                                     hitOwnedByCandidate: Bool,
                                      destinationInsideCandidate: Bool) -> Bool {
         (candidateRole == "AXLink" || candidateRole == "AXButton") && hitRole == "AXStaticText" && enabled
-            && frameMatches && hitParentIsCandidate && destinationInsideCandidate
+            && frameMatches && hitOwnedByCandidate && destinationInsideCandidate
+    }
+
+    /// Wall-clock cap (s) on the label→candidate ancestor walk in the text rule.
+    /// ChatGPT/Codex sidebar rows nest the label in a wrapper group
+    /// (AXStaticText → AXGroup → AXButton): two hops, ~1 ms.
+    static let textOwnershipBudget: CFTimeInterval = 0.01
+
+    /// Interior probe: a truncated label reports its UNCLIPPED width, so it
+    /// overflows its own row (ChatGPT sidebar: text 3457..3655 in a button
+    /// 3425..3647). Geometry containment then fails for the row's own text.
+    /// Admit such an inert leaf only when it covers the probed point and AX
+    /// ancestry proves the candidate owns it — never on frame alone.
+    static func admitsOwnedOverflowLeaf(hitRole: String, hitCoversPoint: Bool,
+                                        ownedByCandidate: Bool) -> Bool {
+        inertLeafRoles.contains(hitRole) && hitCoversPoint && ownedByCandidate
     }
 
     /// Brave can return a separate group representing the entire tab strip.

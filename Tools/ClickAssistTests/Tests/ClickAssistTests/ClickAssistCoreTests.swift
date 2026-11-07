@@ -142,7 +142,7 @@ final class ClickAssistCoreTests: XCTestCase {
                       enabled: Bool = true, frame: Bool = true,
                       parent: Bool = true, inside: Bool = true) -> Bool {
             GeometryPolicy.confirmsLinkTextHit(candidateRole: role, hitRole: hit,
-                enabled: enabled, frameMatches: frame, hitParentIsCandidate: parent,
+                enabled: enabled, frameMatches: frame, hitOwnedByCandidate: parent,
                 destinationInsideCandidate: inside)
         }
         XCTAssertTrue(confirms())
@@ -158,6 +158,23 @@ final class ClickAssistCoreTests: XCTestCase {
         XCTAssertFalse(confirms(role: "AXSlider"))
         XCTAssertFalse(confirms(role: "AXSelectableRow"))
         XCTAssertFalse(confirms(role: "AXRadioButton"))
+    }
+
+    /// ChatGPT/Codex sidebar: a truncated row label reports its unclipped width
+    /// (text 3457..3655 in a 3425..3647 button), nested label → AXGroup → AXButton.
+    func testOverflowingRowLabelNeedsOwnershipProof() {
+        XCTAssertTrue(GeometryPolicy.admitsOwnedOverflowLeaf(hitRole: "AXStaticText",
+            hitCoversPoint: true, ownedByCandidate: true))
+        XCTAssertTrue(GeometryPolicy.admitsOwnedOverflowLeaf(hitRole: "AXImage",
+            hitCoversPoint: true, ownedByCandidate: true))
+        XCTAssertFalse(GeometryPolicy.admitsOwnedOverflowLeaf(hitRole: "AXStaticText",
+            hitCoversPoint: true, ownedByCandidate: false), "Unrelated overflowing text never confirms")
+        XCTAssertFalse(GeometryPolicy.admitsOwnedOverflowLeaf(hitRole: "AXStaticText",
+            hitCoversPoint: false, ownedByCandidate: true))
+        XCTAssertFalse(GeometryPolicy.admitsOwnedOverflowLeaf(hitRole: "AXGroup",
+            hitCoversPoint: true, ownedByCandidate: true), "A group is a possible cover, not inert text")
+        XCTAssertFalse(GeometryPolicy.admitsOwnedOverflowLeaf(hitRole: "AXButton",
+            hitCoversPoint: true, ownedByCandidate: true))
     }
 
     func testTabCloseCanBeConfirmedByItsActualChromeAncestor() {
