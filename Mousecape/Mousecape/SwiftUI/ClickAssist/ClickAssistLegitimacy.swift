@@ -497,7 +497,7 @@ enum NativeListActionDelivery {
                 if AXUIElementIsAttributeSettable(node, kAXSelectedAttribute as CFString, &settable) == .success,
                    settable.boolValue { selectableRow = true }
             }
-            nativeList = nativeList || nodeRole == "AXList" || nodeRole == "AXOutline"
+            nativeList = nativeList || GeometryPolicy.nativeListRoles.contains(nodeRole)
             if nodeRole == "AXWindow" { return selectableRow && nativeList ? action : nil }
             guard let parent = attr(node, kAXParentAttribute), CFGetTypeID(parent) == AXUIElementGetTypeID() else { return nil }
             current = (parent as! AXUIElement)
@@ -519,7 +519,7 @@ enum NativeListActionDelivery {
                 _ = AXUIElementCopyAttributeValue(node, kAXRoleAttribute as CFString, &role)
                 let name = role as? String ?? ""
                 if name == "AXWebArea" || name == "AXWindow" { break }
-                if name == "AXList" || name == "AXOutline" {
+                if GeometryPolicy.nativeListRoles.contains(name) {
                     var settable = DarwinBoolean(false)
                     var rows: CFTypeRef?
                     if AXUIElementIsAttributeSettable(node, kAXSelectedRowsAttribute as CFString, &settable) == .success,

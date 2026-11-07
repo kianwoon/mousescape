@@ -1584,7 +1584,7 @@ final class AccessibilityResolver: @unchecked Sendable {
                 for _ in 0..<24 {
                     guard let current = node else { break }
                     let ancestorRole = stringAttr(current, kAXRoleAttribute) ?? ""
-                    inList = inList || ancestorRole == "AXList" || ancestorRole == "AXOutline"
+                    inList = inList || GeometryPolicy.nativeListRoles.contains(ancestorRole)
                     inWeb = inWeb || ancestorRole == "AXWebArea"
                     if inWeb || ancestorRole == "AXWindow" { break }
                     guard let rawParent = attr(current, kAXParentAttribute),

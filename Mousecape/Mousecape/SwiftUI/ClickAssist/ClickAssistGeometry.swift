@@ -350,6 +350,9 @@ enum GeometryPolicy {
     static let wideThinMaxHeight: CGFloat = 6
     // Row 7 — row-like containers.
     static let rowRoles: Set<String> = ["AXCell", "AXRow", "AXListItem"]
+    /// Native AppKit containers whose rows select on click: outline/list sidebars
+    /// and view-based NSTableView sidebars (e.g. TinkerTool).
+    static let nativeListRoles: Set<String> = ["AXList", "AXOutline", "AXTable"]
     static let rowMaxHeight: CGFloat = 200
     static let rowMaxArea: CGFloat = 120_000
     // Viewport gate — rows scrolled under a scroll area's edge. Scrolling clips
