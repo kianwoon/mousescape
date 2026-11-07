@@ -421,6 +421,9 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         // Activated by this delivery: give the page time to start accepting input
         // and tell it where the pointer is before the press, otherwise an
         // Electron button logs delivered=1 and never reacts.
+        // Where the user's pointer really is: the synthetic move/click below
+        // drags it to the target; put it back afterwards.
+        let pointerBefore = CGEvent(source: nil)?.location
         var settleMs = 0
         if !wasActive {
             // The settle must run in full: capping it by the request deadline cut a
@@ -455,6 +458,15 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
             // mouse-button state/tracking. Direct-to-PID posting bypasses that
             // state and can focus a control without completing its action.
             event.post(tap: .cghidEventTap)
+        }
+        if let home = pointerBefore, home != click.point,
+           let moveSource = CGEventSource(stateID: .hidSystemState),
+           let back = CGEvent(mouseEventSource: moveSource, mouseType: .mouseMoved,
+                              mouseCursorPosition: home, mouseButton: .left) {
+            back.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
+            back.flags = []
+            back.post(tap: .cghidEventTap)
+            svcLog("BACKGROUND_CLICK_POINTER_RESTORED request=\(request.requestID) home=\(home)")
         }
         return (true, "mouse-pair-once")
     }
