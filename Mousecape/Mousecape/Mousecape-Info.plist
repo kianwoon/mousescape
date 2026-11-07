@@ -43,6 +43,33 @@
 	<string>Copyright © 2014-2026 Sdmj76. All rights reserved.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>MCUpdater</key>
+	<dict>
+		<key>APIBaseURL</key>
+		<string>https://api.github.com</string>
+		<key>WebBaseURL</key>
+		<string>https://github.com</string>
+		<key>RepoOwner</key>
+		<string>kianwoon</string>
+		<key>RepoName</key>
+		<string>mousescape</string>
+		<key>AssetNamePattern</key>
+		<string>Mousecape-v{version}.zip</string>
+		<key>VersionPlaceholder</key>
+		<string>{version}</string>
+		<key>ReleasesPageSize</key>
+		<integer>30</integer>
+		<key>RequestTimeoutSeconds</key>
+		<integer>30</integer>
+		<key>HelperBundleRelativePath</key>
+		<string>Contents/Library/LoginItems/MousecapeHelper.app</string>
+		<key>HelperLaunchdLabel</key>
+		<string>com.sdmj76.MousecapeHelper</string>
+		<key>HelperRestartVerifyAttempts</key>
+		<integer>10</integer>
+		<key>APIBaseURLOverrideDefaultsKey</key>
+		<string>MCUpdaterAPIBaseURL</string>
+	</dict>
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>

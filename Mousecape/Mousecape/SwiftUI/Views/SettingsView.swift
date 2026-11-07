@@ -526,41 +526,7 @@ struct AdvancedSettingsView: View {
             }
             #endif
 
-            Section("About") {
-                LabeledContent("Version") {
-                    if let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String,
-                       let build = Bundle.main.infoDictionary?["CFBundleVersion"] as? String {
-                        Text("Mousecape v\(version) (\(build))")
-                    } else {
-                        Text("Mousecape v1.3.1")
-                    }
-                }
-                LabeledContent("System Requirements") {
-                    Text("macOS 15+")
-                }
-                LabeledContent("Original Author") {
-                    Text("\u{00A9} 2014-2025 Alex Zielenski")
-                }
-                LabeledContent("SwiftUI Redesign") {
-                    Text("\u{00A9} 2025 sdmj76")
-                }
-
-                HStack {
-                    Button("Check for Updates") {
-                        checkForUpdates()
-                    }
-                    Button("GitHub") {
-                        if let url = URL(string: "https://github.com/sdmj76/Mousecape-swiftUI") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                    Button("Report Issue") {
-                        if let url = URL(string: "https://github.com/sdmj76/Mousecape-swiftUI/issues") {
-                            NSWorkspace.shared.open(url)
-                        }
-                    }
-                }
-            }
+            AboutSectionView()
         }
         .formStyle(.grouped)
         .scrollContentBackground(.hidden)
@@ -634,13 +600,6 @@ struct AdvancedSettingsView: View {
         }
     }
     #endif
-
-    private func checkForUpdates() {
-        // Open GitHub releases page for manual update checking
-        if let url = URL(string: "https://github.com/sdmj76/Mousecape-swiftUI/releases") {
-            NSWorkspace.shared.open(url)
-        }
-    }
 }
 
 // MARK: - Preview

@@ -7,6 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AB0DA7E050000000000000B1 /* AboutSectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0DA7E050000000000000A1 /* AboutSectionView.swift */; };
+		AB0DA7E040000000000000B1 /* AppUpdater.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0DA7E040000000000000A1 /* AppUpdater.swift */; };
+		AB0DA7E030000000000000B1 /* AppUpdateInstaller.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0DA7E030000000000000A1 /* AppUpdateInstaller.swift */; };
+		AB0DA7E020000000000000B1 /* UpdateConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0DA7E020000000000000A1 /* UpdateConfig.swift */; };
+		AB0DA7E010000000000000B1 /* UpdateRelease.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0DA7E010000000000000A1 /* UpdateRelease.swift */; };
+		AB0DA7E000000000000000B1 /* SemanticVersion.swift in Sources */ = {isa = PBXBuildFile; fileRef = AB0DA7E000000000000000A1 /* SemanticVersion.swift */; };
 		C1B0000000000000000000B1 /* ClickAssistConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A1 /* ClickAssistConfig.swift */; };
 		C1B0000000000000000000B2 /* ClickAssistDecisionCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A2 /* ClickAssistDecisionCore.swift */; };
 		C1B0000000000000000000B3 /* ClickAssistGeometry.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1A0000000000000000000A8 /* ClickAssistGeometry.swift */; };
@@ -199,6 +205,12 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		AB0DA7E050000000000000A1 /* AboutSectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AboutSectionView.swift; sourceTree = "<group>"; };
+		AB0DA7E040000000000000A1 /* AppUpdater.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdater.swift; sourceTree = "<group>"; };
+		AB0DA7E030000000000000A1 /* AppUpdateInstaller.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppUpdateInstaller.swift; sourceTree = "<group>"; };
+		AB0DA7E020000000000000A1 /* UpdateConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateConfig.swift; sourceTree = "<group>"; };
+		AB0DA7E010000000000000A1 /* UpdateRelease.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateRelease.swift; sourceTree = "<group>"; };
+		AB0DA7E000000000000000A1 /* SemanticVersion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SemanticVersion.swift; sourceTree = "<group>"; };
 		F1A0000000000000000000A1 /* ClickAssistResolver.xpc */ = {isa = PBXFileReference; explicitFileType = wrapper.xpc-service; includeInIndex = 0; path = ClickAssistResolver.xpc; sourceTree = BUILT_PRODUCTS_DIR; };
 		F1A0000000000000000000B1 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistXPC/main.swift; sourceTree = SOURCE_ROOT; };
 		F1A0000000000000000000B2 /* ClickAssistXPCProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClickAssistXPC/ClickAssistXPCProtocol.swift; sourceTree = SOURCE_ROOT; };
@@ -450,6 +462,7 @@
 				DE3661F52EFAAAB600D94521 /* MainView.swift */,
 				DE3661F62EFAAAB600D94521 /* MousecapeCommands.swift */,
 				DE3661F72EFAAAB600D94521 /* SettingsView.swift */,
+				AB0DA7E050000000000000A1 /* AboutSectionView.swift */,
 				57713764A4D5CF5750F095D3 /* ToastNotificationView.swift */,
 			);
 			path = Views;
@@ -472,6 +485,11 @@
 			isa = PBXGroup;
 			children = (
 				DE27927C2F61D93200CCEBD3 /* UserPreferences.swift */,
+				AB0DA7E040000000000000A1 /* AppUpdater.swift */,
+				AB0DA7E030000000000000A1 /* AppUpdateInstaller.swift */,
+				AB0DA7E020000000000000A1 /* UpdateConfig.swift */,
+				AB0DA7E010000000000000A1 /* UpdateRelease.swift */,
+				AB0DA7E000000000000000A1 /* SemanticVersion.swift */,
 				DEAB0D632F39ADB000DB9EB0 /* CursorImageScaler.swift */,
 				DEBC96022F1657A4004E6C07 /* DebugLogger.swift */,
 				DE654C412F0A6DB40025E5A0 /* WindowsINFParser.swift */,
@@ -871,7 +889,13 @@
 				DE3662032EFAAAB600D94521 /* GlassEffectContainer.swift in Sources */,
 				DE3662042EFAAAB600D94521 /* MousecapeCommands.swift in Sources */,
 				DE27927D2F61D93200CCEBD3 /* UserPreferences.swift in Sources */,
+				AB0DA7E040000000000000B1 /* AppUpdater.swift in Sources */,
+				AB0DA7E030000000000000B1 /* AppUpdateInstaller.swift in Sources */,
+				AB0DA7E020000000000000B1 /* UpdateConfig.swift in Sources */,
+				AB0DA7E010000000000000B1 /* UpdateRelease.swift in Sources */,
+				AB0DA7E000000000000000B1 /* SemanticVersion.swift in Sources */,
 				DE3662052EFAAAB600D94521 /* SettingsView.swift in Sources */,
+				AB0DA7E050000000000000B1 /* AboutSectionView.swift in Sources */,
 				DE3662062EFAAAB600D94521 /* AnimatingCursorView.swift in Sources */,
 				DE7A51012FBB640000A9B100 /* HotspotZoomInspectorView.swift in Sources */,
 				FCD9CBC13121398042822DDE /* ToastNotificationView.swift in Sources */,
@@ -962,7 +986,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.4.1;
+				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sdmj76.ClickAssistResolver;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -986,7 +1010,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.4.1;
+				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sdmj76.ClickAssistResolver;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
@@ -1031,7 +1055,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.4.1;
+				MARKETING_VERSION = 1.6.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sdmj76.MousecapeHelper;
@@ -1081,7 +1105,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MACOSX_DEPLOYMENT_TARGET = 15.0;
-				MARKETING_VERSION = 1.4.1;
+				MARKETING_VERSION = 1.6.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sdmj76.MousecapeHelper;
@@ -1235,7 +1259,7 @@
 					"$(LD_RUNPATH_SEARCH_PATHS_$(IS_MACCATALYST))",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.1;
+				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sdmj76.Mousecape;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
@@ -1270,7 +1294,7 @@
 					"$(LD_RUNPATH_SEARCH_PATHS_$(IS_MACCATALYST))",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.4.1;
+				MARKETING_VERSION = 1.6.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sdmj76.Mousecape;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				PROVISIONING_PROFILE_SPECIFIER = "";
