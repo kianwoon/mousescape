@@ -599,7 +599,12 @@ enum BackgroundClickPolicy {
     static let postActivationSettle: TimeInterval = 0.7
     /// How long the ring stays filled after a captured click: the settle plus
     /// time for the app to react, so the acknowledgement covers the whole wait.
-    static let clickAckDuration: TimeInterval = postActivationSettle + 0.3
+    static let clickAckDuration: TimeInterval = 0.4
+    /// Settle for NATIVE (non-web) controls after activation. The delivery
+    /// already waits for proven frontmost + focused window + hit-test, and
+    /// native AppKit controls accept input at once; only Chromium/Electron web
+    /// content needs `postActivationSettle`.
+    static let nativePostActivationSettle: TimeInterval = 0
     /// Optional tuning override (milliseconds) for the post-activation settle,
     /// read from the app preferences domain at each delivery. Absent = default.
     static let settleOverrideDomain = "com.sdmj76.Mousecape"

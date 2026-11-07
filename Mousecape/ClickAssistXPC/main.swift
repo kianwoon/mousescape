@@ -426,7 +426,9 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
             // The settle must run in full: capping it by the request deadline cut a
             // 500 ms setting to ~340 ms, which the approval card still ignored.
             let settle = BackgroundClickPolicy.settleOverrideSeconds()
-                ?? BackgroundClickPolicy.postActivationSettle
+                ?? (isInWebArea(element, attribute: attribute)
+                    ? BackgroundClickPolicy.postActivationSettle
+                    : BackgroundClickPolicy.nativePostActivationSettle)
             if settle > 0 { Thread.sleep(forTimeInterval: settle) }
             settleMs = Int(settle * 1000)
             if let moveSource = CGEventSource(stateID: .hidSystemState),
