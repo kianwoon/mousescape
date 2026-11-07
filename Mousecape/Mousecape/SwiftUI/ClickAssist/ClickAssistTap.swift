@@ -59,8 +59,12 @@ final class AssistTap: @unchecked Sendable {
         let candidate: DecisionCore.Candidate
         let pid: pid_t
         let point: CGPoint
+        /// `point` translated into the raw event space (see BackgroundClickWire).
+        let postPoint: CGPoint
     }
     private var pendingBackgroundClick: PendingBackgroundClick?
+    /// Read once: the callback must not touch the environment per event.
+    private let aimMaxDivergence = ClickAimPolicy.maxDivergence()
     private var focusObserver: NSObjectProtocol?
     private var focusLock = os_unfair_lock_s()
     private var foregroundPID: pid_t = 0
@@ -94,7 +98,8 @@ final class AssistTap: @unchecked Sendable {
         guard activationSink != nil,
               BackgroundClickPolicy.eligible(targetPID: res.pid, foregroundPID: foreground,
                 candidate: candidate, generation: res.generation, point: destination, now: now,
-                nativeTolerance: tolerance, targetWindowFocused: res.pointerWindowFocused),
+                nativeTolerance: tolerance, targetWindowFocused: res.pointerWindowFocused,
+                redirected: destination != original),
               let down = event.copy() else {
             // A background down that falls through here gets only native
             // activation (the "needs two clicks" symptom); record why.
@@ -107,9 +112,18 @@ final class AssistTap: @unchecked Sendable {
             }
             return false
         }
+        // `original` is the aim (AX-space) point; the event's own location is the
+        // same physical position in the raw event space. Carry that offset so the
+        // posted pair lands where the ring shows.
+        let raw = event.location
+        let postPoint = CGPoint(x: destination.x + (raw.x - original.x),
+                                y: destination.y + (raw.y - original.y))
         pendingBackgroundClick = PendingBackgroundClick(down: down, candidate: candidate,
-            pid: res.pid, point: destination)
-        log("BACKGROUND_CLICK_CAPTURED target=\(candidate.key) pid=\(res.pid) winFocused=\(res.pointerWindowFocused ? 1 : 0) original=consumed")
+            pid: res.pid, point: destination, postPoint: postPoint)
+        log(String(format: "BACKGROUND_CLICK_CAPTURED target=%@ role=%@ pid=%d fgPID=%d redirected=%d winFocused=%d point=(%.1f,%.1f) post=(%.1f,%.1f) original=consumed",
+                   candidate.key as NSString, candidate.role as NSString, res.pid, foreground ?? -1,
+                   destination != original ? 1 : 0, res.pointerWindowFocused ? 1 : 0,
+                   destination.x, destination.y, postPoint.x, postPoint.y))
         onBackgroundClickCaptured?()
         return true
     }
@@ -525,11 +539,12 @@ final class AssistTap: @unchecked Sendable {
                 if assistEnabled, latest.valid, latest.pid == pending.pid,
                    let target = latest.candidates.first(where: { $0.key == pending.candidate.key }),
                    FrameContinuity.delta(target.rect, pending.candidate.rect) <= 1,
-                   // Judge the press location: up may sit up to the tremor
-                   // epsilon away, past the edge of a small button.
-                   (target.rect.contains(pending.down.location)
+                   // Judge the point the click will land on (pending.point): for a
+                   // blue redirect the raw down sits OUTSIDE the target by design,
+                   // so judging it dropped every blue click to native routing.
+                   (target.rect.contains(pending.point)
                     || (GeometryPolicy.usesNativeRowAction(target.role)
-                        && DecisionCore.boundaryDistance(pending.down.location, target.rect) <= tolerance)),
+                        && DecisionCore.boundaryDistance(pending.point, target.rect) <= tolerance)),
                    target.verdict == .confirmed,
                    ClickAssistEvidence.activationState(evidenceGeneration: target.evidenceGeneration,
                     currentGeneration: latest.generation,
@@ -537,7 +552,9 @@ final class AssistTap: @unchecked Sendable {
                     var request = AXPressRequest(targetKey: target.key, pid: latest.pid,
                         generation: latest.generation, issuedAt: CACurrentMediaTime(), expiryMs: 400)
                     request.backgroundClick = BackgroundClickWire(x: pending.point.x, y: pending.point.y,
-                                                                  rect: target.rect)
+                                                                  rect: target.rect,
+                                                                  postX: pending.postPoint.x,
+                                                                  postY: pending.postPoint.y)
                     dispatchAXPress(request: request)
                     log("BACKGROUND_CLICK_QUEUED target=\(target.key) request=\(request.requestID) original=consumed")
                     return nil
@@ -594,6 +611,14 @@ final class AssistTap: @unchecked Sendable {
         if isDown {
             latched = nil
             unlatchedForDrag = false
+            // Aim at the point the ring decided from (live pointer), not the
+            // event's own location, which sits in a zoom-scaled space.
+            let liveRead = CGEvent(source: nil)?.location
+            let aimed = ClickAimPolicy.aim(event: original, live: liveRead, maxDivergence: aimMaxDivergence)
+            let aim = aimed.point
+            log(String(format: "DOWN_AIM event=(%.1f,%.1f) live=(%.1f,%.1f) aim=(%.1f,%.1f) src=%@ reason=%@ max=%.0f",
+                       original.x, original.y, liveRead?.x ?? .nan, liveRead?.y ?? .nan,
+                       aim.x, aim.y, aimed.source.rawValue, aimed.reason ?? "-", aimMaxDivergence))
 
             guard res.valid else {
                 // An AXPress token never outlives its gesture; a new down already
@@ -603,9 +628,9 @@ final class AssistTap: @unchecked Sendable {
                 return Unmanaged.passUnretained(event)
             }
 
-            switch DecisionCore.route(point: original, candidates: res.candidates, tolerance: tolerance) {
+            switch DecisionCore.route(point: aim, candidates: res.candidates, tolerance: tolerance) {
             case .directHit(let hit, let others):
-                if captureBackgroundClick(hit, res: res, original: original, destination: original, event: event) {
+                if captureBackgroundClick(hit, res: res, original: aim, destination: aim, event: event) {
                     return nil
                 }
                 // Self delivery: when the hit element is ITSELF a chrome-gated
@@ -625,7 +650,7 @@ final class AssistTap: @unchecked Sendable {
                                           extra: "self=1 ") {
                     return nil
                 }
-                let hitPlan = resolveDelivery(for: hit, destination: original, res: res,
+                let hitPlan = resolveDelivery(for: hit, destination: aim, res: res,
                                               allowsSynthetic: false)
                 var extra = "element=\(hit.key) boundary=0.0 action=passthrough legitimacy=\(hitPlan.verdict.rawValue)"
                 if let other = others.first { extra += " other=\(other.key) other_dist=\(String(format: "%.1f", other.dist))" }
@@ -637,7 +662,7 @@ final class AssistTap: @unchecked Sendable {
                 // candidate set is the already-filtered snapshot, so a short list
                 // here means either genuine distance (a) or a filtered-out role (c).
                 // Computed strictly inside this branch — no cost on any other path.
-                let nearest = AssistTap.nearestCandidates(res.candidates, to: original)
+                let nearest = AssistTap.nearestCandidates(res.candidates, to: aim)
                 emit("PASSTHROUGH", type: label, original: original, mutated: nil,
                      reason: "no-candidate-in-radius", res: res, started: started,
                      extra: "tol=\(tolerance) targets=\(res.candidates.count) nearest3=[\(nearest)]")
@@ -655,7 +680,7 @@ final class AssistTap: @unchecked Sendable {
             case .redirect:
                 // Deliver only the shared indicated winner. Unknown/mismatched
                 // evidence never causes a redirect to a farther target.
-                let scored = DecisionCore.displayCandidates(point: original,
+                let scored = DecisionCore.displayCandidates(point: aim,
                                                             candidates: res.candidates,
                                                             tolerance: tolerance, limit: 3)
                 var confirmed: [(DecisionCore.ScoredCandidate, CGPoint, DecisionCore.Snap, DeliveryPlan)] = []
@@ -664,7 +689,7 @@ final class AssistTap: @unchecked Sendable {
                     let snap = DecisionCore.snapMode(for: choice.candidate)
                     let dest = snap == .center
                         ? DecisionCore.centerPoint(into: choice.candidate.rect)
-                        : DecisionCore.clampPoint(original, into: choice.candidate.rect,
+                        : DecisionCore.clampPoint(aim, into: choice.candidate.rect,
                                                   inset: choice.candidate.inset)
                     let plan = resolveDelivery(for: choice.candidate, destination: dest,
                                                res: res, allowsSynthetic: true)
@@ -691,7 +716,7 @@ final class AssistTap: @unchecked Sendable {
                 // Frame evidence is the PUBLISHED cached rect; the resolver checks
                 // movement/continuity on its own queue. Never refresh here.
                 let corrected = winner.1
-                if captureBackgroundClick(best, res: res, original: original, destination: corrected, event: event) {
+                if captureBackgroundClick(best, res: res, original: aim, destination: corrected, event: event) {
                     return nil
                 }
 
@@ -714,8 +739,11 @@ final class AssistTap: @unchecked Sendable {
                     return Unmanaged.passUnretained(event)
                 }
 
-                let delta = CGVector(dx: corrected.x - original.x, dy: corrected.y - original.y)
-                event.location = corrected
+                // `corrected` is in the aim (AX) space; translate the raw event
+                // by the same delta so it stays in the event's own space and the
+                // latched drag/up follow it.
+                let delta = CGVector(dx: corrected.x - aim.x, dy: corrected.y - aim.y)
+                event.location = CGPoint(x: original.x + delta.dx, y: original.y + delta.dy)
                 latched = GestureLatch(delta: delta, target: best.key, snap: snap,
                                        edgeCore: false)
                 latched?.originalDown = original

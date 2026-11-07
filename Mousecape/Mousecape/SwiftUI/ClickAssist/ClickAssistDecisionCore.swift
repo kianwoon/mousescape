@@ -495,6 +495,43 @@ struct GestureLatch: Sendable {
     let edgeCore: Bool
 }
 
+/// Where a mouse-down is aimed. The ring decides from the LIVE pointer
+/// (`CGEvent(source:nil).location`, the AX/global space). Under Accessibility
+/// Zoom (even factor 1.01) the down event's own `location` sits in a scaled
+/// space: measured +62pt at x≈6200. Routing from the event point picked a
+/// different target than the ring showed (blue ring on "Home", click aimed at a
+/// neighbour). The tap therefore aims at the live pointer, guarded so a bogus
+/// live read can never move a click far from where it physically happened.
+enum ClickAimPolicy {
+    /// Max live-vs-event divergence (pt) trusted as the same physical click.
+    /// Zoom offsets grow with distance from the zoom center, so this is generous.
+    static let defaultMaxDivergence: CGFloat = 400
+    static let maxDivergenceEnvKey = "MC_CLICK_ASSIST_MAX_AIM_DIVERGENCE"
+    static func maxDivergence(environment: [String: String] = ProcessInfo.processInfo.environment) -> CGFloat {
+        guard let raw = environment[maxDivergenceEnvKey], let v = Double(raw), v.isFinite, v >= 0 else {
+            return defaultMaxDivergence
+        }
+        return CGFloat(v)
+    }
+    enum Source: String, Equatable { case live, event }
+    struct Aim: Equatable {
+        let point: CGPoint
+        let source: Source
+        /// Why live was not used (nil when it was).
+        let reason: String?
+    }
+    static func aim(event: CGPoint, live: CGPoint?, maxDivergence: CGFloat) -> Aim {
+        guard let live else { return Aim(point: event, source: .event, reason: "no-live") }
+        guard live.x.isFinite, live.y.isFinite else {
+            return Aim(point: event, source: .event, reason: "non-finite")
+        }
+        guard hypot(live.x - event.x, live.y - event.y) <= maxDivergence else {
+            return Aim(point: event, source: .event, reason: "divergence")
+        }
+        return Aim(point: live, source: .live, reason: nil)
+    }
+}
+
 /// Published-evidence freshness. Display and activation have DIFFERENT windows:
 /// the ring may keep showing evidence across a slow cycle, but a redirect must
 /// act only on evidence that is still current enough to be safe.
@@ -552,10 +589,21 @@ enum ClickAssistEvidence {
 /// deadline is ABSOLUTE at issue time and never renewed on receipt.
 /// A completed green-ring click, not a request to click an arbitrary point.
 struct BackgroundClickWire: Codable, Equatable, Sendable {
+    /// Click point in the AX/ring space: hit-tests, geometry, legitimacy.
     var x: Double
     var y: Double
     var rect: CGRect
+    /// Where to POST the synthetic mouse pair, in the raw event space. The
+    /// physical click's event location can sit away from the live pointer
+    /// (measured ~62 pt on a zoomed display), so posting at the AX point lands
+    /// off-target. nil (older senders) = post at the AX point.
+    var postX: Double? = nil
+    var postY: Double? = nil
     var point: CGPoint { CGPoint(x: x, y: y) }
+    var postPoint: CGPoint {
+        guard let postX, let postY, postX.isFinite, postY.isFinite else { return point }
+        return CGPoint(x: postX, y: postY)
+    }
 }
 
 /// Ring pause while the user drags (window resize/move, text selection): the
@@ -617,7 +665,9 @@ enum BackgroundClickPolicy {
     /// success and the page drops the click. A press that cannot be legitimised
     /// pre-activation, or fails, falls through to the settle + mouse-pair path. Set MCClickAssistWebAXPress=0 to disable.
     static let webAXPressKey = "MCClickAssistWebAXPress"
-    static let webAXPressRoles: Set<String> = ["AXButton"]
+    /// Web roles pressed through Accessibility instead of a posted mouse pair.
+    /// AXPress acts on the element, so the user's cursor never moves.
+    static let webAXPressRoles: Set<String> = ["AXButton", "AXLink"]
     static func webAXPressEnabled(role: String) -> Bool {
         guard webAXPressRoles.contains(role) else { return false }
         let raw = CFPreferencesCopyAppValue(webAXPressKey as CFString,
@@ -637,7 +687,8 @@ enum BackgroundClickPolicy {
     static func eligible(targetPID: Int32, foregroundPID: Int32?, candidate: DecisionCore.Candidate,
                          generation: UInt64, point: CGPoint, now: Double,
                          nativeTolerance: CGFloat = 0,
-                         targetWindowFocused: Bool = true) -> Bool {
+                         targetWindowFocused: Bool = true,
+                         redirected: Bool = false) -> Bool {
         // An open menu already owns native mouse tracking, even when its
         // application's PID differs from the foreground PID. It may have no
         // AXWindow at all; consuming it for window activation loses the click.
@@ -645,7 +696,14 @@ enum BackgroundClickPolicy {
               let foregroundPID, foregroundPID > 0, targetPID > 0,
               // A frontmost app's unfocused standard window behaves like a
               // background app: native routing spends the click on focus.
+              // A redirected (blue ring) click is re-aimed by the tap, and a
+              // synthetic in-place mutation is ignored by web content even in the
+              // frontmost app, so it takes the captured-delivery path too.
+              // Track controls (a video seek bar) keep the in-place redirect in
+              // a focused frontmost app: it preserves the real press/drag gesture,
+              // which an instant posted pair does not.
               (foregroundPID != targetPID || !targetWindowFocused
+                || (redirected && !GeometryPolicy.trackRoles.contains(candidate.role))
                 || GeometryPolicy.usesNativeRowAction(candidate.role)),
               candidate.verdict == .confirmed,
               (candidate.rect.contains(point)

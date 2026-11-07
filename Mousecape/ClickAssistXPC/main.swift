@@ -312,7 +312,10 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         // approval-card Submit; pressing first works). Only when the press can
         // be legitimised without activation; otherwise the settle + mouse-pair
         // path below runs unchanged.
-        if !app.isActive, BackgroundClickPolicy.webAXPressEnabled(role: target.role),
+        // Also for an already-active app: the press needs no pointer, so the
+        // cursor does not jump the way the posted mouse pair below makes it.
+        let wasActiveForPress = app.isActive
+        if BackgroundClickPolicy.webAXPressEnabled(role: target.role),
            isInWebArea(element, attribute: attribute),
            (attribute(element, kAXEnabledAttribute) as? Bool) != false,
            (attribute(element, "AXHidden") as? Bool) != true {
@@ -335,7 +338,7 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
                         _ = app.activate(options: [])
                     }
                     _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-                    return (true, "web-axpress-before-activation")
+                    return (true, wasActiveForPress ? "web-axpress-active" : "web-axpress-before-activation")
                 }
             } else {
                 svcLog("BACKGROUND_WEB_AXPRESS_SKIPPED request=\(request.requestID) verdict=\(verdict) fallback=settle-mouse-pair")
@@ -422,6 +425,9 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         // and tell it where the pointer is before the press, otherwise an
         // Electron button logs delivered=1 and never reacts.
         var settleMs = 0
+        // Where the user's pointer is before this delivery moves it (posting
+        // through the HID path warps the real cursor to the click point).
+        var restoreTo = CGEvent(source: nil)?.location
         if !wasActive {
             // The settle must run in full: capping it by the request deadline cut a
             // 500 ms setting to ~340 ms, which the approval card still ignored.
@@ -431,20 +437,21 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
                     : BackgroundClickPolicy.nativePostActivationSettle)
             if settle > 0 { Thread.sleep(forTimeInterval: settle) }
             settleMs = Int(settle * 1000)
+            restoreTo = CGEvent(source: nil)?.location
             if let moveSource = CGEventSource(stateID: .hidSystemState),
                let move = CGEvent(mouseEventSource: moveSource, mouseType: .mouseMoved,
-                                  mouseCursorPosition: click.point, mouseButton: .left) {
+                                  mouseCursorPosition: click.postPoint, mouseButton: .left) {
                 move.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
                 move.flags = []
                 move.post(tap: .cghidEventTap)
             }
-            svcLog("BACKGROUND_CLICK_SETTLE request=\(request.requestID) settleMs=\(settleMs) activatedHere=1")
+            svcLog("BACKGROUND_CLICK_SETTLE request=\(request.requestID) settleMs=\(settleMs) activatedHere=1 post=\(click.postPoint)")
         }
         guard let source = CGEventSource(stateID: .hidSystemState),
               let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
-                                 mouseCursorPosition: click.point, mouseButton: .left),
+                                 mouseCursorPosition: click.postPoint, mouseButton: .left),
               let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
-                               mouseCursorPosition: click.point, mouseButton: .left) else {
+                               mouseCursorPosition: click.postPoint, mouseButton: .left) else {
             return (false, "event-allocation-failed")
         }
         for event in [down, up] {
@@ -456,6 +463,14 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
             // state and can focus a control without completing its action.
             event.post(tap: .cghidEventTap)
         }
+        // Self-check: the live pointer after the post should read ~= point (AX
+        // space). ~= post means the event-space translation has the wrong sign.
+        let after = CGEvent(source: nil)?.location ?? CGPoint(x: Double.nan, y: Double.nan)
+        let restored = Self.restorePointer(to: restoreTo)
+        svcLog(String(format: "BACKGROUND_CLICK_POSTED request=%@ point=(%.1f,%.1f) post=(%.1f,%.1f) liveAfter=(%.1f,%.1f) restoreTo=(%.1f,%.1f) restored=%d",
+                      request.requestID as NSString, click.point.x, click.point.y,
+                      click.postPoint.x, click.postPoint.y, after.x, after.y,
+                      restoreTo?.x ?? .nan, restoreTo?.y ?? .nan, restored ? 1 : 0))
         return (true, "mouse-pair-once")
     }
 
@@ -473,20 +488,39 @@ private final class ClickAssistResolverService: NSObject, ClickAssistXPCProtocol
         guard click.x.isFinite, click.y.isFinite,
               let source = CGEventSource(stateID: .hidSystemState),
               let down = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown,
-                                 mouseCursorPosition: click.point, mouseButton: .left),
+                                 mouseCursorPosition: click.postPoint, mouseButton: .left),
               let up = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp,
-                               mouseCursorPosition: click.point, mouseButton: .left) else {
+                               mouseCursorPosition: click.postPoint, mouseButton: .left) else {
             svcLog("BACKGROUND_CLICK_FALLBACK request=\(request.requestID) reason=\(reason) mode=event-allocation-failed")
             return reply(status: "rejected", reason: reason)
         }
+        let restoreTo = CGEvent(source: nil)?.location
         for event in [down, up] {
             event.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
             event.setIntegerValueField(.mouseEventClickState, value: 1)
             event.flags = []
             event.post(tap: .cghidEventTap)
         }
+        _ = restorePointer(to: restoreTo)
         svcLog("BACKGROUND_CLICK_FALLBACK request=\(request.requestID) reason=\(reason) point=\(click.point) mode=native-pair-once")
         return reply(status: "done", reason: "native-fallback-\(reason)")
+    }
+
+    /// Puts the cursor back where the user left it after a posted click moved
+    /// it. A marked mouseMoved (not CGWarp) so the tap ignores it and there is
+    /// no post-warp movement suppression. Skipped only when unreadable.
+    @discardableResult
+    private static func restorePointer(to point: CGPoint?) -> Bool {
+        // Always post: the pointer read right after posting the pair is stale
+        // (it still shows the old spot), so an "already there" check skipped it.
+        guard let point, point.x.isFinite, point.y.isFinite,
+              let source = CGEventSource(stateID: .hidSystemState),
+              let move = CGEvent(mouseEventSource: source, mouseType: .mouseMoved,
+                                 mouseCursorPosition: point, mouseButton: .left) else { return false }
+        move.setIntegerValueField(.eventSourceUserData, value: BackgroundClickPolicy.eventMarker)
+        move.flags = []
+        move.post(tap: .cghidEventTap)
+        return true
     }
 
     private static func reply(status: String, reason: String) -> Data {

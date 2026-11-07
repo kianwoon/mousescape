@@ -49,6 +49,40 @@ final class ClickAssistBackgroundClickTests: XCTestCase {
         XCTAssertEqual(ActivationGate.admit(request, now: 10.03, currentGeneration: 7,
             targetExists: true, chromeEligible: false, backgroundEligible: true, state: &state), .duplicateTarget)
     }
+    func testPostPointCarriesRawEventSpaceAndOlderSendersFallBack() throws {
+        // Ring/AX point (200,110); the physical click arrived +62,-18 away in raw event space.
+        let click = BackgroundClickWire(x: 200, y: 110, rect: frame, postX: 262, postY: 92)
+        XCTAssertEqual(click.point, CGPoint(x: 200, y: 110))
+        XCTAssertEqual(click.postPoint, CGPoint(x: 262, y: 92))
+        // Geometry still judges the AX point, never the post point.
+        XCTAssertTrue(BackgroundClickPolicy.matches(click, rect: frame))
+        let old = try JSONDecoder().decode(BackgroundClickWire.self,
+            from: Data(#"{"x":200,"y":110,"rect":[[100,100],[240,30]]}"#.utf8))
+        XCTAssertEqual(old.postPoint, CGPoint(x: 200, y: 110))
+        XCTAssertEqual(BackgroundClickWire(x: 200, y: 110, rect: frame, postX: .nan, postY: 92).postPoint,
+                       CGPoint(x: 200, y: 110))
+        let roundTrip = try JSONDecoder().decode(BackgroundClickWire.self,
+            from: JSONEncoder().encode(click))
+        XCTAssertEqual(roundTrip, click)
+    }
+    func testFrontmostRedirectCapturesButSliderKeepsInPlaceGesture() {
+        let fresh = { (role: String, rect: CGRect) in
+            DecisionCore.Candidate(key: role, rect: rect, inset: 2, tier: .firstClass,
+                role: role, label: role, verdict: .confirmed, evidenceGeneration: 7, collectedAt: 10)
+        }
+        let link = fresh("AXLink", frame)
+        let slider = fresh("AXSlider", CGRect(x: 100, y: 100, width: 600, height: 6))
+        func eligible(_ c: DecisionCore.Candidate, _ p: CGPoint, redirected: Bool) -> Bool {
+            BackgroundClickPolicy.eligible(targetPID: 1, foregroundPID: 1, candidate: c, generation: 7,
+                point: p, now: 10.1, targetWindowFocused: true, redirected: redirected)
+        }
+        XCTAssertTrue(eligible(link, CGPoint(x: 200, y: 110), redirected: true))
+        XCTAssertFalse(eligible(link, CGPoint(x: 200, y: 110), redirected: false))
+        XCTAssertFalse(eligible(slider, CGPoint(x: 300, y: 102), redirected: true))
+        // A background slider is still captured (unchanged behavior).
+        XCTAssertTrue(BackgroundClickPolicy.eligible(targetPID: 1, foregroundPID: 2, candidate: slider,
+            generation: 7, point: CGPoint(x: 300, y: 102), now: 10.1, redirected: true))
+    }
     func testExistingChromeRequestWireStillDecodes() throws {
         let data = Data(#"{"requestID":"old","targetKey":"close","pid":1,"generation":7,"issuedAt":10,"deadlineMs":150}"#.utf8)
         XCTAssertNil(try JSONDecoder().decode(ActivationRequestWire.self, from: data).backgroundClick)
@@ -75,6 +109,37 @@ final class ClickAssistBackgroundClickTests: XCTestCase {
         XCTAssertFalse(eligible(foreground: 1, focused: true))
         XCTAssertTrue(eligible(foreground: 2, focused: true))
         XCTAssertTrue(eligible(foreground: 2, focused: false))
+    }
+    func testRedirectedClickInFocusedFrontmostAppTakesCapturedDelivery() {
+        func eligible(redirected: Bool) -> Bool {
+            BackgroundClickPolicy.eligible(targetPID: 1, foregroundPID: 1,
+                candidate: candidate(), generation: 7, point: CGPoint(x: 200, y: 110), now: 10.1,
+                targetWindowFocused: true, redirected: redirected)
+        }
+        XCTAssertTrue(eligible(redirected: true))
+        XCTAssertFalse(eligible(redirected: false))
+        // Redirect never widens containment: the delivered point must be inside.
+        XCTAssertFalse(BackgroundClickPolicy.eligible(targetPID: 1, foregroundPID: 1,
+            candidate: candidate(), generation: 7, point: CGPoint(x: 99, y: 110), now: 10.1,
+            targetWindowFocused: true, redirected: true))
+    }
+    func testClickAimsAtLivePointerTheRingUsed() {
+        // Measured on the user's Brave display under 1.01x zoom.
+        let event = CGPoint(x: 6248.2, y: 297.5)
+        let live = CGPoint(x: 6186.3, y: 315.9)
+        let max = ClickAimPolicy.defaultMaxDivergence
+        XCTAssertEqual(ClickAimPolicy.aim(event: event, live: live, maxDivergence: max),
+                       .init(point: live, source: .live, reason: nil))
+        XCTAssertEqual(ClickAimPolicy.aim(event: event, live: nil, maxDivergence: max).source, .event)
+        XCTAssertEqual(ClickAimPolicy.aim(event: event, live: CGPoint(x: CGFloat.nan, y: 1),
+                                          maxDivergence: max).point, event)
+        let far = ClickAimPolicy.aim(event: event, live: CGPoint(x: event.x + max + 1, y: event.y),
+                                     maxDivergence: max)
+        XCTAssertEqual(far.point, event)
+        XCTAssertEqual(far.reason, "divergence")
+        XCTAssertEqual(ClickAimPolicy.maxDivergence(environment: [:]), max)
+        XCTAssertEqual(ClickAimPolicy.maxDivergence(environment: [ClickAimPolicy.maxDivergenceEnvKey: "120"]), 120)
+        XCTAssertEqual(ClickAimPolicy.maxDivergence(environment: [ClickAimPolicy.maxDivergenceEnvKey: "junk"]), max)
     }
     func testOnlyLiveStandardHitWindowCanReportUnfocused() {
         XCTAssertFalse(GeometryPolicy.pointerWindowFocused(mode: "hit-window",
