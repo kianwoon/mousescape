@@ -210,3 +210,18 @@ working baseline ("it was working before your changes" was the user's correct di
   dropped a redundant per-miss hit-test fell from ~95% to ~22% pill rings).
 - Blank-cursor state is diagnosable: `CGSGetGlobalCursorDataSize` returning **4 bytes** = 1×1
   transparent current-cursor slot (registered images still readable — registration ≠ rendering).
+
+---
+
+## 7. Releases and the self-updater
+
+- Every release zip MUST be signed with the same stable identity as the installed app
+  (`Tools/sign-dev.sh <app>`, identity `GlanceDev`). The updater checks the downloaded bundle
+  against the RUNNING app's designated requirement (`identifier + certificate leaf`);
+  an ad-hoc zip fails with OSStatus -67050.
+- Before uploading: `codesign --verify --deep --strict -R="<installed app DR>" <built app>` must exit 0.
+- Build with `MARKETING_VERSION=<x.y.z>` on the command line; re-download the asset and
+  re-check its signature after upload (GitHub may serve the old file).
+- Before releasing, run `git log main..<branch>` for every branch: a release built from a
+  `main` that lacks merged feature branches silently drops those features.
+- After installing, verify the RUNNING process (not just the file on disk).
